@@ -1,0 +1,7 @@
+type: tiled_camera
+params:
+  default_light: True
+  default_light_shadows: True
+  colors_per_shape: True
+  checkerboard_texture: True
+  backface_culling: True

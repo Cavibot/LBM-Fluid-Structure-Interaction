@@ -1,0 +1,4 @@
+type: contact
+params:
+  sensing_obj_shapes: "*Flap"
+  verbose: true

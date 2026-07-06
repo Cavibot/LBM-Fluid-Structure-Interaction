@@ -1,0 +1,6 @@
+type: contact
+params:
+  sensing_obj_shapes: "*Plate*"
+  counterpart_shapes: ["*Cube*", "*Sphere*"]
+  include_total: False
+  verbose: True
