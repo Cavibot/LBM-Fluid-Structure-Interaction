@@ -90,6 +90,7 @@ BC_PERIODIC: int = 3        # periodic boundary (neighbour wraps to opposite fac
 # ---------------------------------------------------------------------------
 PSI_RHO: int = 0  # ψ(ρ) = ρ (simplest, good for moderate density ratios)
 PSI_EXP: int = 1  # ψ(ρ) = 1 − exp(−ρ / ρ_ref) (Shan-Chen original, better stability)
+PSI_CS: int = 2   # ψ(ρ) = sqrt(2·(P_CS − ρ·c_s²) / (G·c_s²))  (Carnahan-Starling EOS)
 
 # Boundary face indices
 FACE_XMIN: int = 0

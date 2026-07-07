@@ -19,7 +19,7 @@ class LbmState(DomainState):
     """GPU-resident state for a D3Q19 LBM simulation.
 
     Stores 19 distribution functions in a single flat array and exposes
-    cell-centred macroscopic fields (density, velocity, pressure) together
+    cell-centred macroscopic fields (density, velocity) together
     with MAC staggered velocity fields for visualisation and rigid-body
     coupling compatibility.
 
@@ -53,9 +53,6 @@ class LbmState(DomainState):
 
         # ---- Cell-centred macroscopic fields ------------------------------
         self.density: wp.array3d = wp.zeros(
-            (nx, ny, nz), dtype=float, device=self.device
-        )
-        self.pressure: wp.array3d = wp.zeros(
             (nx, ny, nz), dtype=float, device=self.device
         )
         self.velocity_x: wp.array3d = wp.zeros(
@@ -124,7 +121,6 @@ class LbmState(DomainState):
         """Zero all fields and reset solid SDF to a large value."""
         self.f.zero_()
         self.density.zero_()
-        self.pressure.zero_()
         self.velocity_x.zero_()
         self.velocity_y.zero_()
         self.velocity_z.zero_()
@@ -145,7 +141,6 @@ class LbmState(DomainState):
         new_state: LbmState = LbmState(self.model, requires_grad=self.requires_grad)
         wp.copy(new_state.f, self.f)
         wp.copy(new_state.density, self.density)
-        wp.copy(new_state.pressure, self.pressure)
         wp.copy(new_state.velocity_x, self.velocity_x)
         wp.copy(new_state.velocity_y, self.velocity_y)
         wp.copy(new_state.velocity_z, self.velocity_z)

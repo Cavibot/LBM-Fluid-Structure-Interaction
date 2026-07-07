@@ -24,7 +24,6 @@ Kernel summary
   MAC-face velocity interpolation.
 * :func:`initialize_equilibrium_kernel` -- set *f* to equilibrium for given
   (rho0, u0).
-* :func:`compute_pressure_kernel` -- *p = c_s^2 . rho*.
 """
 
 from __future__ import annotations
@@ -387,6 +386,7 @@ def _solid_wall_velocity_dot(
 
 @wp.func
 def _moving_wall_correction(
+    has_moving_walls: int,
     vel_solid_u: wp.array3d(dtype=float),
     vel_solid_v: wp.array3d(dtype=float),
     vel_solid_w: wp.array3d(dtype=float),
@@ -402,6 +402,14 @@ def _moving_wall_correction(
     ny: int,
     nz: int,
 ) -> float:
+    """Moving-wall bounce-back correction (2 w_i rho c_i·u_wall / c_s^2).
+
+    When *has_moving_walls* is 0, all walls are static and the
+    correction is identically zero — short-circuit to avoid the
+    MAC-face velocity lookups.
+    """
+    if has_moving_walls == 0:
+        return 0.0
     wall_dot = _solid_wall_velocity_dot(
         vel_solid_u,
         vel_solid_v,
@@ -433,6 +441,7 @@ def collide_stream_bounceback_kernel(
     f_out: wp.array(dtype=float),
     omega_plus: float,
     omega_minus: float,
+    has_moving_walls: int,
     px: int,
     py: int,
     pz: int,
@@ -496,7 +505,7 @@ def collide_stream_bounceback_kernel(
         f_out[1 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, -1, 0, 0)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 1, 0, 0, 1.0 / 18.0, rho_w, nx, ny, nz
         )
@@ -523,7 +532,7 @@ def collide_stream_bounceback_kernel(
         f_out[2 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, 1, 0, 0)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, -1, 0, 0, 1.0 / 18.0, rho_w, nx, ny, nz
         )
@@ -550,7 +559,7 @@ def collide_stream_bounceback_kernel(
         f_out[3 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, 0, -1, 0)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 0, 1, 0, 1.0 / 18.0, rho_w, nx, ny, nz
         )
@@ -577,7 +586,7 @@ def collide_stream_bounceback_kernel(
         f_out[4 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, 0, 1, 0)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 0, -1, 0, 1.0 / 18.0, rho_w, nx, ny, nz
         )
@@ -604,7 +613,7 @@ def collide_stream_bounceback_kernel(
         f_out[5 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, 0, 0, -1)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 0, 0, 1, 1.0 / 18.0, rho_w, nx, ny, nz
         )
@@ -631,7 +640,7 @@ def collide_stream_bounceback_kernel(
         f_out[6 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, 0, 0, 1)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 0, 0, -1, 1.0 / 18.0, rho_w, nx, ny, nz
         )
@@ -664,7 +673,7 @@ def collide_stream_bounceback_kernel(
         f_out[7 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, -1, -1, 0)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 1, 1, 0, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -697,7 +706,7 @@ def collide_stream_bounceback_kernel(
         f_out[8 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, 1, -1, 0)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, -1, 1, 0, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -730,7 +739,7 @@ def collide_stream_bounceback_kernel(
         f_out[9 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, -1, 1, 0)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 1, -1, 0, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -763,7 +772,7 @@ def collide_stream_bounceback_kernel(
         f_out[10 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, 1, 1, 0)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, -1, -1, 0, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -796,7 +805,7 @@ def collide_stream_bounceback_kernel(
         f_out[11 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, -1, 0, -1)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 1, 0, 1, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -829,7 +838,7 @@ def collide_stream_bounceback_kernel(
         f_out[12 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, 1, 0, -1)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, -1, 0, 1, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -862,7 +871,7 @@ def collide_stream_bounceback_kernel(
         f_out[13 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, -1, 0, 1)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 1, 0, -1, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -895,7 +904,7 @@ def collide_stream_bounceback_kernel(
         f_out[14 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, 1, 0, 1)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, -1, 0, -1, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -928,7 +937,7 @@ def collide_stream_bounceback_kernel(
         f_out[15 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, 0, -1, -1)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 0, 1, 1, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -961,7 +970,7 @@ def collide_stream_bounceback_kernel(
         f_out[16 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, 0, 1, -1)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 0, -1, 1, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -994,7 +1003,7 @@ def collide_stream_bounceback_kernel(
         f_out[17 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, 0, -1, 1)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 0, 1, -1, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -1027,7 +1036,7 @@ def collide_stream_bounceback_kernel(
         f_out[18 * stride + idx] = f_opp - omega_minus * (
             f_opp
             - _f_eq(1.0 / 36.0, rho_w, vx, vy, vz, 0, 1, 1)
-        ) + _moving_wall_correction(
+        ) + _moving_wall_correction(has_moving_walls,
             vel_solid_u, vel_solid_v, vel_solid_w,
             i, j, k, 0, -1, -1, 1.0 / 36.0, rho_w, nx, ny, nz
         )
@@ -1107,14 +1116,25 @@ def apply_guo_force_kernel(
 
 
 @wp.func
-def _psi(rho: float, psi_type: int, ref_rho: float) -> float:
+def _psi(rho: float, psi_type: int, ref_rho: float, G: float, cs_a: float, cs_b: float, cs_T: float) -> float:
     """Shan-Chen pseudopotential (effective mass).
 
     ``PSI_RHO`` (0): ψ = ρ.
     ``PSI_EXP`` (1): ψ = 1 - exp(-ρ / ρ_ref).
+    ``PSI_CS``  (2): ψ = sqrt(2·(P_CS − ρ·c_s²) / (G·c_s²))
+        where P_CS is the Carnahan-Starling equation of state.
     """
     if psi_type == 1:
         return 1.0 - wp.exp(-rho / ref_rho)
+    if psi_type == 2:
+        cs2 = 1.0 / 3.0
+        eta = cs_b * rho / 4.0
+        eta2 = eta * eta
+        eta3 = eta2 * eta
+        denom = (1.0 - eta) * (1.0 - eta) * (1.0 - eta)
+        p_cs = rho * cs_T * (1.0 + eta + eta2 - eta3) / denom - cs_a * rho * rho
+        arg = 2.0 * (p_cs - rho * cs2) / (G * cs2)
+        return wp.sqrt(wp.max(arg, 0.0))
     return rho
 
 
@@ -1130,6 +1150,10 @@ def _resolve_boundary_psi(
     psi_ref: float,
     solid_psi_scale: float,
     boundary_psi: float,
+    G: float,
+    cs_a: float,
+    cs_b: float,
+    cs_T: float,
     px: int,
     py: int,
     pz: int,
@@ -1169,7 +1193,7 @@ def _resolve_boundary_psi(
         and (nk >= 0) and (nk < nz)
     )
     if in_bounds and solid_phi[ni, nj, nk] >= 0.0:
-        return _psi(rho[ni, nj, nk], psi_type, psi_ref)   # fluid
+        return _psi(rho[ni, nj, nk], psi_type, psi_ref, G, cs_a, cs_b, cs_T)   # fluid
 
     if in_bounds:
         return psi_c * solid_psi_scale                     # solid body
@@ -1192,6 +1216,9 @@ def compute_shan_chen_force_kernel(
     psi_ref: float,
     solid_psi_scale: float,
     boundary_psi: float,
+    cs_a: float,
+    cs_b: float,
+    cs_T: float,
     homogeneous_early_out: int,
     homogeneous_rel_tol: float,
     px: int,
@@ -1227,7 +1254,7 @@ def compute_shan_chen_force_kernel(
 
     # ---- current-cell pseudopotential --------------------------------------
     rho_c = rho[i, j, k]
-    psi_c = _psi(rho_c, psi_type, psi_ref)
+    psi_c = _psi(rho_c, psi_type, psi_ref, G, cs_a, cs_b, cs_T)
 
     # ---- homogeneous-region early-out ---------------------------------------
     # In bulk fluid (all neighbours have similar ρ, none is solid/wall),
@@ -1329,27 +1356,27 @@ def compute_shan_chen_force_kernel(
 
     # d=1: +x  (1,0,0)
     ni = i + 1; nj = j; nk = k
-    sx += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz) * 1.0
+    sx += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz) * 1.0
 
     # d=2: -x  (-1,0,0)
     ni = i - 1; nj = j; nk = k
-    sx += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz) * (-1.0)
+    sx += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz) * (-1.0)
 
     # d=3: +y  (0,1,0)
     ni = i; nj = j + 1; nk = k
-    sy += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz) * 1.0
+    sy += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz) * 1.0
 
     # d=4: -y  (0,-1,0)
     ni = i; nj = j - 1; nk = k
-    sy += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz) * (-1.0)
+    sy += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz) * (-1.0)
 
     # d=5: +z  (0,0,1)
     ni = i; nj = j; nk = k + 1
-    sz += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz) * 1.0
+    sz += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz) * 1.0
 
     # d=6: -z  (0,0,-1)
     ni = i; nj = j; nk = k - 1
-    sz += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz) * (-1.0)
+    sz += (1.0 / 18.0) * _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz) * (-1.0)
 
     # ========================================================================
     # Edge directions (w = 1/36)
@@ -1357,73 +1384,73 @@ def compute_shan_chen_force_kernel(
 
     # d=7: +x+y  (1,1,0)
     ni = i + 1; nj = j + 1; nk = k
-    psi_d7 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d7 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sx += (1.0 / 36.0) * psi_d7 * 1.0
     sy += (1.0 / 36.0) * psi_d7 * 1.0
 
     # d=8: -x+y  (-1,1,0)
     ni = i - 1; nj = j + 1; nk = k
-    psi_d8 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d8 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sx += (1.0 / 36.0) * psi_d8 * (-1.0)
     sy += (1.0 / 36.0) * psi_d8 * 1.0
 
     # d=9: +x-y  (1,-1,0)
     ni = i + 1; nj = j - 1; nk = k
-    psi_d9 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d9 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sx += (1.0 / 36.0) * psi_d9 * 1.0
     sy += (1.0 / 36.0) * psi_d9 * (-1.0)
 
     # d=10: -x-y  (-1,-1,0)
     ni = i - 1; nj = j - 1; nk = k
-    psi_d10 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d10 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sx += (1.0 / 36.0) * psi_d10 * (-1.0)
     sy += (1.0 / 36.0) * psi_d10 * (-1.0)
 
     # d=11: +x+z  (1,0,1)
     ni = i + 1; nj = j; nk = k + 1
-    psi_d11 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d11 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sx += (1.0 / 36.0) * psi_d11 * 1.0
     sz += (1.0 / 36.0) * psi_d11 * 1.0
 
     # d=12: -x+z  (-1,0,1)
     ni = i - 1; nj = j; nk = k + 1
-    psi_d12 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d12 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sx += (1.0 / 36.0) * psi_d12 * (-1.0)
     sz += (1.0 / 36.0) * psi_d12 * 1.0
 
     # d=13: +x-z  (1,0,-1)
     ni = i + 1; nj = j; nk = k - 1
-    psi_d13 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d13 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sx += (1.0 / 36.0) * psi_d13 * 1.0
     sz += (1.0 / 36.0) * psi_d13 * (-1.0)
 
     # d=14: -x-z  (-1,0,-1)
     ni = i - 1; nj = j; nk = k - 1
-    psi_d14 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d14 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sx += (1.0 / 36.0) * psi_d14 * (-1.0)
     sz += (1.0 / 36.0) * psi_d14 * (-1.0)
 
     # d=15: +y+z  (0,1,1)
     ni = i; nj = j + 1; nk = k + 1
-    psi_d15 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d15 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sy += (1.0 / 36.0) * psi_d15 * 1.0
     sz += (1.0 / 36.0) * psi_d15 * 1.0
 
     # d=16: -y+z  (0,-1,1)
     ni = i; nj = j - 1; nk = k + 1
-    psi_d16 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d16 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sy += (1.0 / 36.0) * psi_d16 * (-1.0)
     sz += (1.0 / 36.0) * psi_d16 * 1.0
 
     # d=17: +y-z  (0,1,-1)
     ni = i; nj = j + 1; nk = k - 1
-    psi_d17 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d17 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sy += (1.0 / 36.0) * psi_d17 * 1.0
     sz += (1.0 / 36.0) * psi_d17 * (-1.0)
 
     # d=18: -y-z  (0,-1,-1)
     ni = i; nj = j - 1; nk = k - 1
-    psi_d18 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, px, py, pz, nx, ny, nz)
+    psi_d18 = _resolve_boundary_psi(ni, nj, nk, rho, solid_phi, psi_c, psi_type, psi_ref, solid_psi_scale, boundary_psi, G, cs_a, cs_b, cs_T, px, py, pz, nx, ny, nz)
     sy += (1.0 / 36.0) * psi_d18 * (-1.0)
     sz += (1.0 / 36.0) * psi_d18 * (-1.0)
 
@@ -1650,21 +1677,6 @@ def initialize_equilibrium_kernel(
     f[16 * stride + idx] = _f_eq(1.0 / 36.0, rho0, u0x, u0y, u0z, 0, -1, 1)
     f[17 * stride + idx] = _f_eq(1.0 / 36.0, rho0, u0x, u0y, u0z, 0, 1, -1)
     f[18 * stride + idx] = _f_eq(1.0 / 36.0, rho0, u0x, u0y, u0z, 0, -1, -1)
-
-
-# ---------------------------------------------------------------------------
-# Kernel 6 -- pressure from density (equation of state)
-# ---------------------------------------------------------------------------
-
-
-@wp.kernel
-def compute_pressure_kernel(
-    rho: wp.array3d(dtype=float),
-    pressure: wp.array3d(dtype=float),
-) -> None:
-    """Compute pressure via the ideal-gas equation of state: ``p = c_s^2 rho``."""
-    i, j, k = wp.tid()
-    pressure[i, j, k] = (1.0 / 3.0) * rho[i, j, k]
 
 
 # ---------------------------------------------------------------------------

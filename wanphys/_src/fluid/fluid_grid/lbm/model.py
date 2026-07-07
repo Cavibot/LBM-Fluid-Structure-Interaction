@@ -115,6 +115,19 @@ class LbmModel(FluidGridModelBase):
     blend: ``f_out = omega_reg * f_reg + (1 - omega_reg) * f_in``.
     """
 
+    # ---- Carnahan-Starling EOS parameters (psi_type = PSI_CS = 2) ---------
+    cs_a: float = 0.5
+    """CS EOS attraction parameter *a*.  Controls the depth of the potential
+    well.  Typical values: 0.25–1.0.  Larger *a* → stronger phase separation,
+    larger density ratio."""
+    cs_b: float = 4.0
+    """CS EOS covolume parameter *b*.  Together with *cs_a* determines the
+    critical temperature ``T_c = 0.3773·a / b``.  ``b = 4`` is standard
+    for LBM, giving η = ρ (simplified packing fraction)."""
+    cs_T: float = 0.07
+    """CS EOS reduced temperature.  Must be below T_c for phase separation.
+    Lower T → larger density ratio, sharper interface.  Typical: 0.04–0.09.
+    With a=0.5, b=4 → T_c ≈ 0.0943 → T=0.07 gives ρ_l/ρ_g ≈ 100:1."""
 
     @property
     def omega_minus(self) -> float:
@@ -232,6 +245,14 @@ class LbmModel(FluidGridModelBase):
     that is periodic in *x* with walls in *y* and *z*.
     """
 
+    has_moving_walls: bool = False
+    """Whether solid boundaries may move (e.g. rigid-body coupling).
+
+    When ``False`` (default), the moving-wall bounce-back correction
+    short-circuits to zero and per-step solid-field copies are skipped
+    because the fields are static after initialisation.
+    """
+
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.tau <= 0.5:
@@ -257,11 +278,27 @@ class LbmModel(FluidGridModelBase):
                 f"Regularization blend factor omega_reg must be in [0, 1], "
                 f"got omega_reg = {self.omega_reg}"
             )
-        if self.psi_type not in (0, 1):
+        if self.psi_type not in (0, 1, 2):
             raise ValueError(
-                f"Shan-Chen psi_type must be 0 (PSI_RHO) or 1 (PSI_EXP), "
-                f"got psi_type = {self.psi_type}"
+                f"Shan-Chen psi_type must be 0 (PSI_RHO), 1 (PSI_EXP), "
+                f"or 2 (PSI_CS), got psi_type = {self.psi_type}"
             )
+        if self.psi_type == 2:
+            if self.cs_a <= 0.0:
+                raise ValueError(
+                    f"CS EOS attraction parameter cs_a must be > 0, "
+                    f"got cs_a = {self.cs_a}"
+                )
+            if self.cs_b <= 0.0:
+                raise ValueError(
+                    f"CS EOS covolume parameter cs_b must be > 0, "
+                    f"got cs_b = {self.cs_b}"
+                )
+            if self.cs_T <= 0.0:
+                raise ValueError(
+                    f"CS EOS temperature cs_T must be > 0, "
+                    f"got cs_T = {self.cs_T}"
+                )
         if self.psi_ref <= 0.0:
             raise ValueError(
                 f"Shan-Chen psi_ref must be > 0, got psi_ref = {self.psi_ref}"

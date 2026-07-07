@@ -65,6 +65,9 @@ class GridLbmRigidCoupling(CompositeSimulation):
         super().__init__()
         self._fluid_domain = fluid_domain
         self._rigid_domain = rigid_domain
+        # Enable moving-wall correction and solid-field copies now that
+        # rigid bodies contribute non-zero wall velocities.
+        fluid_domain.model.has_moving_walls = True
         self._rigid_shape_query = CollisionPipeline.get_shape_query(self._rigid_domain)
         self._advance_rigid = True
         self._two_way_feedback_enabled: bool = False

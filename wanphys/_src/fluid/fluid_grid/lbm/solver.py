@@ -145,12 +145,13 @@ class LbmSolver(FluidGridSolverBase):
         """
         del contacts, control, dt  # LBM dt = 1 lattice unit
 
-        # ---- 0. Copy persistent fields --------------------------------
-        wp.copy(state_out.solid_phi, state_in.solid_phi)
-        wp.copy(state_out.solid_body_id, state_in.solid_body_id)
-        wp.copy(state_out.vel_solid_u, state_in.vel_solid_u)
-        wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
-        wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
+        # ---- 0. Copy persistent fields (skipped when walls are static) ---
+        if self.model.has_moving_walls:
+            wp.copy(state_out.solid_phi, state_in.solid_phi)
+            wp.copy(state_out.solid_body_id, state_in.solid_body_id)
+            wp.copy(state_out.vel_solid_u, state_in.vel_solid_u)
+            wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
+            wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
 
         # ---- 1. Compute macroscopic moments (rho, u) from f ----------------
         wp.launch(
@@ -196,6 +197,9 @@ class LbmSolver(FluidGridSolverBase):
                         float(self.model.psi_ref),
                         float(self.model.sc_solid_psi_scale),
                         float(self.model.sc_boundary_psi),
+                        float(self.model.cs_a),
+                        float(self.model.cs_b),
+                        float(self.model.cs_T),
                         int(self.model.sc_homogeneous_early_out),
                         float(self.model.sc_homogeneous_rel_tol),
                         px, py, pz,
@@ -256,31 +260,34 @@ class LbmSolver(FluidGridSolverBase):
                 state_out.vel_solid_u, state_out.vel_solid_v, state_out.vel_solid_w,
                 state_out.f,
                 self.model.omega_plus, self.model.omega_minus,
+                int(self.model.has_moving_walls),
                 px, py, pz,
                 self.nx, self.ny, self.nz, self._stride,
             ],
         )
 
         # ---- 5. Apply non-bounce-back boundary conditions -----------------
-        wp.launch(
-            kernels.apply_boundary_conditions_kernel,
-            dim=(self.nx, self.ny, self.nz),
-            inputs=[
-                state_out.f,
-                self._rho,
-                self._ux,
-                self._uy,
-                self._uz,
-                self._bc_types,
-                self._bc_vel_x,
-                self._bc_vel_y,
-                self._bc_vel_z,
-                self.nx,
-                self.ny,
-                self.nz,
-                self._stride,
-            ],
-        )
+        # Skip entirely when all 6 faces are bounce-back (the common case).
+        if any(t != 0 for t in self.model.bc_types):
+            wp.launch(
+                kernels.apply_boundary_conditions_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    state_out.f,
+                    self._rho,
+                    self._ux,
+                    self._uy,
+                    self._uz,
+                    self._bc_types,
+                    self._bc_vel_x,
+                    self._bc_vel_y,
+                    self._bc_vel_z,
+                    self.nx,
+                    self.ny,
+                    self.nz,
+                    self._stride,
+                ],
+            )
 
         # ---- 5a. Guo body force (post-collision, gravity-only path) -------
         # Guo forcing with coefficient (1-ω/2) is designed for post-collision
@@ -341,12 +348,6 @@ class LbmSolver(FluidGridSolverBase):
             wp.copy(state_out.force_x, self._fx)
             wp.copy(state_out.force_y, self._fy)
             wp.copy(state_out.force_z, self._fz)
-
-        wp.launch(
-            kernels.compute_pressure_kernel,
-            dim=(self.nx, self.ny, self.nz),
-            inputs=[self._rho, state_out.pressure],
-        )
 
         # ---- 7. Populate MAC-face velocities (visualisation / coupling) ---
         wp.launch(
@@ -413,4 +414,3 @@ class LbmSolver(FluidGridSolverBase):
         state.velocity_x.fill_(u0x)
         state.velocity_y.fill_(u0y)
         state.velocity_z.fill_(u0z)
-        state.pressure.fill_(rho0 / 3.0)

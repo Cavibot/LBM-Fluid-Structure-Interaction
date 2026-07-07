@@ -380,6 +380,7 @@ class ScreenSpaceFluidRenderer:
     uniform vec3 volume_max_world;
     uniform float density_threshold;
     uniform int max_steps;
+    uniform float step_fraction;
 
     void main()
     {
@@ -417,7 +418,7 @@ class ScreenSpaceFluidRenderer:
         vec3 volume_size = volume_max_world - volume_min_world;
         // Step proportional to grid cells so we don't skip thin features.
         float cell_diag = length(volume_size / vec3(float(textureSize(density_tex, 0))));
-        float step_size = cell_diag * 0.15;
+        float step_size = cell_diag * step_fraction;
         // Nudge inside to avoid sampling exactly at the AABB boundary.
         float t = tmin + step_size * 0.1;
         float prev_d = 0.0;
@@ -474,6 +475,7 @@ class ScreenSpaceFluidRenderer:
     uniform float density_threshold;
     uniform int max_steps;
     uniform float thickness_scale;
+    uniform float step_fraction;
 
     void main()
     {
@@ -504,7 +506,7 @@ class ScreenSpaceFluidRenderer:
 
         vec3 volume_size = volume_max_world - volume_min_world;
         float cell_diag = length(volume_size / vec3(float(textureSize(density_tex, 0))));
-        float step_size = cell_diag * 0.15;
+        float step_size = cell_diag * step_fraction;
 
         float t = tmin + step_size * 0.1;
         float thickness = 0.0;
@@ -573,8 +575,12 @@ class ScreenSpaceFluidRenderer:
         self._density_cell_size = 1.0
         self._density_threshold = 0.5
         self._ray_march_max_steps = 512  # enough for full diagonal of 80^3 at quarter-cell step (needs ~350)
+        self._density_step_fraction: float = 0.25  # cell_diag multiplier; 0.25 is ~2x faster than 0.15
 
         self._density_tex_3d = None
+        self._density_pbo: Any = None            # GL pixel-unpack buffer for GPU→GPU upload
+        self._density_pbo_warp: Any = None       # wp.RegisteredGLBuffer wrapper
+        self._density_pbo_capacity: int = 0       # allocated element count
 
         self._depth_fbo = None
         self._depth_rbo = None
@@ -606,6 +612,7 @@ class ScreenSpaceFluidRenderer:
         cell_size: float = 1.0,
         threshold: float = 0.5,
         max_steps: int = 128,
+        step_fraction: float = 0.25,
     ):
         """Set a 3D density field for direct ray-march rendering.
 
@@ -628,6 +635,9 @@ class ScreenSpaceFluidRenderer:
             (used for the first-hit surface test).
         max_steps:
             Maximum ray-march steps per pixel.
+        step_fraction:
+            Fraction of cell diagonal to step per ray-march iteration
+            (default 0.25).  Lower = finer but slower.
         """
         self._density_field = density
         if density is not None:
@@ -636,6 +646,7 @@ class ScreenSpaceFluidRenderer:
             self._density_cell_size = float(cell_size)
             self._density_threshold = float(threshold)
             self._ray_march_max_steps = int(max_steps)
+            self._density_step_fraction = float(step_fraction)
         else:
             self._density_res = (0, 0, 0)
 
@@ -709,6 +720,10 @@ class ScreenSpaceFluidRenderer:
         gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
         gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_R, gl.GL_CLAMP_TO_EDGE)
         gl.glBindTexture(gl.GL_TEXTURE_3D, 0)
+
+        # PBO for GPU→GPU density texture upload
+        self._density_pbo = gl.GLuint()
+        gl.glGenBuffers(1, self._density_pbo)
 
         self._particle_vao = gl.GLuint()
         gl.glGenVertexArrays(1, self._particle_vao)
@@ -812,6 +827,7 @@ class ScreenSpaceFluidRenderer:
                 "volume_max_world",
                 "density_threshold",
                 "max_steps",
+                "step_fraction",
             ),
             "ray_march_thickness": self._collect_uniforms(
                 self._ray_march_thickness_program,
@@ -827,6 +843,7 @@ class ScreenSpaceFluidRenderer:
                 "density_threshold",
                 "max_steps",
                 "thickness_scale",
+                "step_fraction",
             ),
         }
 
@@ -911,41 +928,82 @@ class ScreenSpaceFluidRenderer:
     # ------------------------------------------------------------------
 
     def _upload_density_texture(self):
-        """Copy the device density array to the OpenGL 3D texture.
+        """Upload the device density array to the OpenGL 3D texture.
 
-        The Warp / NumPy array has shape ``(nx, ny, nz)`` in C-order
-        (last index *k* varies fastest).  OpenGL 3D textures expect the
-        *first* dimension to vary fastest, so we swap the *nx* and *nz*
-        dimensions at upload time.  This avoids a full data transpose
-        while keeping the axis mapping correct in the shader.
+        Uses a PBO + ``wp.copy`` to keep the transfer entirely on the
+        GPU.  Falls back to the CPU round-trip if PBO interop fails.
         """
         gl = self._gl
+        nx: int
+        ny: int
+        nz: int
         nx, ny, nz = self._density_res
+        total_cells: int = nx * ny * nz
 
-        # Download from GPU to CPU
-        density_np = self._density_field.numpy().astype(np.float32)
+        # --- Ensure PBO is large enough and registered with Warp ---------
+        if total_cells > self._density_pbo_capacity:
+            gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, self._density_pbo)
+            gl.glBufferData(
+                gl.GL_PIXEL_UNPACK_BUFFER, total_cells * 4,  # sizeof(float)
+                None, gl.GL_DYNAMIC_DRAW,
+            )
+            gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
+            self._density_pbo_warp = wp.RegisteredGLBuffer(
+                gl_buffer_id=_as_gl_id(self._density_pbo),
+                device=self.device,
+                flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
+            )
+            self._density_pbo_capacity = total_cells
 
+        # --- GPU → PBO via wp.copy (no CPU involvement) ------------------
+        use_pbo: bool = False
+        if self._density_pbo_warp is not None:
+            try:
+                mapped = self._density_pbo_warp.map(dtype=float, shape=(total_cells,))
+                wp.copy(mapped, self._density_field)  # array3d → flat, device→device
+                self._density_pbo_warp.unmap()
+                use_pbo = True
+            except Exception:
+                # Fall through to CPU path on interop failure.
+                pass
+
+        # --- Upload to 3D texture -----------------------------------------
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_3D, self._density_tex_3d)
 
-        # Upload with (nz, ny, nx) so that the fast-varying k-index
-        # matches OpenGL's first (width) dimension.
-        current_key = (nx, ny, nz)
-        if getattr(self, "_density_tex_size", None) != current_key:
-            gl.glTexImage3D(
-                gl.GL_TEXTURE_3D, 0, gl.GL_R32F,
-                nz, ny, nx, 0,
-                gl.GL_RED, gl.GL_FLOAT,
-                density_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            )
-            self._density_tex_size = current_key
+        current_key: tuple[int, int, int] = (nx, ny, nz)
+        is_resize: bool = (getattr(self, "_density_tex_size", None) != current_key)
+
+        if use_pbo:
+            gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, self._density_pbo)
+            if is_resize:
+                gl.glTexImage3D(
+                    gl.GL_TEXTURE_3D, 0, gl.GL_R32F,
+                    nz, ny, nx, 0, gl.GL_RED, gl.GL_FLOAT, None,
+                )
+            else:
+                gl.glTexSubImage3D(
+                    gl.GL_TEXTURE_3D, 0, 0, 0, 0,
+                    nz, ny, nx, gl.GL_RED, gl.GL_FLOAT, None,
+                )
+            gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
         else:
-            gl.glTexSubImage3D(
-                gl.GL_TEXTURE_3D, 0, 0, 0, 0,
-                nz, ny, nx,
-                gl.GL_RED, gl.GL_FLOAT,
-                density_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            )
+            density_np: np.ndarray = self._density_field.numpy()
+            if is_resize:
+                gl.glTexImage3D(
+                    gl.GL_TEXTURE_3D, 0, gl.GL_R32F,
+                    nz, ny, nx, 0, gl.GL_RED, gl.GL_FLOAT,
+                    density_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                )
+            else:
+                gl.glTexSubImage3D(
+                    gl.GL_TEXTURE_3D, 0, 0, 0, 0,
+                    nz, ny, nx, gl.GL_RED, gl.GL_FLOAT,
+                    density_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                )
+
+        if is_resize:
+            self._density_tex_size = current_key
         gl.glBindTexture(gl.GL_TEXTURE_3D, 0)
 
     def _render_ray_march_passes(self):
@@ -1006,6 +1064,7 @@ class ScreenSpaceFluidRenderer:
         gl.glUniform3f(u["volume_max_world"], *volume_max)
         gl.glUniform1f(u["density_threshold"], float(self._density_threshold))
         gl.glUniform1i(u["max_steps"], int(self._ray_march_max_steps))
+        gl.glUniform1f(u["step_fraction"], float(self._density_step_fraction))
         gl.glBindVertexArray(renderer._frame_vao)
         gl.glDrawElements(gl.GL_TRIANGLES, len(renderer._frame_indices), gl.GL_UNSIGNED_INT, None)
 
@@ -1032,6 +1091,7 @@ class ScreenSpaceFluidRenderer:
         gl.glUniform1f(u["density_threshold"], float(self._density_threshold))
         gl.glUniform1i(u["max_steps"], int(self._ray_march_max_steps))
         gl.glUniform1f(u["thickness_scale"], float(self.thickness_scale))
+        gl.glUniform1f(u["step_fraction"], float(self._density_step_fraction))
         gl.glBindVertexArray(renderer._frame_vao)
         gl.glDrawElements(gl.GL_TRIANGLES, len(renderer._frame_indices), gl.GL_UNSIGNED_INT, None)
 
