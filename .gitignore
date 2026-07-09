@@ -55,3 +55,9 @@ ply_output/
 # Personal notes and agent run caches
 .docs/
 .omo/
+
+*.DS_Store
+nul
+.stfolder/
+
+results.csv
