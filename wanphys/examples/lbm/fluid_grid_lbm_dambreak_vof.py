@@ -18,6 +18,9 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import LbmDomain, LbmModel
+from wanphys._src.fluid.fluid_grid.lbm.benchmark.metrics import (
+    collect_interface_roughness,
+)
 from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRenderer
 
 # ---------------------------------------------------------------------------
@@ -34,6 +37,10 @@ FILL_Z_FRAC: float = 0.5
 RHO_LIQUID: float = 1.0
 VOF_RHO_GAS: float = 1.0
 VOF_EPSILON: float = 1.0e-3
+# PLIC surface tension (Eq. 12). Too large → pressure spikes / NaNs.
+# 5e-4 was too weak to flatten lattice bumps after the flow settles.
+VOF_GAMMA: float = 1.5e-3
+VOF_KAPPA_SMOOTH: int = 2
 
 SSFR_THRESHOLD: float = 0.2
 RAY_MARCH_STEPS: int = 800
@@ -55,7 +62,8 @@ class VofDamBreak:
             phase_mode="vof_sharp",
             vof_rho_gas=VOF_RHO_GAS,
             vof_epsilon=VOF_EPSILON,
-            vof_gamma=0.0,
+            vof_gamma=VOF_GAMMA,
+            vof_kappa_smooth=VOF_KAPPA_SMOOTH,
             lambda_trt=LAMBDA_TRT,
             initial_density=RHO_LIQUID,
             gravity_x=0.0,
@@ -65,7 +73,8 @@ class VofDamBreak:
         n = int(self.model.nx)
         print(
             f"VOF Dam-Break: {n}^3, tau={TAU}, lambda={LAMBDA_TRT}, "
-            f"gz={GRAVITY}, phase_mode=vof_sharp"
+            f"gz={GRAVITY}, gamma={VOF_GAMMA}, kappa_smooth={VOF_KAPPA_SMOOTH}, "
+            f"phase_mode=vof_sharp"
         )
 
         self.domain = LbmDomain(self.model)
@@ -145,11 +154,19 @@ class VofDamBreak:
             vx = float(state.velocity_x.numpy()[wet].mean()) if wet.any() else 0.0
             vz = float(state.velocity_z.numpy()[wet].mean()) if wet.any() else 0.0
             rho_max = float(rho_finite.max()) if rho_finite.size else float("nan")
+            kappa = None
+            vof = self.domain.solver._vof_sharp
+            if float(self.model.vof_gamma) > 0.0:
+                kappa = vof._kappa.numpy()
+            rough = collect_interface_roughness(phi, ctype, kappa=kappa)
             print(
                 f"[t={self.sim_time:.1f}s] L={liquid.sum()} I={interface.sum()} "
                 f"vol={float(np.nansum(phi)):.1f} (Δ={float(np.nansum(phi))-self._vol0:+.1f}) "
                 f"rho_max={rho_max:.3f} "
-                f"v=({vx:+.4f},{vz:+.4f}) sim={self._last_ms:.0f}ms",
+                f"v=({vx:+.4f},{vz:+.4f}) "
+                f"h_rms={rough.height_rms:.3f} h_p2p={rough.height_p2p:.2f} "
+                f"κ_rms={rough.kappa_rms:.3f} "
+                f"sim={self._last_ms:.0f}ms",
                 file=sys.stderr,
                 flush=True,
             )

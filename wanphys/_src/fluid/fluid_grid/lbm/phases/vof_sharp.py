@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""FSLBM-style sharp free-surface VOF phase (HOME-FREE Eq. 9–12 MVP)."""
+"""FSLBM-style sharp free-surface VOF phase (HOME-FREE Eq. 9–12)."""
 
 from __future__ import annotations
 
@@ -12,15 +12,16 @@ from ..core.lattice import CX, CY, CZ, OPPOSITE, W
 from ..model import LbmModel
 from ..state import LbmState
 from . import vof_kernels
+from . import vof_plic
 from .shan_chen import MacroscopicBuffers
 
 
 class VofSharpPhase:
     """Sharp free-surface VOF on top of the distribution D3Q19 LBM.
 
-    MVP scope (paper FSLBM base, without HOME / NOCM-MRT / PLIC curvature):
     - Skip gas collide/stream
-    - Interface missing DFs via Eq. (11) with constant ``ρ_g`` (γ = 0)
+    - Interface missing DFs via Eq. (11) with ``ρ_g = ρ_atm - 6 γ κ``
+    - PLIC / Parker–Youngs curvature κ (Lehmann 2019) when ``vof_gamma > 0``
     - φ update via Körner mass exchange (Eq. 9–10)
     - L/I/G reclassification with ``ε_φ`` and closed interface layer
     """
@@ -42,6 +43,8 @@ class VofSharpPhase:
         self._cell_type_tmp = wp.zeros((nx, ny, nz), dtype=wp.int32, device=device)
         self._phi_tmp = wp.zeros((nx, ny, nz), dtype=float, device=device)
         self._excess_phi = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        self._kappa = wp.zeros((nx, ny, nz), dtype=float, device=device)
+        self._kappa_tmp = wp.zeros((nx, ny, nz), dtype=float, device=device)
         self._vol_liquid = wp.zeros(1, dtype=float, device=device)
         self._vol_interface = wp.zeros(1, dtype=float, device=device)
         self._n_interface = wp.zeros(1, dtype=wp.int32, device=device)
@@ -61,6 +64,8 @@ class VofSharpPhase:
         self._fill_flag.zero_()
         self._empty_flag.zero_()
         self._excess_phi.zero_()
+        self._kappa.zero_()
+        self._kappa_tmp.zero_()
         self._target_volume = None
 
     def compute_moments(
@@ -100,8 +105,45 @@ class VofSharpPhase:
         stride: int,
     ) -> None:
         px, py, pz = self.model._periodic_ints
-        # ρ_g = (p_g - 2γ κ) / c_s²; MVP uses γ = 0 → constant vof_rho_gas.
-        rho_g = float(self.model.vof_rho_gas)
+        gamma = float(self.model.vof_gamma)
+        if gamma != 0.0:
+            wp.launch(
+                vof_plic.vof_compute_kappa_kernel,
+                dim=(nx, ny, nz),
+                inputs=[
+                    state_in.phi,
+                    state_in.cell_type,
+                    state_out.solid_phi,
+                    self._kappa,
+                    int(px),
+                    int(py),
+                    int(pz),
+                    nx,
+                    ny,
+                    nz,
+                ],
+            )
+            n_smooth = int(self.model.vof_kappa_smooth)
+            for _ in range(n_smooth):
+                wp.launch(
+                    vof_plic.vof_smooth_kappa_kernel,
+                    dim=(nx, ny, nz),
+                    inputs=[
+                        self._kappa,
+                        state_in.cell_type,
+                        state_out.solid_phi,
+                        self._kappa_tmp,
+                        int(px),
+                        int(py),
+                        int(pz),
+                        nx,
+                        ny,
+                        nz,
+                    ],
+                )
+                self._kappa, self._kappa_tmp = self._kappa_tmp, self._kappa
+        else:
+            self._kappa.zero_()
         wp.launch(
             vof_kernels.vof_collide_stream_kernel,
             dim=(nx, ny, nz),
@@ -124,7 +166,9 @@ class VofSharpPhase:
                 self._opp,
                 float(self.model.omega_plus),
                 float(self.model.omega_minus),
-                rho_g,
+                float(self.model.vof_rho_gas),
+                gamma,
+                self._kappa,
                 int(px),
                 int(py),
                 int(pz),

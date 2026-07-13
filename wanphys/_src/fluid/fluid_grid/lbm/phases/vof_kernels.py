@@ -280,7 +280,9 @@ def vof_collide_stream_kernel(
     opp_arr: wp.array(dtype=wp.int32),
     omega_plus: float,
     omega_minus: float,
-    rho_g: float,
+    rho_g0: float,
+    gamma: float,
+    kappa: wp.array3d(dtype=float),
     px: int,
     py: int,
     pz: int,
@@ -289,7 +291,10 @@ def vof_collide_stream_kernel(
     nz: int,
     stride: int,
 ) -> None:
-    """Fused TRT collide + pull-stream with free-surface reconstruction."""
+    """Fused TRT collide + pull-stream with free-surface reconstruction.
+
+    Gas density for Eq. (11)/(12): ``ρ_g = ρ_g0 - 6 γ κ`` (c_s² = 1/3).
+    """
     i, j, k = wp.tid()
     idx = i * ny * nz + j * nz + k
     ctype = int(cell_type[i, j, k])
@@ -298,6 +303,13 @@ def vof_collide_stream_kernel(
         for d in range(19):
             f_out[d * stride + idx] = 0.0
         return
+
+    # Eq. (12): ρ_g = (p_g - 2 γ κ) / c_s² = ρ_g0 - 6 γ κ.
+    rho_g = rho_g0 - 6.0 * gamma * kappa[i, j, k]
+    if rho_g < 0.2:
+        rho_g = 0.2
+    if rho_g > 1.8:
+        rho_g = 1.8
 
     rho_c = rho[i, j, k]
     vx = ux[i, j, k]

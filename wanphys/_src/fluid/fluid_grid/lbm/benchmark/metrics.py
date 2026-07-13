@@ -162,3 +162,77 @@ def collect_validation_metrics(
         step_index=int(step_index),
         finite_fields=bool(finite),
     )
+
+
+@dataclass
+class InterfaceRoughnessMetrics:
+    """Free-surface bump metrics from VOF φ (lattice units).
+
+    After a dam-break settles, a flat pool should have small ``height_rms``.
+    Lattice-pinned VOF bumps typically give ``height_rms ~ 0.3–1`` cell on 64³.
+    """
+
+    height_mean: float = 0.0
+    height_rms: float = 0.0
+    height_p2p: float = 0.0
+    interface_fraction: float = 0.0
+    kappa_abs_mean: float = 0.0
+    kappa_rms: float = 0.0
+    wet_columns: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def collect_interface_roughness(
+    phi: np.ndarray,
+    cell_type: np.ndarray,
+    *,
+    kappa: np.ndarray | None = None,
+    wet_threshold: float = 0.5,
+) -> InterfaceRoughnessMetrics:
+    """Column height roughness + optional PLIC-κ noise on interface cells.
+
+    Height per (i,j) column is ``sum_k φ`` (liquid thickness).  RMS is the
+    std-dev of heights over wet columns (φ-sum > ``wet_threshold``).
+    """
+    phi_np = np.asarray(phi, dtype=np.float64)
+    ctype = np.asarray(cell_type)
+    if phi_np.ndim != 3:
+        raise ValueError(f"phi must be 3D, got shape {phi_np.shape}")
+
+    # Column liquid thickness (lattice cells).
+    height = np.sum(phi_np, axis=2)
+    wet = height > float(wet_threshold)
+    n_wet = int(wet.sum())
+    if n_wet == 0:
+        return InterfaceRoughnessMetrics()
+
+    h = height[wet]
+    h_mean = float(np.mean(h))
+    h_rms = float(np.std(h))
+    h_p2p = float(np.max(h) - np.min(h))
+
+    n_iface = int((ctype == 1).sum())
+    n_fluid = int((ctype > 0).sum())
+    iface_frac = float(n_iface) / float(max(n_fluid, 1))
+
+    k_abs_mean = 0.0
+    k_rms = 0.0
+    if kappa is not None:
+        k = np.asarray(kappa, dtype=np.float64)
+        mask = ctype == 1
+        if mask.any():
+            kv = k[mask]
+            k_abs_mean = float(np.mean(np.abs(kv)))
+            k_rms = float(np.std(kv))
+
+    return InterfaceRoughnessMetrics(
+        height_mean=h_mean,
+        height_rms=h_rms,
+        height_p2p=h_p2p,
+        interface_fraction=iface_frac,
+        kappa_abs_mean=k_abs_mean,
+        kappa_rms=k_rms,
+        wet_columns=n_wet,
+    )

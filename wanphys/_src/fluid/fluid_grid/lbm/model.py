@@ -61,9 +61,13 @@ class LbmModel(FluidGridModelBase):
     vof_epsilon: float = 1.0e-4
     """φ fill/empty threshold for L/I/G reclassification."""
     vof_rho_gas: float = 1.0
-    """Gas density used in free-surface pressure BC (ρ_g = p_g / c_s²)."""
+    """Atmospheric gas density ρ_atm = p_g / c_s² in free-surface BC."""
     vof_gamma: float = 0.0
-    """Surface tension γ (0 disables curvature contribution in ρ_g)."""
+    """Surface tension γ. With PLIC curvature κ: ρ_g = ρ_atm - 6 γ κ.
+    ``0`` disables curvature (constant ρ_g = vof_rho_gas)."""
+    vof_kappa_smooth: int = 2
+    """Jacobi smoothing passes on PLIC κ before applying surface tension.
+    ``0`` uses raw κ. 1–3 typically damp lattice-scale surface noise."""
 
     # ---- Shan-Chen multiphase interaction --------------------------------
     G: float = 0.0
@@ -296,6 +300,12 @@ class LbmModel(FluidGridModelBase):
             raise ValueError(f"vof_epsilon must be > 0, got {self.vof_epsilon}")
         if self.vof_rho_gas <= 0.0:
             raise ValueError(f"vof_rho_gas must be > 0, got {self.vof_rho_gas}")
+        if self.vof_gamma < 0.0:
+            raise ValueError(f"vof_gamma must be >= 0, got {self.vof_gamma}")
+        if int(self.vof_kappa_smooth) < 0:
+            raise ValueError(
+                f"vof_kappa_smooth must be >= 0, got {self.vof_kappa_smooth}"
+            )
         if self.psi_type not in (0, 1):
             raise ValueError(
                 f"Shan-Chen psi_type must be 0 (PSI_RHO) or 1 (PSI_EXP), "
