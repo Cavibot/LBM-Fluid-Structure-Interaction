@@ -86,6 +86,71 @@ class TestLbmVofSharp(unittest.TestCase):
     def test_vof_dambreak_smoke_d3q27(self) -> None:
         self._run_dambreak_smoke("D3Q27")
 
+    def test_vof_home_fs_filter_dambreak_smoke(self) -> None:
+        """H3: HOME-FREE filtered ``\\bar f`` FS BC (default on)."""
+        n = 24
+        model = LbmModel(
+            fluid_grid_res=(n, n, n),
+            fluid_grid_cell_size=0.02,
+            lattice="D3Q27",
+            tau=0.6,
+            G=0.0,
+            phase_mode="vof_sharp",
+            vof_rho_gas=1.0,
+            vof_epsilon=1.0e-4,
+            vof_home_fs_filter=True,
+            lambda_trt=0.03,
+            initial_density=1.0,
+            gravity_z=-0.0003,
+        )
+        self.assertTrue(model.vof_home_fs_filter)
+        domain = LbmDomain(model)
+        domain.create_state()
+        state = domain.state
+        domain.solver._vof_sharp.seed_dam_break_column(
+            state, dam_x=n // 4, fill_z=n // 2, rho_liquid=1.0,
+        )
+        out = domain._state_out
+        for name in ("f", "density", "phi", "cell_type", "solid_phi", "solid_body_id"):
+            wp.copy(getattr(out, name), getattr(state, name))
+        phi0 = float(state.phi.numpy().sum())
+        for _ in range(40):
+            domain.step(1.0)
+        wp.synchronize_device(model._device)
+        state = domain.state
+        phi = state.phi.numpy()
+        self.assertTrue(np.isfinite(phi).all())
+        self.assertTrue(np.isfinite(state.density.numpy()).all())
+        self.assertLess(abs(float(phi.sum()) - phi0) / phi0, 0.05)
+        self.assertGreater(int((state.cell_type.numpy() == 1).sum()), 0)
+
+    def test_fs_bar_f_differs_from_raw_when_neq(self) -> None:
+        """With non-eq S, Hermite ``\\bar f_ī`` ≠ classic opposite feq."""
+        from wanphys._src.fluid.fluid_grid.lbm.core.hermite import (
+            reconstruct_f_i_numpy,
+        )
+
+        rho_g, rho_c = 1.0, 1.0
+        ux, uy, uz = 0.05, 0.0, 0.0
+        # Non-equilibrium stress
+        sxx, syy, szz, sxy, sxz, syz = 0.02, -0.01, 0.0, 0.0, 0.0, 0.0
+        w = 1.0 / 18.0
+        cx, cy, cz = 1, 0, 0
+        # Classic: feq_i + feq_ī - f_ī  with f_ī = feq_ī(ρ_c,u) → feq_i(ρ_g)
+        # HOME: feq_i + feq_ī - bar_f_ī
+        cu = cx * ux + cy * uy + cz * uz
+        u2 = ux * ux + uy * uy + uz * uz
+        feq_i = rho_g * w * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * u2)
+        feq_opp = rho_g * w * (1.0 - 3.0 * cu + 4.5 * cu * cu - 1.5 * u2)
+        bar_opp = reconstruct_f_i_numpy(
+            rho_c, ux, uy, uz, sxx, syy, szz, sxy, sxz, syz,
+            float(-cx), float(-cy), float(-cz), w,
+        )
+        classic_f_opp = rho_c * w * (1.0 - 3.0 * cu + 4.5 * cu * cu - 1.5 * u2)
+        f_home = feq_i + feq_opp - bar_opp
+        f_classic = feq_i + feq_opp - classic_f_opp
+        self.assertGreater(abs(f_home - f_classic), 1e-6)
+
     def test_phase_mode_validation(self) -> None:
         with self.assertRaises(ValueError):
             LbmModel(

@@ -20,6 +20,7 @@ class VofSharpPhase:
 
     - Skip gas collide/stream
     - Interface missing DFs via Eq. (11) with ``ρ_g = ρ_atm - 6 γ κ``
+    - H3: optional HOME-FREE filtered ``\\bar f_ī`` (``vof_home_fs_filter``)
     - PLIC / Parker–Youngs curvature κ (Lehmann 2019) when ``vof_gamma > 0``
     - φ update via Körner mass exchange (Eq. 9–10)
     - L/I/G reclassification with ``ε_φ`` and closed interface layer
@@ -176,6 +177,7 @@ class VofSharpPhase:
                 float(self.model.vof_rho_gas),
                 gamma,
                 self._kappa,
+                int(1 if self.model.vof_home_fs_filter else 0),
                 int(px),
                 int(py),
                 int(pz),

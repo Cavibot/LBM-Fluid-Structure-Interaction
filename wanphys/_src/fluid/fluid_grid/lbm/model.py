@@ -72,6 +72,23 @@ class LbmModel(FluidGridModelBase):
     vof_kappa_smooth: int = 2
     """Jacobi smoothing passes on PLIC κ before applying surface tension.
     ``0`` uses raw κ. 1–3 typically damp lattice-scale surface noise."""
+    vof_home_fs_filter: bool = True
+    """HOME-FREE Eq. 11 with filtered ``\\bar f_ī`` (3rd-order Hermite, Eq. 16).
+
+    When True, unknown gas→interface populations use
+    ``f_i* = f_i^eq(ρ_g,u) + f_ī^eq(ρ_g,u) − \\bar f_ī`` where ``\\bar f_ī``
+    is reconstructed from the interface cell moments (ρ,u,S).
+    When False, classic FSLBM uses the raw opposite post-collide ``f_ī``.
+    """
+
+    # ---- Solver backend -------------------------------------------------
+    lbm_backend: str = "dist"
+    """Fluid advance backend: ``dist`` (distribution LBM) | ``home_fp32``.
+
+    ``home_fp32`` is the moment-encoded HOME-FREE VOF path (H4/H5, no quant).
+    Requires ``phase_mode='vof_sharp'``. Visualisation still uses ``LbmState``
+    macros (ρ,u,φ); distribution ``f`` is unused.
+    """
 
     # ---- Shan-Chen multiphase interaction --------------------------------
     G: float = 0.0
@@ -297,6 +314,16 @@ class LbmModel(FluidGridModelBase):
                 f"got {self.phase_mode!r}"
             )
         object.__setattr__(self, "phase_mode", mode)
+        backend = str(self.lbm_backend).lower()
+        if backend not in ("dist", "home_fp32"):
+            raise ValueError(
+                f"lbm_backend must be 'dist' or 'home_fp32', got {self.lbm_backend!r}"
+            )
+        object.__setattr__(self, "lbm_backend", backend)
+        if backend == "home_fp32" and mode != "vof_sharp":
+            raise ValueError(
+                "lbm_backend='home_fp32' currently requires phase_mode='vof_sharp'"
+            )
         if mode == "shan_chen" and float(self.G) == 0.0:
             raise ValueError("phase_mode='shan_chen' requires G != 0")
         if mode == "vof_sharp" and float(self.G) != 0.0:

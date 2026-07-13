@@ -1,12 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Warp kernels for FSLBM-style sharp free-surface VOF (HOME-FREE Eq. 9–12)."""
+"""Warp kernels for FSLBM-style sharp free-surface VOF (HOME-FREE Eq. 9–12).
+
+H3: free-surface pressure BC can replace raw ``f_ī`` with Hermite-filtered
+``\\bar f_ī`` (HOME-FREE §4.1: Eq. 11 using Eq. 16 reconstruction).
+"""
 
 from __future__ import annotations
 
 import warp as wp
 
+from ..core.hermite import home_reconstruct_f_i
 from ..kernels import _f_eq, _moving_wall_correction, _trt_collide
 
 # cell_type flags
@@ -170,6 +175,50 @@ def _local_trt_post(
 
 
 @wp.func
+def _clamp_fs_velocity(ux: float, uy: float, uz: float):
+    u_max = 0.1
+    u2 = ux * ux + uy * uy + uz * uz
+    if u2 > u_max * u_max:
+        s = u_max / wp.sqrt(u2)
+        return ux * s, uy * s, uz * s
+    return ux, uy, uz
+
+
+@wp.func
+def _home_s_from_f(
+    f: wp.array(dtype=float),
+    cx_arr: wp.array(dtype=wp.int32),
+    cy_arr: wp.array(dtype=wp.int32),
+    cz_arr: wp.array(dtype=wp.int32),
+    num_dirs: int,
+    stride: int,
+    idx: int,
+    rho: float,
+):
+    """HOME Eq. 7 second-moment tensor S from populations at one cell."""
+    cs2 = 1.0 / 3.0
+    axx = float(0.0)
+    ayy = float(0.0)
+    azz = float(0.0)
+    axy = float(0.0)
+    axz = float(0.0)
+    ayz = float(0.0)
+    for d in range(num_dirs):
+        fi = f[d * stride + idx]
+        cxi = float(cx_arr[d])
+        cyi = float(cy_arr[d])
+        czi = float(cz_arr[d])
+        axx = axx + (cxi * cxi - cs2) * fi
+        ayy = ayy + (cyi * cyi - cs2) * fi
+        azz = azz + (czi * czi - cs2) * fi
+        axy = axy + cxi * cyi * fi
+        axz = axz + cxi * czi * fi
+        ayz = ayz + cyi * czi * fi
+    inv = 1.0 / rho
+    return axx * inv, ayy * inv, azz * inv, axy * inv, axz * inv, ayz * inv
+
+
+@wp.func
 def _fs_reconstruct(
     f_opp_post: float,
     rho_g: float,
@@ -181,22 +230,59 @@ def _fs_reconstruct(
     cy: int,
     cz: int,
 ) -> float:
-    """Free-surface pressure BC (Eq. 11): unknown DF from gas."""
-    # Clamp velocity in BC to keep feq well-behaved.
-    u_max = 0.1
-    u2 = ux * ux + uy * uy + uz * uz
-    vx = ux
-    vy = uy
-    vz = uz
-    if u2 > u_max * u_max:
-        s = u_max / wp.sqrt(u2)
-        vx = ux * s
-        vy = uy * s
-        vz = uz * s
+    """Classic free-surface pressure BC (Eq. 11) with raw ``f_ī``."""
+    vx, vy, vz = _clamp_fs_velocity(ux, uy, uz)
     feq = _f_eq(w, rho_g, vx, vy, vz, cx, cy, cz)
     feq_opp = _f_eq(w, rho_g, vx, vy, vz, -cx, -cy, -cz)
     val = feq + feq_opp - f_opp_post
-    # Populations must stay non-negative for stability.
+    if val < 0.0:
+        val = 0.0
+    return val
+
+
+@wp.func
+def _fs_reconstruct_home(
+    rho_g: float,
+    rho_c: float,
+    ux: float,
+    uy: float,
+    uz: float,
+    sxx: float,
+    syy: float,
+    szz: float,
+    sxy: float,
+    sxz: float,
+    syz: float,
+    w: float,
+    cx: int,
+    cy: int,
+    cz: int,
+) -> float:
+    """HOME-FREE Eq. 11 using filtered ``\\bar f_ī`` (Hermite Eq. 16).
+
+    ``f_i* = f_i^eq(ρ_g,u) + f_ī^eq(ρ_g,u) − \\bar f_ī(ρ,u,S)``
+    where ``\\bar f_ī`` is third-order reconstruct at the interface cell.
+    """
+    vx, vy, vz = _clamp_fs_velocity(ux, uy, uz)
+    feq = _f_eq(w, rho_g, vx, vy, vz, cx, cy, cz)
+    feq_opp = _f_eq(w, rho_g, vx, vy, vz, -cx, -cy, -cz)
+    bar_opp = home_reconstruct_f_i(
+        rho_c,
+        vx,
+        vy,
+        vz,
+        sxx,
+        syy,
+        szz,
+        sxy,
+        sxz,
+        syz,
+        -cx,
+        -cy,
+        -cz,
+        w,
+    )
+    val = feq + feq_opp - bar_opp
     if val < 0.0:
         val = 0.0
     return val
@@ -225,6 +311,7 @@ def vof_collide_stream_kernel(
     rho_g0: float,
     gamma: float,
     kappa: wp.array3d(dtype=float),
+    use_home_fs_filter: int,
     px: int,
     py: int,
     pz: int,
@@ -237,6 +324,7 @@ def vof_collide_stream_kernel(
     """Fused TRT collide + pull-stream with free-surface reconstruction.
 
     Gas density for Eq. (11)/(12): ``ρ_g = ρ_g0 - 6 γ κ`` (c_s² = 1/3).
+    When ``use_home_fs_filter != 0``, unknown DFs use HOME-FREE ``\\bar f_ī``.
     """
     i, j, k = wp.tid()
     idx = i * ny * nz + j * nz + k
@@ -262,6 +350,17 @@ def vof_collide_stream_kernel(
         rho_c = 0.2
     if rho_c > 1.5:
         rho_c = 1.5
+
+    sxx = float(0.0)
+    syy = float(0.0)
+    szz = float(0.0)
+    sxy = float(0.0)
+    sxz = float(0.0)
+    syz = float(0.0)
+    if use_home_fs_filter != 0:
+        sxx, syy, szz, sxy, sxz, syz = _home_s_from_f(
+            f_in, cx_arr, cy_arr, cz_arr, num_dirs, stride, idx, rho_c,
+        )
 
     # Rest population: collide in place (no stream).
     f_out[0 * stride + idx] = _local_trt_post(
@@ -336,26 +435,45 @@ def vof_collide_stream_kernel(
         else:
             ntype = int(cell_type[si, sj, sk])
             if ntype == CELL_GAS:
-                f_opp_post = _local_trt_post(
-                    f_in,
-                    stride,
-                    idx,
-                    opp,
-                    d,
-                    rho_c,
-                    vx,
-                    vy,
-                    vz,
-                    w,
-                    -cx,
-                    -cy,
-                    -cz,
-                    omega_plus,
-                    omega_minus,
-                )
-                f_out[d * stride + idx] = _fs_reconstruct(
-                    f_opp_post, rho_g, vx, vy, vz, w, cx, cy, cz
-                )
+                if use_home_fs_filter != 0:
+                    f_out[d * stride + idx] = _fs_reconstruct_home(
+                        rho_g,
+                        rho_c,
+                        vx,
+                        vy,
+                        vz,
+                        sxx,
+                        syy,
+                        szz,
+                        sxy,
+                        sxz,
+                        syz,
+                        w,
+                        cx,
+                        cy,
+                        cz,
+                    )
+                else:
+                    f_opp_post = _local_trt_post(
+                        f_in,
+                        stride,
+                        idx,
+                        opp,
+                        d,
+                        rho_c,
+                        vx,
+                        vy,
+                        vz,
+                        w,
+                        -cx,
+                        -cy,
+                        -cz,
+                        omega_plus,
+                        omega_minus,
+                    )
+                    f_out[d * stride + idx] = _fs_reconstruct(
+                        f_opp_post, rho_g, vx, vy, vz, w, cx, cy, cz
+                    )
             else:
                 src_idx = si * ny * nz + sj * nz + sk
                 f_out[d * stride + idx] = _local_trt_post(

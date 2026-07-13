@@ -16,6 +16,7 @@ from . import kernels
 from . import kernels_q
 from .core.pipeline import LbmStepControl, StepStats
 from .model import LbmModel
+from .backends.moment.home_fp32_ref.bridge import HomeFp32VofBridge
 from .phases.shan_chen import MacroscopicBuffers, ShanChenPhase
 from .phases.vof_sharp import VofSharpPhase
 from .state import LbmState
@@ -76,6 +77,9 @@ class LbmSolver(FluidGridSolverBase):
 
         self._shan_chen: ShanChenPhase = ShanChenPhase(model)
         self._vof_sharp: VofSharpPhase = VofSharpPhase(model)
+        self._home_fp32: HomeFp32VofBridge | None = (
+            HomeFp32VofBridge(model) if model.lbm_backend == "home_fp32" else None
+        )
 
         # ---- Boundary condition arrays (synced from model) ------------------
         self._bc_types = wp.zeros(6, dtype=wp.int32, device=self.device)
@@ -201,6 +205,12 @@ class LbmSolver(FluidGridSolverBase):
         collect_stats = bool(step_control.collect_stats)
         stats = StepStats() if collect_stats else None
         t_step = time.perf_counter() if collect_stats else 0.0
+
+        # ---- Optional HOME-FREE moment backend (H5) -----------------------
+        if self._home_fp32 is not None:
+            return self._step_home_fp32(
+                state_in, state_out, stats, collect_stats, t_step,
+            )
 
         gx: float = float(self.model.gravity_x)
         gy: float = float(self.model.gravity_y)
@@ -527,6 +537,60 @@ class LbmSolver(FluidGridSolverBase):
 
         return stats
 
+    def _step_home_fp32(
+        self,
+        state_in: LbmState,
+        state_out: LbmState,
+        stats: StepStats | None,
+        collect_stats: bool,
+        t_step: float,
+    ) -> StepStats | None:
+        """Moment-encoded HOME-FREE VOF step (``lbm_backend='home_fp32'``)."""
+        assert self._home_fp32 is not None
+        wp.copy(state_out.solid_phi, state_in.solid_phi)
+        wp.copy(state_out.solid_body_id, state_in.solid_body_id)
+        wp.copy(state_out.vel_solid_u, state_in.vel_solid_u)
+        wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
+        wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
+
+        t0 = time.perf_counter() if collect_stats else 0.0
+        self._home_fp32.ensure_from_state(state_in)
+        self._home_fp32.step(state_out)
+        self._home_fp32.copy_kappa_to(self._vof_sharp._kappa)
+        if stats is not None:
+            stats.ms_collision = (time.perf_counter() - t0) * 1000.0
+
+        # Keep solver macro buffers in sync for any consumers.
+        wp.copy(self._rho, state_out.density)
+        wp.copy(self._ux, state_out.velocity_x)
+        wp.copy(self._uy, state_out.velocity_y)
+        wp.copy(self._uz, state_out.velocity_z)
+
+        t0 = time.perf_counter() if collect_stats else 0.0
+        wp.launch(
+            kernels.moments_to_mac_u_kernel,
+            dim=(self.nx + 1, self.ny, self.nz),
+            inputs=[self._ux, state_out.vel_u, self.nx],
+        )
+        wp.launch(
+            kernels.moments_to_mac_v_kernel,
+            dim=(self.nx, self.ny + 1, self.nz),
+            inputs=[self._uy, state_out.vel_v, self.ny],
+        )
+        wp.launch(
+            kernels.moments_to_mac_w_kernel,
+            dim=(self.nx, self.ny, self.nz + 1),
+            inputs=[self._uz, state_out.vel_w, self.nz],
+        )
+        self._vof_sharp.update_visual_field(
+            state_out, self.nx, self.ny, self.nz,
+        )
+        if stats is not None:
+            stats.ms_export = (time.perf_counter() - t0) * 1000.0
+            stats.ms_total = (time.perf_counter() - t_step) * 1000.0
+            stats.with_num_cells(self._stride)
+        return stats
+
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
@@ -600,3 +664,5 @@ class LbmSolver(FluidGridSolverBase):
         state.pressure.fill_(rho0 / 3.0)
         self._shan_chen.reset()
         self._vof_sharp.reset()
+        if self._home_fp32 is not None:
+            self._home_fp32.reset()
