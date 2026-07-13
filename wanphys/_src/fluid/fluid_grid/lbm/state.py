@@ -39,13 +39,14 @@ class LbmState(DomainState):
         self.res: tuple[int, int, int] = (nx, ny, nz)
         self.device: wp.Device = model._device
         self.requires_grad: bool = requires_grad
+        self.num_dirs: int = int(model.num_dirs)
 
         # Stride for flattening (nx, ny, nz) → 1D
         self._stride: int = nx * ny * nz
 
-        # ---- Distribution functions (flat: 19 × N) -----------------------
+        # ---- Distribution functions (flat: num_dirs × N) -----------------
         self.f: wp.array = wp.zeros(
-            19 * self._stride,
+            self.num_dirs * self._stride,
             dtype=float,
             device=self.device,
             requires_grad=requires_grad,

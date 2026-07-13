@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import warp as wp
 
+from .core.lattice import NUM_DIRS
+
 # Lattice speed of sound squared = 1/3, so inv = 3.
 _INV_CS2 = 3.0
 
@@ -1778,7 +1780,7 @@ def apply_boundary_conditions_kernel(
         # --- Convective outflow ---------------------------------
         elif bc == 2:
             src_idx = 1 * ny * nz + j * nz + k  # i=1
-            for d in range(19):
+            for d in range(NUM_DIRS):
                 f[d * stride + idx] = f[d * stride + src_idx]
 
     # ===================================================================
@@ -1828,7 +1830,7 @@ def apply_boundary_conditions_kernel(
             )
         elif bc == 2:
             src_idx = (nx - 2) * ny * nz + j * nz + k
-            for d in range(19):
+            for d in range(NUM_DIRS):
                 f[d * stride + idx] = f[d * stride + src_idx]
 
     # ===================================================================
@@ -1878,7 +1880,7 @@ def apply_boundary_conditions_kernel(
             )
         elif bc == 2:
             src_idx = i * ny * nz + 1 * nz + k
-            for d in range(19):
+            for d in range(NUM_DIRS):
                 f[d * stride + idx] = f[d * stride + src_idx]
 
     # ===================================================================
@@ -1928,7 +1930,7 @@ def apply_boundary_conditions_kernel(
             )
         elif bc == 2:
             src_idx = i * ny * nz + (ny - 2) * nz + k
-            for d in range(19):
+            for d in range(NUM_DIRS):
                 f[d * stride + idx] = f[d * stride + src_idx]
 
     # ===================================================================
@@ -1978,7 +1980,7 @@ def apply_boundary_conditions_kernel(
             )
         elif bc == 2:
             src_idx = i * ny * nz + j * nz + 1
-            for d in range(19):
+            for d in range(NUM_DIRS):
                 f[d * stride + idx] = f[d * stride + src_idx]
 
     # ===================================================================
@@ -2028,7 +2030,7 @@ def apply_boundary_conditions_kernel(
             )
         elif bc == 2:
             src_idx = i * ny * nz + j * nz + (nz - 2)
-            for d in range(19):
+            for d in range(NUM_DIRS):
                 f[d * stride + idx] = f[d * stride + src_idx]
 
 

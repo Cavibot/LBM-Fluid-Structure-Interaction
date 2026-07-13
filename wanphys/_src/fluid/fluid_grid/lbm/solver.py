@@ -5,14 +5,23 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
 import warp as wp
 
 from ..base import FluidGridSolverBase
 from . import kernels
+from .core.pipeline import LbmStepControl, StepStats
 from .model import LbmModel
+from .phases.shan_chen import MacroscopicBuffers, ShanChenPhase
 from .state import LbmState
+
+
+def _resolve_step_control(control: Any | None) -> LbmStepControl:
+    if isinstance(control, LbmStepControl):
+        return control
+    return LbmStepControl(collect_stats=False)
 
 
 class LbmSolver(FluidGridSolverBase):
@@ -21,6 +30,8 @@ class LbmSolver(FluidGridSolverBase):
     The solver owns temporary arrays for macroscopic moments that are
     reused across steps.  Distribution functions and visualisation fields
     live on :class:`LbmState`.
+
+    Shan-Chen multiphase forcing is delegated to :class:`ShanChenPhase`.
 
     Parameters
     ----------
@@ -34,14 +45,12 @@ class LbmSolver(FluidGridSolverBase):
         self.ny: int = int(model.ny)
         self.nz: int = int(model.nz)
         self.device: wp.Device = model._device
+        self.num_dirs: int = int(model.num_dirs)
 
         # Stride for flat-array indexing: nx * ny * nz
         self._stride: int = self.nx * self.ny * self.nz
 
-        # SC force stride: recompute only every N steps, reuse cached force
-        # between updates.  Configured by LbmModel.sc_force_stride.
-        self._step_count: int = 0
-        self._sc_stride: int = int(model.sc_force_stride)
+        self._shan_chen: ShanChenPhase = ShanChenPhase(model)
 
         # ---- Boundary condition arrays (synced from model) ------------------
         self._bc_types = wp.zeros(6, dtype=wp.int32, device=self.device)
@@ -73,6 +82,19 @@ class LbmSolver(FluidGridSolverBase):
         )
         self._fz: wp.array3d = wp.zeros(
             (self.nx, self.ny, self.nz), dtype=float, device=self.device
+        )
+
+    @property
+    def macroscopic_buffers(self) -> MacroscopicBuffers:
+        """Temporary rho/velocity/force fields used during :meth:`step`."""
+        return MacroscopicBuffers(
+            rho=self._rho,
+            ux=self._ux,
+            uy=self._uy,
+            uz=self._uz,
+            fx=self._fx,
+            fy=self._fy,
+            fz=self._fz,
         )
 
     # ------------------------------------------------------------------
@@ -137,13 +159,32 @@ class LbmSolver(FluidGridSolverBase):
         dt: float,
         contacts: Any | None = None,
         control: Any | None = None,
-    ) -> None:
+    ) -> StepStats | None:
         """Advance the LBM simulation by one lattice timestep.
 
         The physical *dt* is accepted for API compatibility but ignored
         internally – the LBM always uses ``dt = 1`` in lattice units.
+
+        Returns
+        -------
+        StepStats or None
+            Timing breakdown when *control* requests stats collection.
         """
-        del contacts, control, dt  # LBM dt = 1 lattice unit
+        del contacts, dt  # LBM dt = 1 lattice unit
+
+        step_control = _resolve_step_control(control)
+        collect_stats = bool(step_control.collect_stats)
+        stats = StepStats() if collect_stats else None
+        t_step = time.perf_counter() if collect_stats else 0.0
+
+        gx: float = float(self.model.gravity_x)
+        gy: float = float(self.model.gravity_y)
+        gz: float = float(self.model.gravity_z)
+        G_sc: float = float(self.model.G)
+        px: int = int(self.model._periodic_ints[0])
+        py: int = int(self.model._periodic_ints[1])
+        pz: int = int(self.model._periodic_ints[2])
+        buffers = self.macroscopic_buffers
 
         # ---- 0. Copy persistent fields --------------------------------
         wp.copy(state_out.solid_phi, state_in.solid_phi)
@@ -153,6 +194,7 @@ class LbmSolver(FluidGridSolverBase):
         wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
 
         # ---- 1. Compute macroscopic moments (rho, u) from f ----------------
+        t0 = time.perf_counter() if collect_stats else 0.0
         wp.launch(
             kernels.compute_moments_kernel,
             dim=(self.nx, self.ny, self.nz),
@@ -168,73 +210,25 @@ class LbmSolver(FluidGridSolverBase):
                 self._uz,
             ],
         )
+        if stats is not None:
+            stats.ms_moments = (time.perf_counter() - t0) * 1000.0
 
-        # ---- 2. Body-force correction (gravity + optional Shan-Chen) ----
-        gx: float = float(self.model.gravity_x)
-        gy: float = float(self.model.gravity_y)
-        gz: float = float(self.model.gravity_z)
-        G_sc: float = float(self.model.G)
-        px: int = int(self.model._periodic_ints[0])
-        py: int = int(self.model._periodic_ints[1])
-        pz: int = int(self.model._periodic_ints[2])
-
-        if G_sc != 0.0:
-            # --- 2a. Compute Shan-Chen interaction force (strided) ----------
-            self._step_count += 1
-            if self._step_count % self._sc_stride == 1:
-                wp.launch(
-                    kernels.compute_shan_chen_force_kernel,
-                    dim=(self.nx, self.ny, self.nz),
-                    inputs=[
-                        self._rho,
-                        state_out.solid_phi,
-                        self._fx,
-                        self._fy,
-                        self._fz,
-                        G_sc,
-                        int(self.model.psi_type),
-                        float(self.model.psi_ref),
-                        float(self.model.sc_solid_psi_scale),
-                        float(self.model.sc_boundary_psi),
-                        int(self.model.sc_homogeneous_early_out),
-                        float(self.model.sc_homogeneous_rel_tol),
-                        px, py, pz,
-                        self.nx,
-                        self.ny,
-                        self.nz,
-                    ],
-                )
-            # --- 2b. Velocity shift (SC + gravity): u_eq = u + τ₋·(F/ρ + g) --
-            # The velocity shift uses the shear relaxation time τ (not τ₊)
-            # because the SC interaction force acts on momentum (odd modes),
-            # whose relaxation is controlled by ω = 1/τ.  Using τ₊ would
-            # amplify the shift when τ₊ > τ (i.e. whenever TRT is active),
-            # pushing u_eq beyond the low-Mach limit at sharp interfaces.
-            # TRT ghost-mode damping in collision is unaffected by this choice.
-            wp.launch(
-                kernels.apply_velocity_shift_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    self._ux,
-                    self._uy,
-                    self._uz,
-                    self._rho,
-                    self._fx,
-                    self._fy,
-                    self._fz,
-                    gx,
-                    gy,
-                    gz,
-                    self.model.tau,
-                    self.nx,
-                    self.ny,
-                    self.nz,
-                ],
+        # ---- 2. Phase pre-collision (Shan-Chen) ---------------------------
+        if self._shan_chen.enabled:
+            t0 = time.perf_counter() if collect_stats else 0.0
+            self._shan_chen.pre_collision(
+                buffers,
+                state_out.solid_phi,
+                self.nx,
+                self.ny,
+                self.nz,
             )
-        # (gravity-only Guo force was here pre-collision — moved to step 5a below)
+            if stats is not None:
+                stats.ms_phase = (time.perf_counter() - t0) * 1000.0
 
-        # ---- 3. Regularization filter (pre-collision) ------------------------
+        # ---- 3. Regularization filter (pre-collision) -------------------
         if self.model.use_regularization and self.model.omega_reg > 0.0:
+            t0 = time.perf_counter() if collect_stats else 0.0
             wp.launch(
                 kernels.reg_trt_kernel,
                 dim=(self.nx, self.ny, self.nz),
@@ -246,7 +240,11 @@ class LbmSolver(FluidGridSolverBase):
                     self.nx, self.ny, self.nz, self._stride,
                 ],
             )
-        # ---- 4. BGK/TRT collide + stream (applies relaxation ONCE) ----------
+            if stats is not None:
+                stats.ms_regularization = (time.perf_counter() - t0) * 1000.0
+
+        # ---- 4. BGK/TRT collide + stream --------------------------------
+        t0 = time.perf_counter() if collect_stats else 0.0
         wp.launch(
             kernels.collide_stream_bounceback_kernel,
             dim=(self.nx, self.ny, self.nz),
@@ -260,8 +258,11 @@ class LbmSolver(FluidGridSolverBase):
                 self.nx, self.ny, self.nz, self._stride,
             ],
         )
+        if stats is not None:
+            stats.ms_collision = (time.perf_counter() - t0) * 1000.0
 
         # ---- 5. Apply non-bounce-back boundary conditions -----------------
+        t0 = time.perf_counter() if collect_stats else 0.0
         wp.launch(
             kernels.apply_boundary_conditions_kernel,
             dim=(self.nx, self.ny, self.nz),
@@ -281,12 +282,12 @@ class LbmSolver(FluidGridSolverBase):
                 self._stride,
             ],
         )
+        if stats is not None:
+            stats.ms_bc = (time.perf_counter() - t0) * 1000.0
 
         # ---- 5a. Guo body force (post-collision, gravity-only path) -------
-        # Guo forcing with coefficient (1-ω/2) is designed for post-collision
-        # application.  Applied here after collision-stream and boundary
-        # conditions, only when no Shan-Chen interaction is active (G==0).
         if G_sc == 0.0 and (gx != 0.0 or gy != 0.0 or gz != 0.0):
+            t0 = time.perf_counter() if collect_stats else 0.0
             wp.launch(
                 kernels.apply_guo_force_kernel,
                 dim=(self.nx, self.ny, self.nz),
@@ -302,45 +303,28 @@ class LbmSolver(FluidGridSolverBase):
                     self._stride,
                 ],
             )
+            if stats is not None:
+                stats.ms_body_force = (time.perf_counter() - t0) * 1000.0
 
-        # ---- 5b. Restore physical velocity (reverse SC velocity shift) ----
-        # apply_velocity_shift_kernel overwrote self._ux/_uy/_uz with the
-        # equilibrium velocity u_eq = u + τ₋·(F/ρ + g).  The collision
-        # and boundary-condition kernels have consumed u_eq; now reverse
-        # the shift so that state_out.velocity_* and MAC-face velocities
-        # report the true physical velocity.
-        # Uses the same τ to exactly undo the forward shift.
-        if G_sc != 0.0:
-            wp.launch(
-                kernels.restore_physical_velocity_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    self._ux,
-                    self._uy,
-                    self._uz,
-                    self._rho,
-                    self._fx,
-                    self._fy,
-                    self._fz,
-                    gx,
-                    gy,
-                    gz,
-                    self.model.tau,
-                    self.nx,
-                    self.ny,
-                    self.nz,
-                ],
+        # ---- 5b. Phase post-collision (restore SC velocity) ---------------
+        if self._shan_chen.enabled:
+            t0 = time.perf_counter() if collect_stats else 0.0
+            self._shan_chen.post_collision(
+                buffers,
+                state_out,
+                self.nx,
+                self.ny,
+                self.nz,
             )
+            if stats is not None:
+                stats.ms_phase += (time.perf_counter() - t0) * 1000.0
 
-        # ---- 6. Copy macroscopic fields to state_out ----------------------
+        # ---- 6–7. Export macroscopic + MAC fields -----------------------
+        t0 = time.perf_counter() if collect_stats else 0.0
         wp.copy(state_out.density, self._rho)
         wp.copy(state_out.velocity_x, self._ux)
         wp.copy(state_out.velocity_y, self._uy)
         wp.copy(state_out.velocity_z, self._uz)
-        if G_sc != 0.0:
-            wp.copy(state_out.force_x, self._fx)
-            wp.copy(state_out.force_y, self._fy)
-            wp.copy(state_out.force_z, self._fz)
 
         wp.launch(
             kernels.compute_pressure_kernel,
@@ -348,7 +332,6 @@ class LbmSolver(FluidGridSolverBase):
             inputs=[self._rho, state_out.pressure],
         )
 
-        # ---- 7. Populate MAC-face velocities (visualisation / coupling) ---
         wp.launch(
             kernels.moments_to_mac_u_kernel,
             dim=(self.nx + 1, self.ny, self.nz),
@@ -364,6 +347,21 @@ class LbmSolver(FluidGridSolverBase):
             dim=(self.nx, self.ny, self.nz + 1),
             inputs=[self._uz, state_out.vel_w, self.nz],
         )
+        if stats is not None:
+            stats.ms_export = (time.perf_counter() - t0) * 1000.0
+            stats.ms_total = (time.perf_counter() - t_step) * 1000.0
+            stats.with_num_cells(self._stride)
+            if step_control.stats_out is not None:
+                step_control.stats_out.ms_total = stats.ms_total
+                step_control.stats_out.ms_moments = stats.ms_moments
+                step_control.stats_out.ms_phase = stats.ms_phase
+                step_control.stats_out.ms_regularization = stats.ms_regularization
+                step_control.stats_out.ms_collision = stats.ms_collision
+                step_control.stats_out.ms_bc = stats.ms_bc
+                step_control.stats_out.ms_body_force = stats.ms_body_force
+                step_control.stats_out.ms_export = stats.ms_export
+
+        return stats
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -414,3 +412,4 @@ class LbmSolver(FluidGridSolverBase):
         state.velocity_y.fill_(u0y)
         state.velocity_z.fill_(u0z)
         state.pressure.fill_(rho0 / 3.0)
+        self._shan_chen.reset()

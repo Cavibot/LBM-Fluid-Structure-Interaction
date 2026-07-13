@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from wanphys._src.core.domain import Domain
 
+from .core.pipeline import LbmStepControl, StepStats
 from .model import LbmModel
 from .solver import LbmSolver
 from .state import LbmState
@@ -37,13 +38,17 @@ class LbmDomain(Domain):
         self,
         model: LbmModel,
         solver: LbmSolver | None = None,
+        *,
+        collect_step_stats: bool = False,
     ) -> None:
         self._model: LbmModel = model
         self._solver: LbmSolver = solver or LbmSolver(model)
+        self._collect_step_stats: bool = bool(collect_step_stats)
 
         # Double-buffered state (created lazily or via create_state)
         self._state_in: LbmState | None = None
         self._state_out: LbmState | None = None
+        self._last_step_stats: StepStats | None = None
 
     # ------------------------------------------------------------------
     # Domain protocol
@@ -71,6 +76,11 @@ class LbmDomain(Domain):
             self.create_state()
         return self._state_in
 
+    @property
+    def last_step_stats(self) -> StepStats | None:
+        """Timing breakdown from the most recent :meth:`step` call."""
+        return self._last_step_stats
+
     def create_state(self) -> LbmState:
         """Allocate the double-buffered GPU state from the model.
 
@@ -86,12 +96,15 @@ class LbmDomain(Domain):
         contacts: object = None,
     ) -> None:
         """Advance the domain by *dt* (accepted but ignored - see :class:`LbmSolver`)."""
-        self._solver.step(
+        control = LbmStepControl(collect_stats=self._collect_step_stats)
+        stats = self._solver.step(
             self._state_in,
             self._state_out,
             dt,
             contacts=contacts,
+            control=control,
         )
+        self._last_step_stats = stats
         # Swap buffers
         self._state_in, self._state_out = self._state_out, self._state_in
 

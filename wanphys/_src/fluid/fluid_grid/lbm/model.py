@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ..base import FluidGridModelBase
+from .core.lattice import LatticeSpec, get_lattice_spec
 
 
 @dataclass
@@ -29,6 +30,10 @@ class LbmModel(FluidGridModelBase):
     Kinematic viscosity (lattice units):
         ``nu = c_s² · (τ - 0.5) = (1/3) · (τ - 0.5)``.
     """
+
+    # ---- Lattice discretization ------------------------------------------
+    lattice: str = "D3Q19"
+    """Velocity lattice name.  Currently only ``D3Q19`` is implemented."""
 
     # ---- BGK collision ---------------------------------------------------
     tau: float = 0.55
@@ -234,6 +239,8 @@ class LbmModel(FluidGridModelBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        # Resolve lattice early so downstream state allocation validates.
+        self._lattice_spec: LatticeSpec = get_lattice_spec(self.lattice)
         if self.tau <= 0.5:
             raise ValueError(
                 f"LBM relaxation time tau must be > 0.5 for stability, "
@@ -303,3 +310,13 @@ class LbmModel(FluidGridModelBase):
                     f"Periodic {axis_names[axis_idx]}-axis cannot coexist "
                     f"with Zou-He velocity inlet on the same axis."
                 )
+
+    @property
+    def lattice_spec(self) -> LatticeSpec:
+        """Resolved :class:`LatticeSpec` for this model."""
+        return self._lattice_spec
+
+    @property
+    def num_dirs(self) -> int:
+        """Number of discrete velocities (distribution functions per node)."""
+        return int(self._lattice_spec.num_dirs)
