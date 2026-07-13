@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Smoke tests for FSLBM / VOF sharp free-surface on D3Q19 LBM."""
+"""Smoke tests for FSLBM / VOF sharp free-surface on distribution LBM."""
 
 from __future__ import annotations
 
@@ -16,11 +16,12 @@ from wanphys._src.fluid.fluid_grid.lbm.phases import vof_plic
 
 
 class TestLbmVofSharp(unittest.TestCase):
-    def test_vof_dambreak_smoke(self) -> None:
+    def _run_dambreak_smoke(self, lattice: str) -> None:
         n = 24
         model = LbmModel(
             fluid_grid_res=(n, n, n),
             fluid_grid_cell_size=0.02,
+            lattice=lattice,
             tau=0.6,
             G=0.0,
             phase_mode="vof_sharp",
@@ -30,9 +31,11 @@ class TestLbmVofSharp(unittest.TestCase):
             initial_density=1.0,
             gravity_z=-0.0003,
         )
+        self.assertEqual(model.num_dirs, 27 if lattice == "D3Q27" else 19)
         domain = LbmDomain(model)
         domain.create_state()
         state = domain.state
+        self.assertEqual(int(state.f.shape[0]), model.num_dirs * n * n * n)
         domain.solver._vof_sharp.seed_dam_break_column(
             state,
             dam_x=n // 4,
@@ -66,7 +69,6 @@ class TestLbmVofSharp(unittest.TestCase):
 
         phi_sum = float(phi.sum())
         self.assertGreater(phi_sum, 0.0)
-        # Volume should stay close to the seeded column (projection + Körner θ).
         self.assertLess(abs(phi_sum - phi0) / phi0, 0.05)
 
         n_liquid = int((ctype == 2).sum())
@@ -77,6 +79,12 @@ class TestLbmVofSharp(unittest.TestCase):
         wet = phi > 0.5
         self.assertTrue(wet.any())
         self.assertTrue(math.isfinite(float(rho[wet].mean())))
+
+    def test_vof_dambreak_smoke(self) -> None:
+        self._run_dambreak_smoke("D3Q19")
+
+    def test_vof_dambreak_smoke_d3q27(self) -> None:
+        self._run_dambreak_smoke("D3Q27")
 
     def test_phase_mode_validation(self) -> None:
         with self.assertRaises(ValueError):
@@ -124,7 +132,6 @@ class TestLbmVofSharp(unittest.TestCase):
                         phi[i, j, k] = 1.0
                         ctype[i, j, k] = 2
                     elif r < R + 0.5:
-                        # Smooth fill near the sphere surface.
                         phi[i, j, k] = float(np.clip(0.5 - (r - R), 0.0, 1.0))
                         ctype[i, j, k] = 1
                     else:
@@ -157,7 +164,6 @@ class TestLbmVofSharp(unittest.TestCase):
         k_vals = kappa[mask]
         self.assertGreater(k_vals.size, 20)
         k_mean = float(np.mean(np.abs(k_vals)))
-        # Mean curvature of sphere ≈ 1/R; allow coarse-grid error.
         self.assertGreater(k_mean, 0.04)
         self.assertLess(k_mean, 0.25)
 
@@ -166,6 +172,7 @@ class TestLbmVofSharp(unittest.TestCase):
         model = LbmModel(
             fluid_grid_res=(n, n, n),
             fluid_grid_cell_size=0.02,
+            lattice="D3Q27",
             tau=0.6,
             G=0.0,
             phase_mode="vof_sharp",
@@ -192,6 +199,70 @@ class TestLbmVofSharp(unittest.TestCase):
         phi = domain.state.phi.numpy()
         self.assertTrue(np.isfinite(phi).all())
         self.assertGreater(float(phi.sum()), 0.0)
+
+    def test_single_phase_d3q27_smoke(self) -> None:
+        n = 16
+        model = LbmModel(
+            fluid_grid_res=(n, n, n),
+            fluid_grid_cell_size=0.05,
+            lattice="D3Q27",
+            tau=0.6,
+            G=0.0,
+            phase_mode="none",
+            gravity_z=-0.0001,
+            lambda_trt=0.03,
+            initial_density=1.0,
+        )
+        domain = LbmDomain(model)
+        domain.create_state()
+        domain.solver.initialize_equilibrium(domain.state, rho0=1.0)
+        out = domain._state_out
+        wp.copy(out.f, domain.state.f)
+        for _ in range(20):
+            domain.step(1.0)
+        wp.synchronize_device(model._device)
+        rho = domain.state.density.numpy()
+        self.assertTrue(np.isfinite(rho).all())
+        self.assertAlmostEqual(float(rho.mean()), 1.0, delta=0.05)
+
+    def test_zou_he_d3q27_inlet_smoke(self) -> None:
+        """D3Q27 Zou-He inlet + outflow stays finite with mild drive."""
+        n = 24
+        u_in = 0.02
+        model = LbmModel(
+            fluid_grid_res=(n, n, n),
+            fluid_grid_cell_size=0.05,
+            lattice="D3Q27",
+            tau=0.8,
+            G=0.0,
+            phase_mode="none",
+            lambda_trt=0.0,
+            initial_density=1.0,
+            bc_types=(1, 2, 0, 0, 0, 0),
+            bc_velocity=(
+                (u_in, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+        )
+        domain = LbmDomain(model)
+        domain.create_state()
+        domain.solver.initialize_equilibrium(domain.state, rho0=1.0)
+        wp.copy(domain._state_out.f, domain.state.f)
+        for _ in range(50):
+            domain.step(1.0)
+        wp.synchronize_device(model._device)
+        state = domain.state
+        ux = state.velocity_x.numpy()
+        rho = state.density.numpy()
+        self.assertTrue(np.isfinite(ux).all())
+        self.assertTrue(np.isfinite(rho).all())
+        # Mid-plane should feel some positive streamwise flow.
+        mid = ux[n // 2, 1 : n - 1, 1 : n - 1]
+        self.assertGreater(float(mid.mean()), 0.001)
 
 
 if __name__ == "__main__":

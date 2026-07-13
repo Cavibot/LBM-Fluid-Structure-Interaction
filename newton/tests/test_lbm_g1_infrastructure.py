@@ -11,7 +11,12 @@ from wanphys._src.fluid.fluid_grid.lbm.benchmark.metrics import (
     perf_metrics_from_step_stats,
 )
 from wanphys._src.fluid.fluid_grid.lbm.benchmark.registry import get_variant, list_variants
-from wanphys._src.fluid.fluid_grid.lbm.core.lattice import D3Q19, NUM_DIRS, get_lattice_spec
+from wanphys._src.fluid.fluid_grid.lbm.core.lattice import (
+    D3Q19,
+    D3Q27,
+    NUM_DIRS,
+    get_lattice_spec,
+)
 from wanphys._src.fluid.fluid_grid.lbm.core.pipeline import LbmStepControl, StepStats
 from wanphys._src.fluid.fluid_grid.lbm.model import LbmModel
 from wanphys._src.fluid.fluid_grid.lbm.phases.shan_chen import ShanChenPhase
@@ -26,10 +31,59 @@ class TestLbmG1Infrastructure(unittest.TestCase):
         self.assertEqual(len(spec.weights), 19)
         self.assertAlmostEqual(sum(spec.weights), 1.0, places=6)
 
+    def test_d3q27_lattice_spec(self) -> None:
+        spec = get_lattice_spec("D3Q27")
+        self.assertEqual(spec.name, "D3Q27")
+        self.assertEqual(spec.num_dirs, 27)
+        self.assertEqual(len(spec.weights), 27)
+        self.assertAlmostEqual(sum(spec.weights), 1.0, places=6)
+        self.assertEqual(spec.cx[:19], D3Q19.cx)
+        self.assertEqual(spec.cy[:19], D3Q19.cy)
+        self.assertEqual(spec.cz[:19], D3Q19.cz)
+        for i, opp in enumerate(spec.opposite):
+            self.assertEqual(spec.opposite[opp], i)
+            self.assertEqual(spec.cx[i] + spec.cx[opp], 0)
+            self.assertEqual(spec.cy[i] + spec.cy[opp], 0)
+            self.assertEqual(spec.cz[i] + spec.cz[opp], 0)
+        self.assertIs(get_lattice_spec("d3q27"), D3Q27)
+
     def test_model_resolves_lattice(self) -> None:
         model = LbmModel(fluid_grid_res=(8, 8, 8), fluid_grid_cell_size=0.1)
         self.assertEqual(model.lattice_spec.name, D3Q19.name)
         self.assertEqual(model.num_dirs, 19)
+        model27 = LbmModel(
+            fluid_grid_res=(8, 8, 8),
+            fluid_grid_cell_size=0.1,
+            lattice="D3Q27",
+        )
+        self.assertEqual(model27.num_dirs, 27)
+
+    def test_d3q27_rejects_shan_chen_only(self) -> None:
+        with self.assertRaises(ValueError):
+            LbmModel(
+                fluid_grid_res=(8, 8, 8),
+                fluid_grid_cell_size=0.1,
+                lattice="D3Q27",
+                phase_mode="shan_chen",
+                G=-5.0,
+            )
+        # Zou-He / outflow are supported on D3Q27.
+        model = LbmModel(
+            fluid_grid_res=(8, 8, 8),
+            fluid_grid_cell_size=0.1,
+            lattice="D3Q27",
+            bc_types=(1, 2, 0, 0, 0, 0),
+            bc_velocity=(
+                (0.05, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+        )
+        self.assertEqual(model.num_dirs, 27)
+        self.assertEqual(model.bc_types[0], 1)
 
     def test_shan_chen_phase_enabled_flag(self) -> None:
         single = LbmModel(fluid_grid_res=(4, 4, 4), fluid_grid_cell_size=0.1, G=0.0)

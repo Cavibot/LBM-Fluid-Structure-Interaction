@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""D3Q19 Lattice Boltzmann method – static model configuration."""
+"""Lattice Boltzmann method – static model configuration."""
 
 from __future__ import annotations
 
@@ -14,11 +14,11 @@ from .core.lattice import LatticeSpec, get_lattice_spec
 
 @dataclass
 class LbmModel(FluidGridModelBase):
-    """Static configuration for a D3Q19 LBM fluid simulation.
+    """Static configuration for a distribution LBM fluid simulation.
 
     Inherits grid properties (``fluid_grid_res``, ``fluid_grid_cell_size``,
     ``device``) from :class:`FluidGridModelBase`.  LBM-specific parameters
-    control the BGK collision operator and external body forces.
+    control the BGK/TRT collision operator and external body forces.
 
     Notes
     -----
@@ -29,11 +29,15 @@ class LbmModel(FluidGridModelBase):
 
     Kinematic viscosity (lattice units):
         ``nu = c_s² · (τ - 0.5) = (1/3) · (τ - 0.5)``.
+
+    D3Q27 currently supports ``phase_mode`` ``none`` / ``vof_sharp`` with
+    bounce-back, Zou-He, convective outflow, and periodic faces.
+    Shan-Chen force and regularization remain D3Q19-only until ported.
     """
 
     # ---- Lattice discretization ------------------------------------------
     lattice: str = "D3Q19"
-    """Velocity lattice name.  Currently only ``D3Q19`` is implemented."""
+    """Velocity lattice name: ``D3Q19`` | ``D3Q27``."""
 
     # ---- BGK collision ---------------------------------------------------
     tau: float = 0.55
@@ -262,6 +266,7 @@ class LbmModel(FluidGridModelBase):
         super().__post_init__()
         # Resolve lattice early so downstream state allocation validates.
         self._lattice_spec: LatticeSpec = get_lattice_spec(self.lattice)
+        object.__setattr__(self, "lattice", self._lattice_spec.name)
         if self.tau <= 0.5:
             raise ValueError(
                 f"LBM relaxation time tau must be > 0.5 for stability, "
@@ -296,6 +301,17 @@ class LbmModel(FluidGridModelBase):
             raise ValueError("phase_mode='shan_chen' requires G != 0")
         if mode == "vof_sharp" and float(self.G) != 0.0:
             raise ValueError("phase_mode='vof_sharp' requires G == 0 (no Shan-Chen)")
+        if self._lattice_spec.name == "D3Q27":
+            if mode == "shan_chen":
+                raise ValueError(
+                    "lattice='D3Q27' does not yet support phase_mode='shan_chen' "
+                    "(Shan-Chen force kernel is D3Q19-only)"
+                )
+            if self.use_regularization and self.omega_reg > 0.0:
+                raise ValueError(
+                    "lattice='D3Q27' does not yet support regularization "
+                    "(reg_trt_kernel is D3Q19-only); set use_regularization=False"
+                )
         if self.vof_epsilon <= 0.0:
             raise ValueError(f"vof_epsilon must be > 0, got {self.vof_epsilon}")
         if self.vof_rho_gas <= 0.0:

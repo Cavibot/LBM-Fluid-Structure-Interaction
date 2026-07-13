@@ -60,6 +60,10 @@ def _neighbor_type(
 def compute_moments_vof_kernel(
     f: wp.array(dtype=float),
     cell_type: wp.array3d(dtype=wp.int32),
+    cx_arr: wp.array(dtype=wp.int32),
+    cy_arr: wp.array(dtype=wp.int32),
+    cz_arr: wp.array(dtype=wp.int32),
+    num_dirs: int,
     stride: int,
     nx: int,
     ny: int,
@@ -80,81 +84,19 @@ def compute_moments_vof_kernel(
         uz[i, j, k] = 0.0
         return
 
-    r = 0.0
-    mx = 0.0
-    my = 0.0
-    mz = 0.0
+    r = float(0.0)
+    mx = float(0.0)
+    my = float(0.0)
+    mz = float(0.0)
 
-    f0 = f[0 * stride + idx]
-    r += f0
-    f1 = f[1 * stride + idx]
-    r += f1
-    mx += f1
-    f2 = f[2 * stride + idx]
-    r += f2
-    mx -= f2
-    f3 = f[3 * stride + idx]
-    r += f3
-    my += f3
-    f4 = f[4 * stride + idx]
-    r += f4
-    my -= f4
-    f5 = f[5 * stride + idx]
-    r += f5
-    mz += f5
-    f6 = f[6 * stride + idx]
-    r += f6
-    mz -= f6
-    f7 = f[7 * stride + idx]
-    r += f7
-    mx += f7
-    my += f7
-    f8 = f[8 * stride + idx]
-    r += f8
-    mx -= f8
-    my += f8
-    f9 = f[9 * stride + idx]
-    r += f9
-    mx += f9
-    my -= f9
-    f10 = f[10 * stride + idx]
-    r += f10
-    mx -= f10
-    my -= f10
-    f11 = f[11 * stride + idx]
-    r += f11
-    mx += f11
-    mz += f11
-    f12 = f[12 * stride + idx]
-    r += f12
-    mx -= f12
-    mz += f12
-    f13 = f[13 * stride + idx]
-    r += f13
-    mx += f13
-    mz -= f13
-    f14 = f[14 * stride + idx]
-    r += f14
-    mx -= f14
-    mz -= f14
-    f15 = f[15 * stride + idx]
-    r += f15
-    my += f15
-    mz += f15
-    f16 = f[16 * stride + idx]
-    r += f16
-    my -= f16
-    mz += f16
-    f17 = f[17 * stride + idx]
-    r += f17
-    my += f17
-    mz -= f17
-    f18 = f[18 * stride + idx]
-    r += f18
-    my -= f18
-    mz -= f18
+    for d in range(num_dirs):
+        val = f[d * stride + idx]
+        r = r + val
+        mx = mx + float(cx_arr[d]) * val
+        my = my + float(cy_arr[d]) * val
+        mz = mz + float(cz_arr[d]) * val
 
-    inv_r = 0.0
+    inv_r = float(0.0)
     if r > 1.0e-12:
         inv_r = 1.0 / r
     # Reject non-finite / explosive moments early.
@@ -290,6 +232,7 @@ def vof_collide_stream_kernel(
     ny: int,
     nz: int,
     stride: int,
+    num_dirs: int,
 ) -> None:
     """Fused TRT collide + pull-stream with free-surface reconstruction.
 
@@ -300,7 +243,7 @@ def vof_collide_stream_kernel(
     ctype = int(cell_type[i, j, k])
 
     if solid_phi[i, j, k] < 0.0 or ctype == CELL_GAS:
-        for d in range(19):
+        for d in range(num_dirs):
             f_out[d * stride + idx] = 0.0
         return
 
@@ -339,7 +282,7 @@ def vof_collide_stream_kernel(
         omega_minus,
     )
 
-    for d in range(1, 19):
+    for d in range(1, num_dirs):
         cx = int(cx_arr[d])
         cy = int(cy_arr[d])
         cz = int(cz_arr[d])
@@ -453,6 +396,7 @@ def vof_update_phi_kernel(
     ny: int,
     nz: int,
     stride: int,
+    num_dirs: int,
 ) -> None:
     """Körner mass exchange for interface cells (Eq. 9–10)."""
     i, j, k = wp.tid()
@@ -475,7 +419,7 @@ def vof_update_phi_kernel(
         return
 
     dm = float(0.0)
-    for d in range(1, 19):
+    for d in range(1, num_dirs):
         cx = int(cx_arr[d])
         cy = int(cy_arr[d])
         cz = int(cz_arr[d])
@@ -580,6 +524,7 @@ def vof_redistribute_excess_kernel(
     nx: int,
     ny: int,
     nz: int,
+    num_dirs: int,
 ) -> None:
     """Spread truncated / orphan φ onto neighbouring interface cells."""
     i, j, k = wp.tid()
@@ -590,7 +535,7 @@ def vof_redistribute_excess_kernel(
 
     # Gather excess from neighbours that just filled/emptied / orphans.
     add = float(0.0)
-    for d in range(1, 19):
+    for d in range(1, num_dirs):
         ni = _wrap_index(i + int(cx_arr[d]), nx, px)
         nj = _wrap_index(j + int(cy_arr[d]), ny, py)
         nk = _wrap_index(k + int(cz_arr[d]), nz, pz)
@@ -603,7 +548,7 @@ def vof_redistribute_excess_kernel(
             continue
         # Count how many interface/liquid receivers that donor has.
         n_recv = float(0.0)
-        for d2 in range(1, 19):
+        for d2 in range(1, num_dirs):
             ri = _wrap_index(ni + int(cx_arr[d2]), nx, px)
             rj = _wrap_index(nj + int(cy_arr[d2]), ny, py)
             rk = _wrap_index(nk + int(cz_arr[d2]), nz, pz)
@@ -637,6 +582,7 @@ def vof_convert_neighbors_kernel(
     nx: int,
     ny: int,
     nz: int,
+    num_dirs: int,
 ) -> None:
     """Keep a closed interface layer after fill/empty conversions."""
     i, j, k = wp.tid()
@@ -647,7 +593,7 @@ def vof_convert_neighbors_kernel(
 
     # Gas neighbour of a newly filled cell → interface
     if ctype == CELL_GAS:
-        for d in range(1, 19):
+        for d in range(1, num_dirs):
             ni = _wrap_index(i + int(cx_arr[d]), nx, px)
             nj = _wrap_index(j + int(cy_arr[d]), ny, py)
             nk = _wrap_index(k + int(cz_arr[d]), nz, pz)
@@ -663,7 +609,7 @@ def vof_convert_neighbors_kernel(
 
     # Liquid neighbour of a newly emptied cell → interface
     if ctype == CELL_LIQUID:
-        for d in range(1, 19):
+        for d in range(1, num_dirs):
             ni = _wrap_index(i + int(cx_arr[d]), nx, px)
             nj = _wrap_index(j + int(cy_arr[d]), ny, py)
             nk = _wrap_index(k + int(cz_arr[d]), nz, pz)
@@ -692,6 +638,7 @@ def vof_fix_topology_kernel(
     nx: int,
     ny: int,
     nz: int,
+    num_dirs: int,
 ) -> None:
     """Remove orphan interface films; stash φ into excess for redistribute.
 
@@ -707,7 +654,7 @@ def vof_fix_topology_kernel(
     has_liquid = int(0)
     has_gas = int(0)
     has_interface = int(0)
-    for d in range(1, 19):
+    for d in range(1, num_dirs):
         ni = _wrap_index(i + int(cx_arr[d]), nx, px)
         nj = _wrap_index(j + int(cy_arr[d]), ny, py)
         nk = _wrap_index(k + int(cz_arr[d]), nz, pz)
@@ -756,6 +703,7 @@ def vof_init_new_interface_kernel(
     nz: int,
     stride: int,
     rho_default: float,
+    num_dirs: int,
 ) -> None:
     """Init gas→interface from neighbour macros (eq only; φ already seeded)."""
     i, j, k = wp.tid()
@@ -772,7 +720,7 @@ def vof_init_new_interface_kernel(
     uy_sum = float(0.0)
     uz_sum = float(0.0)
     count = float(0.0)
-    for d in range(1, 19):
+    for d in range(1, num_dirs):
         ni = _wrap_index(i + int(cx_arr[d]), nx, px)
         nj = _wrap_index(j + int(cy_arr[d]), ny, py)
         nk = _wrap_index(k + int(cz_arr[d]), nz, pz)
@@ -803,7 +751,7 @@ def vof_init_new_interface_kernel(
 
     # Standard FSLBM: equilibrium at neighbour-averaged macros.
     # φ is already seeded (~2e-3); do not invent extra VOF volume here.
-    for d in range(19):
+    for d in range(num_dirs):
         f[d * stride + idx] = _f_eq(
             w_arr[d],
             rho_c,
@@ -898,6 +846,7 @@ def vof_sanitize_distributions_kernel(
     ny: int,
     nz: int,
     stride: int,
+    num_dirs: int,
 ) -> None:
     """Rescale or reset DFs when density / populations leave the safe band."""
     i, j, k = wp.tid()
@@ -908,7 +857,7 @@ def vof_sanitize_distributions_kernel(
 
     r = float(0.0)
     bad = int(0)
-    for d in range(19):
+    for d in range(num_dirs):
         val = f[d * stride + idx]
         if val != val or val < -1.0e-6 or val > 1.0e3:
             bad = 1
@@ -921,7 +870,7 @@ def vof_sanitize_distributions_kernel(
             if p < 0.05:
                 p = 0.05
             target = rho0 * p
-        for d in range(19):
+        for d in range(num_dirs):
             f[d * stride + idx] = w_arr[d] * target
         return
 
@@ -932,7 +881,7 @@ def vof_sanitize_distributions_kernel(
             scale = 1.1
         if scale < 0.9:
             scale = 0.9
-        for d in range(19):
+        for d in range(num_dirs):
             f[d * stride + idx] = f[d * stride + idx] * scale
 
 
@@ -951,6 +900,7 @@ def vof_mild_topology_kernel(
     nx: int,
     ny: int,
     nz: int,
+    num_dirs: int,
 ) -> None:
     """Light topology cleanup without wiping connected free-surface sheets.
 
@@ -966,7 +916,7 @@ def vof_mild_topology_kernel(
     has_liquid = int(0)
     has_gas = int(0)
     has_interface = int(0)
-    for d in range(1, 19):
+    for d in range(1, num_dirs):
         ni = _wrap_index(i + int(cx_arr[d]), nx, px)
         nj = _wrap_index(j + int(cy_arr[d]), ny, py)
         nk = _wrap_index(k + int(cz_arr[d]), nz, pz)
@@ -1017,11 +967,12 @@ def vof_zero_gas_distributions_kernel(
     ny: int,
     nz: int,
     stride: int,
+    num_dirs: int,
 ) -> None:
     i, j, k = wp.tid()
     idx = i * ny * nz + j * nz + k
     if int(cell_type[i, j, k]) == CELL_GAS:
-        for d in range(19):
+        for d in range(num_dirs):
             f[d * stride + idx] = 0.0
 
 
@@ -1066,6 +1017,10 @@ def apply_gravity_velocity_shift_vof_kernel(
 def apply_guo_force_vof_kernel(
     f: wp.array(dtype=float),
     cell_type: wp.array3d(dtype=wp.int32),
+    cx_arr: wp.array(dtype=wp.int32),
+    cy_arr: wp.array(dtype=wp.int32),
+    cz_arr: wp.array(dtype=wp.int32),
+    w_arr: wp.array(dtype=float),
     fx: float,
     fy: float,
     fz: float,
@@ -1074,8 +1029,12 @@ def apply_guo_force_vof_kernel(
     ny: int,
     nz: int,
     stride: int,
+    num_dirs: int,
 ) -> None:
-    """Guo body force on liquid/interface cells only."""
+    """Guo body force on liquid/interface cells only.
+
+    ``Deltaf_d = (1 - omega/2) · w_d · 3 · (c_d · F)`` (same as single-phase Guo).
+    """
     i, j, k = wp.tid()
     ctype = int(cell_type[i, j, k])
     if ctype == CELL_GAS:
@@ -1083,25 +1042,12 @@ def apply_guo_force_vof_kernel(
     idx = i * ny * nz + j * nz + k
     factor = (1.0 - omega * 0.5) * 3.0
 
-    f[1 * stride + idx] += factor * (1.0 / 18.0) * fx
-    f[2 * stride + idx] += factor * (1.0 / 18.0) * (-fx)
-    f[3 * stride + idx] += factor * (1.0 / 18.0) * fy
-    f[4 * stride + idx] += factor * (1.0 / 18.0) * (-fy)
-    f[5 * stride + idx] += factor * (1.0 / 18.0) * fz
-    f[6 * stride + idx] += factor * (1.0 / 18.0) * (-fz)
-
-    f[7 * stride + idx] += factor * (1.0 / 36.0) * (fx + fy)
-    f[8 * stride + idx] += factor * (1.0 / 36.0) * (-fx + fy)
-    f[9 * stride + idx] += factor * (1.0 / 36.0) * (fx - fy)
-    f[10 * stride + idx] += factor * (1.0 / 36.0) * (-fx - fy)
-    f[11 * stride + idx] += factor * (1.0 / 36.0) * (fx + fz)
-    f[12 * stride + idx] += factor * (1.0 / 36.0) * (-fx + fz)
-    f[13 * stride + idx] += factor * (1.0 / 36.0) * (fx - fz)
-    f[14 * stride + idx] += factor * (1.0 / 36.0) * (-fx - fz)
-    f[15 * stride + idx] += factor * (1.0 / 36.0) * (fy + fz)
-    f[16 * stride + idx] += factor * (1.0 / 36.0) * (-fy + fz)
-    f[17 * stride + idx] += factor * (1.0 / 36.0) * (fy - fz)
-    f[18 * stride + idx] += factor * (1.0 / 36.0) * (-fy - fz)
+    for d in range(num_dirs):
+        cx = float(cx_arr[d])
+        cy = float(cy_arr[d])
+        cz = float(cz_arr[d])
+        w = w_arr[d]
+        f[d * stride + idx] = f[d * stride + idx] + factor * w * (cx * fx + cy * fy + cz * fz)
 
 
 @wp.kernel
@@ -1110,6 +1056,7 @@ def vof_seed_column_kernel(
     density: wp.array3d(dtype=float),
     phi: wp.array3d(dtype=float),
     cell_type: wp.array3d(dtype=wp.int32),
+    w_arr: wp.array(dtype=float),
     dam_x: int,
     fill_z: int,
     rho_liquid: float,
@@ -1117,6 +1064,7 @@ def vof_seed_column_kernel(
     ny: int,
     nz: int,
     stride: int,
+    num_dirs: int,
 ) -> None:
     """Initialise a rectangular liquid column for dam-break VOF."""
     i, j, k = wp.tid()
@@ -1135,11 +1083,8 @@ def vof_seed_column_kernel(
         rho = 0.0
 
     density[i, j, k] = rho
-    f[0 * stride + idx] = (1.0 / 3.0) * rho
-    for d in range(1, 7):
-        f[d * stride + idx] = (1.0 / 18.0) * rho
-    for d in range(7, 19):
-        f[d * stride + idx] = (1.0 / 36.0) * rho
+    for d in range(num_dirs):
+        f[d * stride + idx] = w_arr[d] * rho
 
 
 @wp.kernel
@@ -1156,6 +1101,7 @@ def vof_mark_initial_interface_kernel(
     nx: int,
     ny: int,
     nz: int,
+    num_dirs: int,
 ) -> None:
     """Convert liquid cells that touch gas into interface (φ = 1)."""
     i, j, k = wp.tid()
@@ -1164,7 +1110,7 @@ def vof_mark_initial_interface_kernel(
     if int(cell_type[i, j, k]) != CELL_LIQUID:
         return
 
-    for d in range(1, 19):
+    for d in range(1, num_dirs):
         ni = _wrap_index(i + int(cx_arr[d]), nx, px)
         nj = _wrap_index(j + int(cy_arr[d]), ny, py)
         nk = _wrap_index(k + int(cz_arr[d]), nz, pz)

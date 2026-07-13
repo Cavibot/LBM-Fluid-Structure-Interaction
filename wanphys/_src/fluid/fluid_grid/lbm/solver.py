@@ -1,17 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""D3Q19 Lattice Boltzmann method – BGK solver pipeline."""
+"""Distribution Lattice Boltzmann method – BGK/TRT solver pipeline."""
 
 from __future__ import annotations
 
 import time
 from typing import Any, Optional
 
+import numpy as np
 import warp as wp
 
 from ..base import FluidGridSolverBase
 from . import kernels
+from . import kernels_q
 from .core.pipeline import LbmStepControl, StepStats
 from .model import LbmModel
 from .phases.shan_chen import MacroscopicBuffers, ShanChenPhase
@@ -26,7 +28,7 @@ def _resolve_step_control(control: Any | None) -> LbmStepControl:
 
 
 class LbmSolver(FluidGridSolverBase):
-    """D3Q19 BGK-LBM solver with Guo forcing and halfway bounce-back.
+    """Distribution LBM solver (D3Q19 / D3Q27) with Guo forcing and halfway BB.
 
     The solver owns temporary arrays for macroscopic moments that are
     reused across steps.  Distribution functions and visualisation fields
@@ -51,6 +53,26 @@ class LbmSolver(FluidGridSolverBase):
 
         # Stride for flat-array indexing: nx * ny * nz
         self._stride: int = self.nx * self.ny * self.nz
+        self._use_q_kernels: bool = self.num_dirs != 19
+
+        spec = model.lattice_spec
+        self._cx = wp.array(
+            np.asarray(spec.cx, dtype=np.int32), dtype=wp.int32, device=self.device
+        )
+        self._cy = wp.array(
+            np.asarray(spec.cy, dtype=np.int32), dtype=wp.int32, device=self.device
+        )
+        self._cz = wp.array(
+            np.asarray(spec.cz, dtype=np.int32), dtype=wp.int32, device=self.device
+        )
+        self._w = wp.array(
+            np.asarray(spec.weights, dtype=np.float32), dtype=float, device=self.device
+        )
+        self._opp = wp.array(
+            np.asarray(spec.opposite, dtype=np.int32),
+            dtype=wp.int32,
+            device=self.device,
+        )
 
         self._shan_chen: ShanChenPhase = ShanChenPhase(model)
         self._vof_sharp: VofSharpPhase = VofSharpPhase(model)
@@ -208,6 +230,26 @@ class LbmSolver(FluidGridSolverBase):
             self._vof_sharp.compute_moments(
                 state_in, buffers, self.nx, self.ny, self.nz, self._stride
             )
+        elif self._use_q_kernels:
+            wp.launch(
+                kernels_q.compute_moments_q_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    state_in.f,
+                    self._cx,
+                    self._cy,
+                    self._cz,
+                    self.num_dirs,
+                    self._stride,
+                    self.nx,
+                    self.ny,
+                    self.nz,
+                    self._rho,
+                    self._ux,
+                    self._uy,
+                    self._uz,
+                ],
+            )
         else:
             wp.launch(
                 kernels.compute_moments_kernel,
@@ -256,8 +298,10 @@ class LbmSolver(FluidGridSolverBase):
 
         # ---- 3. Regularization filter (pre-collision) -------------------
         # Skip under VOF: gas cells have zero DFs and must not be filtered.
+        # Skip under D3Q27: reg_trt_kernel is D3Q19-only (model already rejects).
         if (
             (not use_vof)
+            and (not self._use_q_kernels)
             and self.model.use_regularization
             and self.model.omega_reg > 0.0
         ):
@@ -288,6 +332,38 @@ class LbmSolver(FluidGridSolverBase):
                 self.nz,
                 self._stride,
             )
+        elif self._use_q_kernels:
+            wp.launch(
+                kernels_q.collide_stream_bounceback_q_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    state_in.f,
+                    self._rho,
+                    self._ux,
+                    self._uy,
+                    self._uz,
+                    state_out.solid_phi,
+                    state_out.vel_solid_u,
+                    state_out.vel_solid_v,
+                    state_out.vel_solid_w,
+                    state_out.f,
+                    self._cx,
+                    self._cy,
+                    self._cz,
+                    self._w,
+                    self._opp,
+                    self.model.omega_plus,
+                    self.model.omega_minus,
+                    self.num_dirs,
+                    px,
+                    py,
+                    pz,
+                    self.nx,
+                    self.ny,
+                    self.nz,
+                    self._stride,
+                ],
+            )
         else:
             wp.launch(
                 kernels.collide_stream_bounceback_kernel,
@@ -307,19 +383,22 @@ class LbmSolver(FluidGridSolverBase):
 
         # ---- 5. Apply non-bounce-back boundary conditions -----------------
         t0 = time.perf_counter() if collect_stats else 0.0
+        # Q-generic Zou-He / outflow (D3Q19 + D3Q27, including body diagonals).
         wp.launch(
-            kernels.apply_boundary_conditions_kernel,
+            kernels_q.apply_boundary_conditions_q_kernel,
             dim=(self.nx, self.ny, self.nz),
             inputs=[
                 state_out.f,
-                self._rho,
-                self._ux,
-                self._uy,
-                self._uz,
                 self._bc_types,
                 self._bc_vel_x,
                 self._bc_vel_y,
                 self._bc_vel_z,
+                self._cx,
+                self._cy,
+                self._cz,
+                self._w,
+                self._opp,
+                self.num_dirs,
                 self.nx,
                 self.ny,
                 self.nz,
@@ -334,21 +413,43 @@ class LbmSolver(FluidGridSolverBase):
         # and matches the SC gravity path that dam-break already tunes around).
         if (not use_vof) and G_sc == 0.0 and (gx != 0.0 or gy != 0.0 or gz != 0.0):
             t0 = time.perf_counter() if collect_stats else 0.0
-            wp.launch(
-                kernels.apply_guo_force_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    state_out.f,
-                    gx,
-                    gy,
-                    gz,
-                    self.model.omega,
-                    self.nx,
-                    self.ny,
-                    self.nz,
-                    self._stride,
-                ],
-            )
+            if self._use_q_kernels:
+                wp.launch(
+                    kernels_q.apply_guo_force_q_kernel,
+                    dim=(self.nx, self.ny, self.nz),
+                    inputs=[
+                        state_out.f,
+                        self._cx,
+                        self._cy,
+                        self._cz,
+                        self._w,
+                        gx,
+                        gy,
+                        gz,
+                        self.model.omega,
+                        self.num_dirs,
+                        self.nx,
+                        self.ny,
+                        self.nz,
+                        self._stride,
+                    ],
+                )
+            else:
+                wp.launch(
+                    kernels.apply_guo_force_kernel,
+                    dim=(self.nx, self.ny, self.nz),
+                    inputs=[
+                        state_out.f,
+                        gx,
+                        gy,
+                        gz,
+                        self.model.omega,
+                        self.nx,
+                        self.ny,
+                        self.nz,
+                        self._stride,
+                    ],
+                )
             if stats is not None:
                 stats.ms_body_force = (time.perf_counter() - t0) * 1000.0
 
@@ -453,21 +554,43 @@ class LbmSolver(FluidGridSolverBase):
         """
         u0x, u0y, u0z = u0
 
-        wp.launch(
-            kernels.initialize_equilibrium_kernel,
-            dim=(self.nx, self.ny, self.nz),
-            inputs=[
-                state.f,
-                rho0,
-                u0x,
-                u0y,
-                u0z,
-                self.nx,
-                self.ny,
-                self.nz,
-                self._stride,
-            ],
-        )
+        if self._use_q_kernels:
+            wp.launch(
+                kernels_q.initialize_equilibrium_q_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    state.f,
+                    self._cx,
+                    self._cy,
+                    self._cz,
+                    self._w,
+                    rho0,
+                    u0x,
+                    u0y,
+                    u0z,
+                    self.num_dirs,
+                    self.nx,
+                    self.ny,
+                    self.nz,
+                    self._stride,
+                ],
+            )
+        else:
+            wp.launch(
+                kernels.initialize_equilibrium_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    state.f,
+                    rho0,
+                    u0x,
+                    u0y,
+                    u0z,
+                    self.nx,
+                    self.ny,
+                    self.nz,
+                    self._stride,
+                ],
+            )
 
         # Populate macroscopic fields for consistency
         state.density.fill_(rho0)

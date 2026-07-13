@@ -8,7 +8,6 @@ from __future__ import annotations
 import numpy as np
 import warp as wp
 
-from ..core.lattice import CX, CY, CZ, OPPOSITE, W
 from ..model import LbmModel
 from ..state import LbmState
 from . import vof_kernels
@@ -17,7 +16,7 @@ from .shan_chen import MacroscopicBuffers
 
 
 class VofSharpPhase:
-    """Sharp free-surface VOF on top of the distribution D3Q19 LBM.
+    """Sharp free-surface VOF on top of the distribution LBM (D3Q19 / D3Q27).
 
     - Skip gas collide/stream
     - Interface missing DFs via Eq. (11) with ``ρ_g = ρ_atm - 6 γ κ``
@@ -29,12 +28,16 @@ class VofSharpPhase:
     def __init__(self, model: LbmModel) -> None:
         self.model: LbmModel = model
         device = model._device
-        self._cx = wp.array(np.asarray(CX, dtype=np.int32), dtype=wp.int32, device=device)
-        self._cy = wp.array(np.asarray(CY, dtype=np.int32), dtype=wp.int32, device=device)
-        self._cz = wp.array(np.asarray(CZ, dtype=np.int32), dtype=wp.int32, device=device)
-        self._w = wp.array(np.asarray(W, dtype=np.float32), dtype=float, device=device)
+        spec = model.lattice_spec
+        self._num_dirs = int(spec.num_dirs)
+        self._cx = wp.array(np.asarray(spec.cx, dtype=np.int32), dtype=wp.int32, device=device)
+        self._cy = wp.array(np.asarray(spec.cy, dtype=np.int32), dtype=wp.int32, device=device)
+        self._cz = wp.array(np.asarray(spec.cz, dtype=np.int32), dtype=wp.int32, device=device)
+        self._w = wp.array(
+            np.asarray(spec.weights, dtype=np.float32), dtype=float, device=device
+        )
         self._opp = wp.array(
-            np.asarray(OPPOSITE, dtype=np.int32), dtype=wp.int32, device=device
+            np.asarray(spec.opposite, dtype=np.int32), dtype=wp.int32, device=device
         )
 
         nx, ny, nz = int(model.nx), int(model.ny), int(model.nz)
@@ -83,6 +86,10 @@ class VofSharpPhase:
             inputs=[
                 state.f,
                 state.cell_type,
+                self._cx,
+                self._cy,
+                self._cz,
+                self._num_dirs,
                 stride,
                 nx,
                 ny,
@@ -176,6 +183,7 @@ class VofSharpPhase:
                 ny,
                 nz,
                 stride,
+                self._num_dirs,
             ],
         )
         wp.launch(
@@ -191,6 +199,7 @@ class VofSharpPhase:
                 ny,
                 nz,
                 stride,
+                self._num_dirs,
             ],
         )
 
@@ -229,6 +238,7 @@ class VofSharpPhase:
                 ny,
                 nz,
                 stride,
+                self._num_dirs,
             ],
         )
         wp.copy(state_out.phi, self._phi_tmp)
@@ -271,6 +281,7 @@ class VofSharpPhase:
                 nx,
                 ny,
                 nz,
+                self._num_dirs,
             ],
         )
 
@@ -291,6 +302,7 @@ class VofSharpPhase:
                 nx,
                 ny,
                 nz,
+                self._num_dirs,
             ],
         )
 
@@ -312,6 +324,7 @@ class VofSharpPhase:
                 nx,
                 ny,
                 nz,
+                self._num_dirs,
             ],
         )
         self._excess_phi.zero_()
@@ -353,13 +366,22 @@ class VofSharpPhase:
                 nz,
                 stride,
                 float(self.model.initial_density),
+                self._num_dirs,
             ],
         )
 
         wp.launch(
             vof_kernels.vof_zero_gas_distributions_kernel,
             dim=(nx, ny, nz),
-            inputs=[state_out.f, state_out.cell_type, nx, ny, nz, stride],
+            inputs=[
+                state_out.f,
+                state_out.cell_type,
+                nx,
+                ny,
+                nz,
+                stride,
+                self._num_dirs,
+            ],
         )
 
         # Sanitize again after interface init / type changes.
@@ -376,6 +398,7 @@ class VofSharpPhase:
                 ny,
                 nz,
                 stride,
+                self._num_dirs,
             ],
         )
 
@@ -489,6 +512,10 @@ class VofSharpPhase:
             inputs=[
                 state.f,
                 cell_type,
+                self._cx,
+                self._cy,
+                self._cz,
+                self._w,
                 gx,
                 gy,
                 gz,
@@ -497,6 +524,7 @@ class VofSharpPhase:
                 ny,
                 nz,
                 stride,
+                self._num_dirs,
             ],
         )
 
@@ -521,6 +549,7 @@ class VofSharpPhase:
                 state.density,
                 state.phi,
                 state.cell_type,
+                self._w,
                 int(dam_x),
                 int(fill_z),
                 rho0,
@@ -528,6 +557,7 @@ class VofSharpPhase:
                 ny,
                 nz,
                 stride,
+                self._num_dirs,
             ],
         )
         wp.launch(
@@ -546,6 +576,7 @@ class VofSharpPhase:
                 nx,
                 ny,
                 nz,
+                self._num_dirs,
             ],
         )
         state.velocity_x.zero_()

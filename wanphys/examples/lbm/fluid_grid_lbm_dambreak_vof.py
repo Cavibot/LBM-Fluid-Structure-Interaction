@@ -3,8 +3,9 @@
 
 """TRT FSLBM / VOF sharp free-surface dam-break (no Shan-Chen).
 
-Uses ``phase_mode='vof_sharp'`` on the existing D3Q19 distribution LBM.
+Uses ``phase_mode='vof_sharp'`` on the distribution LBM (D3Q27 by default).
 Paper note: BGK/TRT FSLBM dam-break can be fragile; keep mild gravity.
+D3Q27 ``lambda_trt`` still uses the D3Q19-tuned value; retune later if needed.
 
 Controls: [Space] pause/resume  [R] reset  [mouse] orbit  [scroll] zoom
 """
@@ -26,8 +27,10 @@ from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRende
 # ---------------------------------------------------------------------------
 N: int = 64
 DH: float = 0.02
+LATTICE: str = "D3Q27"
 
 # Stability-first dam-break (paper Fig.8: BGK/TRT FSLBM is fragile).
+# lambda_trt: D3Q19-tuned; keep mild until D3Q27 retuning.
 TAU: float = 0.58
 LAMBDA_TRT: float = 0.015
 GRAVITY: float = -0.0012
@@ -57,6 +60,7 @@ class VofDamBreak:
         self.model = LbmModel(
             fluid_grid_res=(N, N, N),
             fluid_grid_cell_size=DH,
+            lattice=LATTICE,
             tau=TAU,
             G=0.0,
             phase_mode="vof_sharp",
@@ -72,7 +76,8 @@ class VofDamBreak:
         )
         n = int(self.model.nx)
         print(
-            f"VOF Dam-Break: {n}^3, tau={TAU}, lambda={LAMBDA_TRT}, "
+            f"VOF Dam-Break: {n}^3, lattice={self.model.lattice}, "
+            f"tau={TAU}, lambda={LAMBDA_TRT}, "
             f"gz={GRAVITY}, gamma={VOF_GAMMA}, kappa_smooth={VOF_KAPPA_SMOOTH}, "
             f"phase_mode=vof_sharp"
         )
