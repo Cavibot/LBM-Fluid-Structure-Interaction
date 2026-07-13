@@ -15,6 +15,7 @@ from . import kernels
 from .core.pipeline import LbmStepControl, StepStats
 from .model import LbmModel
 from .phases.shan_chen import MacroscopicBuffers, ShanChenPhase
+from .phases.vof_sharp import VofSharpPhase
 from .state import LbmState
 
 
@@ -32,6 +33,7 @@ class LbmSolver(FluidGridSolverBase):
     live on :class:`LbmState`.
 
     Shan-Chen multiphase forcing is delegated to :class:`ShanChenPhase`.
+    Sharp free-surface VOF is delegated to :class:`VofSharpPhase`.
 
     Parameters
     ----------
@@ -51,6 +53,7 @@ class LbmSolver(FluidGridSolverBase):
         self._stride: int = self.nx * self.ny * self.nz
 
         self._shan_chen: ShanChenPhase = ShanChenPhase(model)
+        self._vof_sharp: VofSharpPhase = VofSharpPhase(model)
 
         # ---- Boundary condition arrays (synced from model) ------------------
         self._bc_types = wp.zeros(6, dtype=wp.int32, device=self.device)
@@ -193,27 +196,38 @@ class LbmSolver(FluidGridSolverBase):
         wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
         wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
 
+        use_vof = self._vof_sharp.enabled
+        if use_vof:
+            # Keep phase fields coherent during the step (force / stream).
+            wp.copy(state_out.phi, state_in.phi)
+            wp.copy(state_out.cell_type, state_in.cell_type)
+
         # ---- 1. Compute macroscopic moments (rho, u) from f ----------------
         t0 = time.perf_counter() if collect_stats else 0.0
-        wp.launch(
-            kernels.compute_moments_kernel,
-            dim=(self.nx, self.ny, self.nz),
-            inputs=[
-                state_in.f,
-                self._stride,
-                self.nx,
-                self.ny,
-                self.nz,
-                self._rho,
-                self._ux,
-                self._uy,
-                self._uz,
-            ],
-        )
+        if use_vof:
+            self._vof_sharp.compute_moments(
+                state_in, buffers, self.nx, self.ny, self.nz, self._stride
+            )
+        else:
+            wp.launch(
+                kernels.compute_moments_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    state_in.f,
+                    self._stride,
+                    self.nx,
+                    self.ny,
+                    self.nz,
+                    self._rho,
+                    self._ux,
+                    self._uy,
+                    self._uz,
+                ],
+            )
         if stats is not None:
             stats.ms_moments = (time.perf_counter() - t0) * 1000.0
 
-        # ---- 2. Phase pre-collision (Shan-Chen) ---------------------------
+        # ---- 2. Phase pre-collision (Shan-Chen or VOF gravity shift) ------
         if self._shan_chen.enabled:
             t0 = time.perf_counter() if collect_stats else 0.0
             self._shan_chen.pre_collision(
@@ -225,9 +239,28 @@ class LbmSolver(FluidGridSolverBase):
             )
             if stats is not None:
                 stats.ms_phase = (time.perf_counter() - t0) * 1000.0
+        elif use_vof and (gx != 0.0 or gy != 0.0 or gz != 0.0):
+            t0 = time.perf_counter() if collect_stats else 0.0
+            self._vof_sharp.apply_gravity_shift(
+                buffers,
+                state_in.cell_type,
+                gx,
+                gy,
+                gz,
+                self.nx,
+                self.ny,
+                self.nz,
+            )
+            if stats is not None:
+                stats.ms_phase = (time.perf_counter() - t0) * 1000.0
 
         # ---- 3. Regularization filter (pre-collision) -------------------
-        if self.model.use_regularization and self.model.omega_reg > 0.0:
+        # Skip under VOF: gas cells have zero DFs and must not be filtered.
+        if (
+            (not use_vof)
+            and self.model.use_regularization
+            and self.model.omega_reg > 0.0
+        ):
             t0 = time.perf_counter() if collect_stats else 0.0
             wp.launch(
                 kernels.reg_trt_kernel,
@@ -245,19 +278,30 @@ class LbmSolver(FluidGridSolverBase):
 
         # ---- 4. BGK/TRT collide + stream --------------------------------
         t0 = time.perf_counter() if collect_stats else 0.0
-        wp.launch(
-            kernels.collide_stream_bounceback_kernel,
-            dim=(self.nx, self.ny, self.nz),
-            inputs=[
-                state_in.f, self._rho, self._ux, self._uy, self._uz,
-                state_out.solid_phi,
-                state_out.vel_solid_u, state_out.vel_solid_v, state_out.vel_solid_w,
-                state_out.f,
-                self.model.omega_plus, self.model.omega_minus,
-                px, py, pz,
-                self.nx, self.ny, self.nz, self._stride,
-            ],
-        )
+        if use_vof:
+            self._vof_sharp.collide_stream(
+                state_in,
+                state_out,
+                buffers,
+                self.nx,
+                self.ny,
+                self.nz,
+                self._stride,
+            )
+        else:
+            wp.launch(
+                kernels.collide_stream_bounceback_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    state_in.f, self._rho, self._ux, self._uy, self._uz,
+                    state_out.solid_phi,
+                    state_out.vel_solid_u, state_out.vel_solid_v, state_out.vel_solid_w,
+                    state_out.f,
+                    self.model.omega_plus, self.model.omega_minus,
+                    px, py, pz,
+                    self.nx, self.ny, self.nz, self._stride,
+                ],
+            )
         if stats is not None:
             stats.ms_collision = (time.perf_counter() - t0) * 1000.0
 
@@ -285,8 +329,10 @@ class LbmSolver(FluidGridSolverBase):
         if stats is not None:
             stats.ms_bc = (time.perf_counter() - t0) * 1000.0
 
-        # ---- 5a. Guo body force (post-collision, gravity-only path) -------
-        if G_sc == 0.0 and (gx != 0.0 or gy != 0.0 or gz != 0.0):
+        # ---- 5a. Guo body force (single-phase path only) ------------------
+        # VOF uses pre-collision velocity shift instead (avoids stale cell_type
+        # and matches the SC gravity path that dam-break already tunes around).
+        if (not use_vof) and G_sc == 0.0 and (gx != 0.0 or gy != 0.0 or gz != 0.0):
             t0 = time.perf_counter() if collect_stats else 0.0
             wp.launch(
                 kernels.apply_guo_force_kernel,
@@ -306,7 +352,7 @@ class LbmSolver(FluidGridSolverBase):
             if stats is not None:
                 stats.ms_body_force = (time.perf_counter() - t0) * 1000.0
 
-        # ---- 5b. Phase post-collision (restore SC velocity) ---------------
+        # ---- 5b. Phase post-collision (SC restore / VOF φ update) ---------
         if self._shan_chen.enabled:
             t0 = time.perf_counter() if collect_stats else 0.0
             self._shan_chen.post_collision(
@@ -315,6 +361,23 @@ class LbmSolver(FluidGridSolverBase):
                 self.nx,
                 self.ny,
                 self.nz,
+            )
+            if stats is not None:
+                stats.ms_phase += (time.perf_counter() - t0) * 1000.0
+        elif use_vof:
+            t0 = time.perf_counter() if collect_stats else 0.0
+            self._vof_sharp.update_interface(
+                state_in,
+                state_out,
+                buffers,
+                self.nx,
+                self.ny,
+                self.nz,
+                self._stride,
+            )
+            # Refresh macros after fill/empty / new-interface init.
+            self._vof_sharp.compute_moments(
+                state_out, buffers, self.nx, self.ny, self.nz, self._stride
             )
             if stats is not None:
                 stats.ms_phase += (time.perf_counter() - t0) * 1000.0
@@ -413,3 +476,4 @@ class LbmSolver(FluidGridSolverBase):
         state.velocity_z.fill_(u0z)
         state.pressure.fill_(rho0 / 3.0)
         self._shan_chen.reset()
+        self._vof_sharp.reset()

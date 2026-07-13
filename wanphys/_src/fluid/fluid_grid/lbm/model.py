@@ -48,6 +48,23 @@ class LbmModel(FluidGridModelBase):
     gravity_z: float = 0.0
     """Gravity / body-force z-component in lattice units."""
 
+    # ---- Phase interface mode --------------------------------------------
+    phase_mode: str = "none"
+    """Interface model: ``none`` | ``shan_chen`` | ``vof_sharp``.
+
+    - ``none``: single-phase (optionally with Guo gravity when ``G == 0``).
+    - ``shan_chen``: diffuse-interface SC (requires ``G != 0``).
+    - ``vof_sharp``: FSLBM-style free-surface VOF (``G`` must be 0).
+    """
+
+    # ---- VOF sharp free-surface (FSLBM) ----------------------------------
+    vof_epsilon: float = 1.0e-4
+    """φ fill/empty threshold for L/I/G reclassification."""
+    vof_rho_gas: float = 1.0
+    """Gas density used in free-surface pressure BC (ρ_g = p_g / c_s²)."""
+    vof_gamma: float = 0.0
+    """Surface tension γ (0 disables curvature contribution in ρ_g)."""
+
     # ---- Shan-Chen multiphase interaction --------------------------------
     G: float = 0.0
     """Shan-Chen interaction strength.  Negative values produce attraction
@@ -264,6 +281,21 @@ class LbmModel(FluidGridModelBase):
                 f"Regularization blend factor omega_reg must be in [0, 1], "
                 f"got omega_reg = {self.omega_reg}"
             )
+        mode = str(self.phase_mode).lower()
+        if mode not in ("none", "shan_chen", "vof_sharp"):
+            raise ValueError(
+                f"phase_mode must be 'none', 'shan_chen', or 'vof_sharp', "
+                f"got {self.phase_mode!r}"
+            )
+        object.__setattr__(self, "phase_mode", mode)
+        if mode == "shan_chen" and float(self.G) == 0.0:
+            raise ValueError("phase_mode='shan_chen' requires G != 0")
+        if mode == "vof_sharp" and float(self.G) != 0.0:
+            raise ValueError("phase_mode='vof_sharp' requires G == 0 (no Shan-Chen)")
+        if self.vof_epsilon <= 0.0:
+            raise ValueError(f"vof_epsilon must be > 0, got {self.vof_epsilon}")
+        if self.vof_rho_gas <= 0.0:
+            raise ValueError(f"vof_rho_gas must be > 0, got {self.vof_rho_gas}")
         if self.psi_type not in (0, 1):
             raise ValueError(
                 f"Shan-Chen psi_type must be 0 (PSI_RHO) or 1 (PSI_EXP), "

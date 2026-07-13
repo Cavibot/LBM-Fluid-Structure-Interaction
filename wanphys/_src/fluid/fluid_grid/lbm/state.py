@@ -109,6 +109,15 @@ class LbmState(DomainState):
             (nx, ny, nz), dtype=float, device=self.device
         )
 
+        # ---- VOF free-surface (FSLBM) ------------------------------------
+        # phi in [0,1]: liquid volume fraction. cell_type: 0=gas, 1=interface, 2=liquid.
+        self.phi: wp.array3d = wp.zeros(
+            (nx, ny, nz), dtype=float, device=self.device
+        )
+        self.cell_type: wp.array3d = wp.zeros(
+            (nx, ny, nz), dtype=wp.int32, device=self.device
+        )
+
     # ------------------------------------------------------------------
     # DomainState protocol
     # ------------------------------------------------------------------
@@ -140,6 +149,8 @@ class LbmState(DomainState):
         self.force_x.zero_()
         self.force_y.zero_()
         self.force_z.zero_()
+        self.phi.zero_()
+        self.cell_type.zero_()
 
     def clone(self) -> "LbmState":
         """Deep-copy all GPU arrays into a new :class:`LbmState`."""
@@ -161,4 +172,6 @@ class LbmState(DomainState):
         wp.copy(new_state.force_x, self.force_x)
         wp.copy(new_state.force_y, self.force_y)
         wp.copy(new_state.force_z, self.force_z)
+        wp.copy(new_state.phi, self.phi)
+        wp.copy(new_state.cell_type, self.cell_type)
         return new_state

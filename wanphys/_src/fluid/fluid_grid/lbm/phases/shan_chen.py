@@ -43,6 +43,8 @@ class ShanChenPhase:
     @property
     def enabled(self) -> bool:
         """``True`` when Shan-Chen interaction is active (``G != 0``)."""
+        if str(self.model.phase_mode).lower() == "vof_sharp":
+            return False
         return float(self.model.G) != 0.0
 
     def reset(self) -> None:

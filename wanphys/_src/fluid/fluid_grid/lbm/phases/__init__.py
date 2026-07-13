@@ -4,8 +4,10 @@
 """Phase-interface plugins for LBM solvers."""
 
 from .shan_chen import MacroscopicBuffers, ShanChenPhase
+from .vof_sharp import VofSharpPhase
 
 __all__ = [
     "MacroscopicBuffers",
     "ShanChenPhase",
+    "VofSharpPhase",
 ]
