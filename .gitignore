@@ -61,3 +61,6 @@ nul
 .stfolder/
 
 results.csv
+/.deepseek
+/docs/papers
+/temp
