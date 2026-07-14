@@ -44,7 +44,7 @@ uv run --extra examples python wanphys/_src/fluid/fluid_grid/home_fslbm/tests/te
 
 1. **界面→气体质量泄漏**: 静态界面单元因简化 gas-side closure（偶数/奇数方向近似替代参考代码的 se 判定），缓慢向气体单元泄漏质量。全流体封闭域质量守恒正常；存在气体域时每步 ~0.5% 损失。计划阶段 6 修复。
 
-2. **重力驱动排水 NaN**: 重力下 (`g_y=-5e-5`) 排水测试 200 步内出现 NaN，因完整 gas-side closure 未实现。排水测试暂时跳过，阶段 6 修复。
+2. **重力驱动排水 NaN**: 重力下 (`g_y=-5e-5`) 排水测试第 ~53 步出现 NaN，因完整 gas-side closure 未实现。当前 FAIL，阶段 6 修复。
 
 ---
 
