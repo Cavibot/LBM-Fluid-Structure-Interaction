@@ -1,20 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""HOME-FSLBM GPU kernels — distribution reconstruction via coefficient table.
+"""HOME-FSLBM GPU kernels — distribution reconstruction, stream-collide, MRT.
 
 Reference:
-    [REF] Home-FSLBM inc/3D/gpu/mrUtilFuncGpu3D.h:153-266
-    [P4] Wang et al. 2025, Eq.(16-17)
+    [REF] Home-FSLBM inc/3D/gpu/mrUtilFuncGpu3D.h:153-266 (reconstruction)
+    [REF] Home-FSLBM inc/3D/gpu/mrUtilFuncGpu3D.h:424-471 (MRT collision)
+    [REF] Home-FSLBM inc/3D/gpu/mrLbmSolverGpu3D.cu:703-1057 (stream_collide_bvh)
+    [P4] Wang et al. 2025, Eq.(16-17) — 3rd-order Hermite expansion.
+    [P4] Wang et al. 2025, Eq.(18-21) — central-moment MRT collision.
 """
 
 from __future__ import annotations
 
 import warp as wp
 
-from .constants import CS2
+from .constants import CS2, INV_CS2, TYPE_S, TYPE_F, MAX_VELOCITY
 
 
+# ============================================================================
+# Distribution reconstruction  [REF] mrUtilFuncGpu3D.h:153-266
+# ============================================================================
 @wp.func
 def reconstruct_fi_at_index(
     rho: float,
@@ -81,6 +87,28 @@ def reconstruct_fi_at_index(
 
 
 # ============================================================================
+# Equilibrium distribution  [REF] mrUtilFuncGpu3D::calculate_f_eq
+# ============================================================================
+@wp.func
+def equilibrium_fi(
+    rho: float, ux: float, uy: float, uz: float,
+    i: int,
+    c_x: wp.array(dtype=wp.int32),
+    c_y: wp.array(dtype=wp.int32),
+    c_z: wp.array(dtype=wp.int32),
+    w: wp.array(dtype=wp.float32),
+) -> float:
+    """Compute equilibrium distribution f_i^eq for direction *i*.
+
+    [P4] Eq.(16) with S=0 (pure equilibrium, second-order expansion).
+    """
+    cu = float(c_x[i]) * ux + float(c_y[i]) * uy + float(c_z[i]) * uz
+    u2 = ux * ux + uy * uy + uz * uz
+    wi = float(w[i])
+    return rho * wi * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * u2)
+
+
+# ============================================================================
 # Initialisation kernel
 # ============================================================================
 @wp.kernel
@@ -88,7 +116,7 @@ def initialize_equilibrium_kernel(
     f_mom: wp.array(dtype=float),
     mass: wp.array3d(dtype=float),
     phi: wp.array3d(dtype=float),
-    flag: wp.array3d(dtype=wp.int32),
+    flag: wp.array(dtype=wp.int32),
     total_num: int, nx: int, ny: int, nz: int,
     rho0: float, u0_x: float, u0_y: float, u0_z: float,
 ):
@@ -96,10 +124,10 @@ def initialize_equilibrium_kernel(
     if i >= nx or j >= ny or k >= nz:
         return
     cur_ind = k * ny * nx + j * nx + i
-    f = flag[i, j, k]
-    if (f & 0b00001000) != 0:
+    f = flag[cur_ind]
+    if (f & TYPE_S) != 0:
         return
-    is_fluid = (f & 0b00000111) == 0b00000001
+    is_fluid = (f & TYPE_F) == TYPE_F
     f_mom[cur_ind + 0*total_num] = rho0
     f_mom[cur_ind + 1*total_num] = u0_x
     f_mom[cur_ind + 2*total_num] = u0_y
@@ -113,6 +141,367 @@ def initialize_equilibrium_kernel(
     if is_fluid:
         mass[i, j, k] = rho0
         phi[i, j, k] = 1.0
+
+
+# ============================================================================
+# Flag domain faces  [REF] mrSolver3DGpu boundary setup
+# ============================================================================
+@wp.kernel
+def flag_domain_boundary_kernel(
+    flag: wp.array(dtype=wp.int32),
+    nx: int, ny: int, nz: int,
+    bc_types: wp.array(dtype=wp.int32),
+):
+    """Mark domain boundary faces as TYPE_S when bc is bounce_back.
+
+    bc_types[0..5] = (-x, +x, -y, +y, -z, +z): 0=bounce_back, 1=periodic.
+    flag is a 1D flat array of size nx*ny*nz.
+    """
+    i, j, k = wp.tid()
+    idx = k * ny * nx + j * nx + i
+    # -x face
+    if i == 0 and bc_types[0] == 0:
+        flag[idx] = flag[idx] | TYPE_S
+    # +x face
+    if i == nx - 1 and bc_types[1] == 0:
+        flag[idx] = flag[idx] | TYPE_S
+    # -y face
+    if j == 0 and bc_types[2] == 0:
+        flag[idx] = flag[idx] | TYPE_S
+    # +y face
+    if j == ny - 1 and bc_types[3] == 0:
+        flag[idx] = flag[idx] | TYPE_S
+    # -z face
+    if k == 0 and bc_types[4] == 0:
+        flag[idx] = flag[idx] | TYPE_S
+    # +z face
+    if k == nz - 1 and bc_types[5] == 0:
+        flag[idx] = flag[idx] | TYPE_S
+
+
+# ============================================================================
+# Stream + Collide fused kernel  [REF] stream_collide_bvh (simplified, stage 2)
+# ============================================================================
+@wp.kernel
+def stream_collide_kernel(
+    f_mom: wp.array(dtype=float),
+    f_mom_post: wp.array(dtype=float),
+    mass: wp.array3d(dtype=float),
+    phi: wp.array3d(dtype=float),
+    flag: wp.array(dtype=wp.int32),
+    force_x: wp.array3d(dtype=float),
+    force_y: wp.array3d(dtype=float),
+    force_z: wp.array3d(dtype=float),
+    total_num: int, nx: int, ny: int, nz: int,
+    tau: float,
+    gx: float, gy: float, gz: float,
+    max_vel: float,
+    bc_types: wp.array(dtype=wp.int32),
+    coeffs: wp.array(dtype=wp.float32),
+    lattice_w: wp.array(dtype=wp.float32),
+    c_x: wp.array(dtype=wp.int32),
+    c_y: wp.array(dtype=wp.int32),
+    c_z: wp.array(dtype=wp.int32),
+    opp: wp.array(dtype=wp.int32),
+):
+    """Fused stream + central-moment MRT collide kernel.
+
+    Stage 2: single-phase LBGK/MRT without free-surface VOF tracking.
+    Non-TYPE_S cells are treated as bulk fluid.
+
+    Algorithm (one cell per thread):
+        1. Early exit if TYPE_S.
+        2. For each direction d, pull f_i from neighbour (stream):
+           - Bounce-back if neighbour is TYPE_S or out-of-domain solid face.
+           - Otherwise reconstruct from neighbour's 10 stored moments.
+        3. Accumulate post-stream moments (rho*, u*, pixx*..pizz*).
+        4. Apply body force F = rho* * g.
+        5. Velocity clamp: |u*| <= max_vel.
+        6. Central-moment MRT collision [REF] mlGetPIAfterCollision.
+        7. Convert TRUE post-collision moments to stored stress format.
+        8. Write fMomPost.
+
+    Reference:
+        [REF] mrLbmSolverGpu3D.cu:703-1057 (stream_collide_bvh)
+        [REF] mrUtilFuncGpu3D.h:424-471 (mlGetPIAfterCollision)
+    """
+    i, j, k = wp.tid()
+    if i >= nx or j >= ny or k >= nz:
+        return
+
+    cur_ind = k * ny * nx + j * nx + i
+    flagsn = flag[cur_ind]
+
+    # Early exit for solid cells
+    if (flagsn & TYPE_S) != 0:
+        return
+
+    # ---- Load current cell moments (stored as stress S_ab) ----
+    rho_cur = f_mom[cur_ind + 0 * total_num]
+    ux_cur  = f_mom[cur_ind + 1 * total_num]
+    uy_cur  = f_mom[cur_ind + 2 * total_num]
+    uz_cur  = f_mom[cur_ind + 3 * total_num]
+    Sxx_cur = f_mom[cur_ind + 4 * total_num]
+    Sxy_cur = f_mom[cur_ind + 5 * total_num]
+    Sxz_cur = f_mom[cur_ind + 6 * total_num]
+    Syy_cur = f_mom[cur_ind + 7 * total_num]
+    Syz_cur = f_mom[cur_ind + 8 * total_num]
+    Szz_cur = f_mom[cur_ind + 9 * total_num]
+
+    # ---- Post-stream moments (accumulate over 27 directions) ----
+    # Warp requires dynamic variables declared with float() for use in
+    # dynamic for-loops.
+    rho_star = float(0.0)
+    ux_star = float(0.0);   uy_star = float(0.0);   uz_star = float(0.0)
+    pixx_star = float(0.0); pixy_star = float(0.0); pixz_star = float(0.0)
+    piyy_star = float(0.0); piyz_star = float(0.0); pizz_star = float(0.0)
+
+    for d in range(27):
+        nx_i = i - c_x[d]
+        ny_i = j - c_y[d]
+        nz_i = k - c_z[d]
+
+        use_bounce = False
+
+        # Handle domain-boundary faces — independent ifs, NOT elif!
+        # Corner directions have multiple out-of-bounds dims.
+        if nx_i < 0:
+            if bc_types[0] == 0:
+                use_bounce = True
+            else:
+                nx_i = nx_i + nx
+        if nx_i >= nx:
+            if bc_types[1] == 0:
+                use_bounce = True
+            else:
+                nx_i = nx_i - nx
+        if ny_i < 0:
+            if bc_types[2] == 0:
+                use_bounce = True
+            else:
+                ny_i = ny_i + ny
+        if ny_i >= ny:
+            if bc_types[3] == 0:
+                use_bounce = True
+            else:
+                ny_i = ny_i - ny
+        if nz_i < 0:
+            if bc_types[4] == 0:
+                use_bounce = True
+            else:
+                nz_i = nz_i + nz
+        if nz_i >= nz:
+            if bc_types[5] == 0:
+                use_bounce = True
+            else:
+                nz_i = nz_i - nz
+
+        pop_d = float(0.0)
+
+        if use_bounce:
+            # Half-way bounce-back for stationary wall:
+            # f_hn[d] = f_on[OPPOSITE[d]]
+            # Reconstruct the outgoing distribution along the OPPOSITE
+            # direction from the CURRENT cell's moments.
+            # [REF] standard LBM: f_in,i = f_out,opp(i)
+            d_opp = opp[d]
+            pop_d = reconstruct_fi_at_index(
+                rho_cur, ux_cur, uy_cur, uz_cur,
+                Sxx_cur, Sxy_cur, Sxz_cur, Syy_cur, Syz_cur, Szz_cur,
+                d_opp, coeffs, lattice_w,
+            )
+        else:
+            # Check if neighbour is a solid cell
+            nb_ind = nz_i * ny * nx + ny_i * nx + nx_i
+            nb_flags = flag[nb_ind]
+            if (nb_flags & TYPE_S) != 0:
+                # Half-way bounce-back — same as above
+                d_opp = opp[d]
+                pop_d = reconstruct_fi_at_index(
+                    rho_cur, ux_cur, uy_cur, uz_cur,
+                    Sxx_cur, Sxy_cur, Sxz_cur, Syy_cur, Syz_cur, Szz_cur,
+                    d_opp, coeffs, lattice_w,
+                )
+            else:
+                # Read neighbour's 10 stored moments
+                nb_rho = f_mom[nb_ind + 0 * total_num]
+                nb_ux  = f_mom[nb_ind + 1 * total_num]
+                nb_uy  = f_mom[nb_ind + 2 * total_num]
+                nb_uz  = f_mom[nb_ind + 3 * total_num]
+                nb_Sxx = f_mom[nb_ind + 4 * total_num]
+                nb_Sxy = f_mom[nb_ind + 5 * total_num]
+                nb_Sxz = f_mom[nb_ind + 6 * total_num]
+                nb_Syy = f_mom[nb_ind + 7 * total_num]
+                nb_Syz = f_mom[nb_ind + 8 * total_num]
+                nb_Szz = f_mom[nb_ind + 9 * total_num]
+                # Reconstruct full distribution from neighbour moments
+                # [REF] stream_collide_bvh:751-776
+                pop_d = reconstruct_fi_at_index(
+                    nb_rho, nb_ux, nb_uy, nb_uz,
+                    nb_Sxx, nb_Sxy, nb_Sxz, nb_Syy, nb_Syz, nb_Szz,
+                    d, coeffs, lattice_w,
+                )
+
+        # Accumulate post-stream moments from pop_d
+        # [REF] stream_collide_bvh:939-972
+        rho_star += pop_d
+        ux_star  += pop_d * float(c_x[d])
+        uy_star  += pop_d * float(c_y[d])
+        uz_star  += pop_d * float(c_z[d])
+        pixx_star += pop_d * float(c_x[d] * c_x[d])
+        pixy_star += pop_d * float(c_x[d] * c_y[d])
+        pixz_star += pop_d * float(c_x[d] * c_z[d])
+        piyy_star += pop_d * float(c_y[d] * c_y[d])
+        piyz_star += pop_d * float(c_y[d] * c_z[d])
+        pizz_star += pop_d * float(c_z[d] * c_z[d])
+
+    # ---- Normalise velocity ----
+    inv_rho = 1.0 / rho_star
+    ux_star = ux_star * inv_rho
+    uy_star = uy_star * inv_rho
+    uz_star = uz_star * inv_rho
+
+    # ---- Apply body force ----
+    # F = rho * g  (force per unit volume in lattice units)
+    Fx = rho_star * gx
+    Fy = rho_star * gy
+    Fz = rho_star * gz
+
+    # ---- Central-moment MRT collision ----
+    # [REF] mrUtilFuncGpu3D.h:424-471 (mlGetPIAfterCollision)
+    # The collision operates on TRUE second-order moments (not stress).
+    # omega = 1 / tau
+    omega = 1.0 / tau
+
+    R = rho_star
+    U = ux_star
+    V = uy_star
+    W = uz_star
+
+    # Convert TRUE moments to the naming convention used in collision
+    # (pixx_t45 etc. are pre-collision TRUE moments)
+    pixx_t45 = pixx_star
+    pixy_t90 = pixy_star
+    pixz_t90 = pixz_star
+    piyy_t45 = piyy_star
+    piyz_t90 = piyz_star
+    pizz_t45 = pizz_star
+
+    # Collision — diagonal components
+    pixx_part = (2.0 * pixx_t45 - piyy_t45 - pizz_t45) / 3.0
+    piyy_part = (2.0 * piyy_t45 - pixx_t45 - pizz_t45) / 3.0
+    pizz_part = (2.0 * pizz_t45 - pixx_t45 - piyy_t45) / 3.0
+
+    RU2 = R * U * U
+    RV2 = R * V * V
+    RW2 = R * W * W
+    RUVW2 = (RU2 + RV2 + RW2) / 3.0
+
+    om1 = 1.0 - omega
+
+    pixx_post = (
+        R / 3.0
+        + pixx_part * om1
+        + RUVW2
+        + (2.0 * RU2 * omega) / 3.0
+        - (1.0 * RV2 * omega) / 3.0
+        - (1.0 * RW2 * omega) / 3.0
+        + Fx * U
+    )
+    piyy_post = (
+        R / 3.0
+        + piyy_part * om1
+        + RUVW2
+        - (1.0 * RU2 * omega) / 3.0
+        + (2.0 * RV2 * omega) / 3.0
+        - (1.0 * RW2 * omega) / 3.0
+        + Fy * V
+    )
+    pizz_post = (
+        R / 3.0
+        + pizz_part * om1
+        + RUVW2
+        - (1.0 * RU2 * omega) / 3.0
+        - (1.0 * RV2 * omega) / 3.0
+        + (2.0 * RW2 * omega) / 3.0
+        + Fz * W
+    )
+
+    # Collision — off-diagonal components
+    pixy_post = (
+        pixy_t90
+        - pixy_t90 * omega
+        + U * V * R * omega
+        + (Fy * U) / 2.0
+        + (Fx * V) / 2.0
+    )
+    pixz_post = (
+        pixz_t90
+        - pixz_t90 * omega
+        + U * W * R * omega
+        + (Fz * U) / 2.0
+        + (Fx * W) / 2.0
+    )
+    piyz_post = (
+        piyz_t90
+        - piyz_t90 * omega
+        + V * W * R * omega
+        + (Fz * V) / 2.0
+        + (Fy * W) / 2.0
+    )
+
+    # ---- Convert TRUE post-collision moments to stored stress ----
+    # Stored stress: S_ab = pi_ab / rho - CS2 * delta_ab
+    # [REF] stream_collide_bvh:1046-1055
+    #
+    # IMPORTANT: Guo forcing shifts velocity by du = F/(2*rho) after collision.
+    # The stored stress from collision corresponds to pre-shift velocity (U,V,W).
+    # We must add the shift-squared contribution du_a*du_b so that the stored
+    # stress matches the equilibrium of the shifted velocity (U+du, V+du, W+du).
+    # Without this correction, the stress-velocity inconsistency causes
+    # spurious dissipation that makes body-force-driven flows (Poiseuille,
+    # gravity) decay to wrong steady states.
+    inv_R = 1.0 / R
+    du_x = Fx * inv_R * 0.5
+    du_y = Fy * inv_R * 0.5
+    du_z = Fz * inv_R * 0.5
+
+    # ---- Velocity clamp on final (shifted) velocity ----
+    # [REF] normalizing_clamp — applied AFTER force shift so that
+    #       |U + du| ≤ max_vel is strictly enforced.
+    u_new_x = U + du_x
+    u_new_y = V + du_y
+    u_new_z = W + du_z
+    vel_sq = u_new_x * u_new_x + u_new_y * u_new_y + u_new_z * u_new_z
+    max_v2 = max_vel * max_vel
+    if vel_sq > max_v2:
+        scale = max_vel / wp.sqrt(vel_sq)
+        u_new_x = u_new_x * scale
+        u_new_y = u_new_y * scale
+        u_new_z = u_new_z * scale
+        # Also scale du for the stress correction below
+        du_x = u_new_x - U
+        du_y = u_new_y - V
+        du_z = u_new_z - W
+
+    f_mom_post[cur_ind + 0 * total_num] = R
+    f_mom_post[cur_ind + 1 * total_num] = u_new_x
+    f_mom_post[cur_ind + 2 * total_num] = u_new_y
+    f_mom_post[cur_ind + 3 * total_num] = u_new_z
+    # Diagonal: add du_a^2 (the collision already accounts for linear term)
+    f_mom_post[cur_ind + 4 * total_num] = pixx_post * inv_R - CS2 + du_x * du_x
+    f_mom_post[cur_ind + 5 * total_num] = pixy_post * inv_R + du_x * du_y
+    f_mom_post[cur_ind + 6 * total_num] = pixz_post * inv_R + du_x * du_z
+    f_mom_post[cur_ind + 7 * total_num] = piyy_post * inv_R - CS2 + du_y * du_y
+    f_mom_post[cur_ind + 8 * total_num] = piyz_post * inv_R + du_y * du_z
+    f_mom_post[cur_ind + 9 * total_num] = pizz_post * inv_R - CS2 + du_z * du_z
+
+    # ---- Scalar fields (pass-through for now) ----
+    mass[i, j, k] = R
+    phi[i, j, k] = 1.0
+    force_x[i, j, k] = Fx
+    force_y[i, j, k] = Fy
+    force_z[i, j, k] = Fz
 
 
 # ============================================================================

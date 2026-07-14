@@ -31,7 +31,7 @@ class HomeFSLbmDomain(Domain):
     >>> model = HomeFSLbmModel(fluid_grid_res=(64, 64, 64),
     ...                        fluid_grid_cell_size=0.1, tau=0.55)
     >>> domain = HomeFSLbmDomain(model)
-    >>> domain.create_state()
+    >>> domain.initialize(rho0=1.0)
     >>> domain.step(dt=1.0)
     """
 
@@ -86,6 +86,25 @@ class HomeFSLbmDomain(Domain):
         self._state_out = HomeFSLbmState(self._model)
         return self._state_in
 
+    def initialize(
+        self,
+        rho0: float = 1.0,
+        u0_x: float = 0.0,
+        u0_y: float = 0.0,
+        u0_z: float = 0.0,
+    ) -> None:
+        """Allocate state and initialise with equilibrium moments.
+
+        Shortcut for ``create_state()`` followed by solver initialization.
+        Domain boundary faces are flagged TYPE_S according to bc_types.
+        """
+        if self._state_in is None:
+            self.create_state()
+        self._solver.initialize_state(
+            self._state_in,
+            rho0=rho0, u0_x=u0_x, u0_y=u0_y, u0_z=u0_z,
+        )
+
     def step(self, dt: float, contacts: object = None) -> None:
         """Advance the domain by *dt*.
 
@@ -94,13 +113,19 @@ class HomeFSLbmDomain(Domain):
             contacts: Ignored (reserved for rigid-body coupling).
         """
         if self._state_in is None:
-            self.create_state()
+            self.initialize()
 
         self._solver.step(self._state_in, self._state_out, dt)
 
         # Swap entire state objects (same as LbmDomain)
-        # [REF]: MomSwap(fMom, fMomPost) in mrSolver3D_step2Kernel
         self._state_in, self._state_out = self._state_out, self._state_in
+
+        # MomSwap on the new state_in: f_mom <-> f_mom_post
+        # [REF]: MomSwap(fMom, fMomPost) in mrSolver3D_step2Kernel
+        self._state_in.f_mom, self._state_in.f_mom_post = (
+            self._state_in.f_mom_post,
+            self._state_in.f_mom,
+        )
 
     def pre_step(self, dt: float) -> None:
         """Hook called before each step (no-op)."""

@@ -41,7 +41,7 @@ def equilibrium_fi(
 ) -> float:
     """Compute equilibrium distribution f_i^eq for direction *i*.
 
-    [P4] Eq.(16) with S=0 (pure equilibrium).
+    [P4] Eq.(16) with S=0 (pure equilibrium, second-order expansion).
 
     Args:
         rho: Density.

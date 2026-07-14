@@ -157,25 +157,27 @@ class TestEndToEndPeriodic(unittest.TestCase):
         self.assertIsNotNone(st)
         self.assertEqual(st.total_num, 512)
 
-    def test_mass_conservation_pass_through(self):
-        """Verify that mass and phi are preserved through steps (pass-through)."""
-        domain = HomeFSLbmDomain(self.model)
-        domain.create_state()
-        self._init_uniform_fluid(domain.state)
+    def test_mass_conservation_through_steps(self):
+        """Verify that mass stays close to initial through LBM steps.
 
-        mass_before = float(np.sum(domain.state.mass.numpy()))
-        phi_before = float(np.sum(domain.state.phi.numpy()))
+        Stage 2 stream-collide produces float32 rounding drift ~1e-3.
+        """
+        domain = HomeFSLbmDomain(self.model)
+        domain.initialize(rho0=1.0)
+
+        mass_before = domain.solver.total_mass(domain.state)
+        cell_count = 8 * 8 * 8
+        self.assertAlmostEqual(mass_before, float(cell_count), delta=1e-6)
 
         for _ in range(10):
             domain.step(dt=1.0)
 
-        mass_after = float(np.sum(domain.state.mass.numpy()))
-        phi_after = float(np.sum(domain.state.phi.numpy()))
-
-        self.assertEqual(mass_before, mass_after,
-                         "Mass should be conserved through pass-through steps")
-        self.assertEqual(phi_before, phi_after,
-                         "Phi should be conserved through pass-through steps")
+        mass_after = domain.solver.total_mass(domain.state)
+        drift = abs(mass_after - mass_before)
+        self.assertLess(
+            drift, 2e-3,
+            f"Mass drift {drift:.3e} exceeds float32 tolerance",
+        )
 
 
 if __name__ == "__main__":
