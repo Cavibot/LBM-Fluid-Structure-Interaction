@@ -23,6 +23,10 @@ from .constants import (
 )
 from .kernels import (
     stream_collide_kernel,
+    surface_1_kernel,
+    surface_2_kernel,
+    surface_3_kernel,
+    calculate_disjoint_kernel,
     flag_domain_boundary_kernel,
     initialize_equilibrium_kernel,
 )
@@ -131,18 +135,24 @@ class HomeFSLbmSolver(FluidGridSolverBase):
         total_num = self._total_num
         nx, ny, nz = self.nx, self.ny, self.nz
 
-        # Lazy-init the 1D flat flag from state.flag (3D) if not already set.
+        # Lazy-init the 1D flat flag.
         if self._flag_flat is None:
             self._flag_flat = wp.empty(total_num, dtype=wp.int32, device=self.device)
-            wp.launch(
-                _copy_3d_to_flat_kernel,
-                dim=(nx, ny, nz),
-                inputs=[self._flag_flat, state_in.flag, nx, ny, nz],
-            )
 
-        # ---- Step 1: Fused stream + collide ----
-        # Uses self._flag_flat (built once in initialize_state, or lazily above).
-        # Flag is static — no need to rebuild each step.
+        # ---- Step 0: Sync 3D flag → 1D flat (flag now dynamic in stage 3) ----
+        wp.launch(
+            _copy_3d_to_flat_kernel,
+            dim=(nx, ny, nz),
+            inputs=[self._flag_flat, state_in.flag, nx, ny, nz],
+        )
+
+        # ---- Step 1: Copy scalar fields to state_out before kernels ----
+        wp.copy(state_out.mass, state_in.mass)
+        wp.copy(state_out.massex, state_in.massex)
+        wp.copy(state_out.phi, state_in.phi)
+        wp.copy(state_out.disjoin_force, state_in.disjoin_force)
+
+        # ---- Step 2: Fused stream + collide ----
         wp.launch(
             stream_collide_kernel,
             dim=(nx, ny, nz),
@@ -150,6 +160,7 @@ class HomeFSLbmSolver(FluidGridSolverBase):
                 state_in.f_mom,
                 state_out.f_mom_post,
                 state_out.mass,
+                state_out.massex,
                 state_out.phi,
                 self._flag_flat,
                 state_out.force_x,
@@ -167,10 +178,47 @@ class HomeFSLbmSolver(FluidGridSolverBase):
             ],
         )
 
-        # Copy flag and scalar fields that are not written by kernel
-        wp.copy(state_out.flag, state_in.flag)
-        wp.copy(state_out.massex, state_in.massex)
-        wp.copy(state_out.disjoin_force, state_in.disjoin_force)
+        # ---- Step 3: Free-surface step 1 — mark transitions ----
+        # [REF] surface_1 in mrLbmSolverGpu3D.cu:444-477
+        wp.launch(
+            surface_1_kernel,
+            dim=(nx, ny, nz),
+            inputs=[self._flag_flat, total_num, nx, ny, nz, C_X, C_Y, C_Z],
+        )
+
+        # ---- Step 4: Free-surface step 2 — init new interface cells ----
+        # [REF] surface_2 in mrLbmSolverGpu3D.cu:479-601
+        wp.launch(
+            surface_2_kernel,
+            dim=(nx, ny, nz),
+            inputs=[state_out.f_mom_post, self._flag_flat,
+                    total_num, nx, ny, nz, C_X, C_Y, C_Z, W],
+        )
+
+        # ---- Step 5: Free-surface step 3 — mass exchange + reflag ----
+        # [REF] surface_3 in mrLbmSolverGpu3D.cu:604-701
+        wp.launch(
+            surface_3_kernel,
+            dim=(nx, ny, nz),
+            inputs=[state_out.f_mom_post,
+                    state_out.mass, state_out.massex, state_out.phi,
+                    self._flag_flat,
+                    total_num, nx, ny, nz, C_X, C_Y, C_Z],
+        )
+
+        # ---- Step 6: Separation force skeleton (stage 6 deferred) ----
+        wp.launch(
+            calculate_disjoint_kernel,
+            dim=(nx, ny, nz),
+            inputs=[state_out.disjoin_force, nx, ny, nz],
+        )
+
+        # ---- Step 7: Sync 1D flat flag → 3D flag in state_out ----
+        wp.launch(
+            _copy_flat_to_3d_kernel,
+            dim=(nx, ny, nz),
+            inputs=[state_out.flag, self._flag_flat, nx, ny, nz],
+        )
 
     # ------------------------------------------------------------------
     # Initialisation

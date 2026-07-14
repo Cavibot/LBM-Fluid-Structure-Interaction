@@ -27,6 +27,62 @@ def normalizing_clamp(u: wp.vec3, max_val: float) -> wp.vec3:
     return u
 
 
+# ============================================================================
+# Free-surface VOF helpers  [REF] mrUtilFuncGpu3D.h:351-353
+# ============================================================================
+@wp.func
+def calculate_phi(rho: float, mass: float, surf_flag: int) -> float:
+    """Compute VOF fill fraction phi from density and mass.
+
+    [REF] mrUtilFuncGpu3D::calculate_phi:
+        - TYPE_F -> 1.0
+        - TYPE_I -> clamp(mass/rho, 0, 1) if rho > 0 else 0.5
+        - otherwise -> 0.0
+
+    Args:
+        rho: Cell density.
+        mass: Actual fluid mass in cell.
+        surf_flag: Surface type (TYPE_F / TYPE_I / TYPE_G extracted via & TYPE_SU).
+
+    Returns:
+        Phi value in [0, 1].
+    """
+    from .constants import TYPE_F, TYPE_I
+    if (surf_flag & TYPE_F) != 0:
+        return 1.0
+    if (surf_flag & TYPE_I) != 0:
+        if rho > 0.0:
+            inv = mass / rho
+            if inv > 1.0:
+                return 1.0
+            if inv < 0.0:
+                return 0.0
+            return inv
+        return 0.5
+    return 0.0
+
+
+# ============================================================================
+# Curvature / surface tension skeleton  (sigma=0 for stage 3)
+# ============================================================================
+@wp.func
+def calculate_curvature(phi_n: float) -> float:
+    """Compute mean curvature at an interface cell (skeleton for stage 3).
+
+    Full implementation deferred to stage 6a (surface tension).
+    Currently returns 0.0 (zero surface tension).
+
+    [REF] mrUtilFuncGpu3D::calculate_curvature — D3Q27 stencil + PLIC fit.
+
+    Args:
+        phi_n: Phi value at current cell (unused in skeleton).
+
+    Returns:
+        0.0 (zero curvature / no Laplace pressure).
+    """
+    return 0.0
+
+
 @wp.func
 def equilibrium_fi(
     rho: float,

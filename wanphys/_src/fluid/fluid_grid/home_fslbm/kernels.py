@@ -15,7 +15,13 @@ from __future__ import annotations
 
 import warp as wp
 
-from .constants import CS2, INV_CS2, TYPE_S, TYPE_F, MAX_VELOCITY
+from .constants import (
+    CS2, INV_CS2,
+    TYPE_F, TYPE_I, TYPE_G, TYPE_S,
+    TYPE_IF, TYPE_IG, TYPE_GI,
+    TYPE_SU,
+    MAX_VELOCITY,
+)
 
 
 # ============================================================================
@@ -187,6 +193,7 @@ def stream_collide_kernel(
     f_mom: wp.array(dtype=float),
     f_mom_post: wp.array(dtype=float),
     mass: wp.array3d(dtype=float),
+    massex: wp.array3d(dtype=float),
     phi: wp.array3d(dtype=float),
     flag: wp.array(dtype=wp.int32),
     force_x: wp.array3d(dtype=float),
@@ -232,8 +239,8 @@ def stream_collide_kernel(
     cur_ind = k * ny * nx + j * nx + i
     flagsn = flag[cur_ind]
 
-    # Early exit for solid cells
-    if (flagsn & TYPE_S) != 0:
+    # Early exit for solid and gas cells
+    if (flagsn & (TYPE_S | TYPE_G)) != 0:
         return
 
     # ---- Load current cell moments (stored as stress S_ab) ----
@@ -257,10 +264,26 @@ def stream_collide_kernel(
     piyy_star = float(0.0); piyz_star = float(0.0); pizz_star = float(0.0)
 
     # Mass tracking [REF] stream_collide_bvh:806-936
-    # Stage 2 (single-phase): compute mass flux fhn - fon for TYPE_F cells.
+    # Stage 3 (free-surface): collect massex from neighbours,
+    # then compute phi-weighted mass flux for TYPE_I cells.
     massn = float(0.0)
-    if (flagsn & TYPE_F) != 0:
+    if (flagsn & (TYPE_F | TYPE_I)) != 0:
         massn = mass[i, j, k]  # start with current cell mass
+
+    # ---- Collect excess mass redistributed by surface_3 ----
+    # [REF] stream_collide_bvh:808-819
+    if (flagsn & (TYPE_F | TYPE_I)) != 0:
+        for dd in range(1, 27):
+            nx_m = i - int(c_x[dd])
+            ny_m = j - int(c_y[dd])
+            nz_m = k - int(c_z[dd])
+            # Skip out-of-domain neighbours (periodic / bounce-back handled later)
+            if nx_m < 0 or nx_m >= nx or ny_m < 0 or ny_m >= ny or nz_m < 0 or nz_m >= nz:
+                continue
+            massn += massex[nx_m, ny_m, nz_m]
+
+    # Determine if this is an interface cell (phi-weighted mass flux)
+    is_interface = bool((flagsn & TYPE_I) == TYPE_I)
 
     for d in range(27):
         nx_i = i - c_x[d]
@@ -355,8 +378,29 @@ def stream_collide_kernel(
             Sxx_cur, Sxy_cur, Sxz_cur, Syy_cur, Syz_cur, Szz_cur,
             d, coeffs, lattice_w,
         )
-        if d > 0 and (flagsn & TYPE_F) != 0:
-            massn += pop_d - fon_d
+        # ---- Mass flux (phi-weighted for interface cells) ----
+        # [REF] stream_collide_bvh:821-936
+        if d > 0:
+            if (flagsn & TYPE_F) != 0:
+                massn += pop_d - fon_d
+            elif is_interface:
+                # Interface mass flux weighted by phi at face
+                # phi_on_face: neighbour's phi for even dir, current's for odd
+                # (approximation of interface orientation, [REF] L946-948)
+                if d % 2 == 0:
+                    # Even direction: read neighbour phi
+                    if not use_bounce:
+                        phi_face = phi[nx_i, ny_i, nz_i]
+                    else:
+                        phi_face = float(0.5)  # bounce-back face: average
+                else:
+                    phi_face = phi[i, j, k]
+                # Clamp phi_face to [EPS, 1] for stability
+                if phi_face < 1.0e-6:
+                    phi_face = float(1.0e-6)
+                if phi_face > 1.0:
+                    phi_face = float(1.0)
+                massn += phi_face * (pop_d - fon_d)
 
         # Accumulate post-stream moments from pop_d
         # [REF] stream_collide_bvh:939-972
@@ -479,14 +523,48 @@ def stream_collide_kernel(
 
     # ---- Scalar fields ----
     # Mass: use mass flux from fhn-fon for TYPE_F [REF], rho_star for others
+    # Stage 3: TYPE_I also tracks mass; phi updated by surface_3, not here.
     if (flagsn & TYPE_F) != 0:
         mass[i, j, k] = massn
+        phi[i, j, k] = 1.0
+    elif (flagsn & TYPE_I) != 0:
+        mass[i, j, k] = massn
+        # phi kept as-is — will be updated by surface_3
     else:
         mass[i, j, k] = R
-    phi[i, j, k] = 1.0
+        phi[i, j, k] = 1.0
     force_x[i, j, k] = Fx
     force_y[i, j, k] = Fy
     force_z[i, j, k] = Fz
+
+
+# ============================================================================
+# Free-surface helper: VOF fill fraction  [REF] mrUtilFuncGpu3D.h:351-353
+# ============================================================================
+@wp.func
+def _calculate_phi(rho: float, mass: float, surf_flag: int) -> float:
+    """Inline VOF fill fraction for use inside surface_3_kernel.
+
+    Args:
+        rho: Cell density.
+        mass: Actual fluid mass in cell.
+        surf_flag: Surface type (TYPE_F / TYPE_I / TYPE_G).
+
+    Returns:
+        Phi value in [0, 1].
+    """
+    if (surf_flag & TYPE_F) != 0:
+        return 1.0
+    if (surf_flag & TYPE_I) != 0:
+        if rho > 0.0:
+            inv = mass / rho
+            if inv > 1.0:
+                return 1.0
+            if inv < 0.0:
+                return 0.0
+            return inv
+        return 0.5
+    return 0.0
 
 
 # ============================================================================
@@ -521,3 +599,358 @@ def reconstruct_all_f_kernel(
             rho_v, ux_v, uy_v, uz_v,
             Sxx, Sxy, Sxz, Syy, Syz, Szz, d, coeffs, w,
         )
+
+
+# ============================================================================
+# Free-surface step 1: mark transitions  [REF] mrLbmSolverGpu3D.cu:444-477
+# ============================================================================
+@wp.kernel
+def surface_1_kernel(
+    flag: wp.array(dtype=wp.int32),
+    total_num: int, nx: int, ny: int, nz: int,
+    c_x: wp.array(dtype=wp.int32),
+    c_y: wp.array(dtype=wp.int32),
+    c_z: wp.array(dtype=wp.int32),
+):
+    """Mark gas→interface transitions and prevent interface→gas degradation.
+
+    [REF] surface_1 in mrLbmSolverGpu3D.cu:444-477.
+
+    For each TYPE_IF (interface→fluid) cell:
+        - If neighbour is TYPE_IG → change to TYPE_I (prevent disappearance).
+        - If neighbour is TYPE_G  → change to TYPE_GI (gas becomes interface).
+    """
+    i, j, k = wp.tid()
+    if i >= nx or j >= ny or k >= nz:
+        return
+
+    cur_ind = k * ny * nx + j * nx + i
+    flagsn = flag[cur_ind]
+    flagsn_sus = flagsn & (TYPE_SU | TYPE_S)
+
+    if flagsn_sus == TYPE_IF:
+        for d in range(1, 27):
+            x1 = i - int(c_x[d])
+            y1 = j - int(c_y[d])
+            z1 = k - int(c_z[d])
+            if x1 < 0 or x1 >= nx or y1 < 0 or y1 >= ny or z1 < 0 or z1 >= nz:
+                continue
+            nb_idx = z1 * ny * nx + y1 * nx + x1
+            nb_flags = flag[nb_idx]
+            nb_su = nb_flags & (TYPE_SU | TYPE_S)
+            nb_non_su = nb_flags & ~TYPE_SU
+
+            if nb_su == TYPE_IG:
+                # Prevent interface neighbour from becoming gas
+                flag[nb_idx] = nb_non_su | TYPE_I
+            elif nb_su == TYPE_G:
+                # Gas neighbour must become interface
+                flag[nb_idx] = nb_non_su | TYPE_GI
+
+
+# ============================================================================
+# Free-surface step 2: init new interface cells  [REF] mrLbmSolverGpu3D.cu:479-601
+# ============================================================================
+@wp.kernel
+def surface_2_kernel(
+    f_mom_post: wp.array(dtype=float),
+    flag: wp.array(dtype=wp.int32),
+    total_num: int, nx: int, ny: int, nz: int,
+    c_x: wp.array(dtype=wp.int32),
+    c_y: wp.array(dtype=wp.int32),
+    c_z: wp.array(dtype=wp.int32),
+    w: wp.array(dtype=wp.float32),
+):
+    """Initialise new interface (TYPE_GI) cells and handle TYPE_IG transitions.
+
+    [REF] surface_2 in mrLbmSolverGpu3D.cu:479-601.
+
+    TYPE_GI cells:
+        - Average rho, u from all fluid/interface neighbours.
+        - Compute equilibrium distributions feq from average (rho, u).
+        - Compute second moments from feq and write to fMomPost.
+
+    TYPE_IG cells:
+        - For neighbours that are TYPE_F or TYPE_IF: mark as TYPE_I
+          (prevents fluid neighbours from being/becoming fluid).
+    """
+    i, j, k = wp.tid()
+    if i >= nx or j >= ny or k >= nz:
+        return
+
+    cur_ind = k * ny * nx + j * nx + i
+    flagsn = flag[cur_ind]
+    flagsn_sus = flagsn & (TYPE_SU | TYPE_S)
+
+    if flagsn_sus == TYPE_GI:
+        # ---- Average rho, u from fluid/interface neighbours ----
+        rhot = float(0.0)
+        uxt = float(0.0)
+        uyt = float(0.0)
+        uzt = float(0.0)
+        counter = float(0.0)
+
+        for d in range(1, 27):
+            x1 = i - int(c_x[d])
+            y1 = j - int(c_y[d])
+            z1 = k - int(c_z[d])
+            if x1 < 0 or x1 >= nx or y1 < 0 or y1 >= ny or z1 < 0 or z1 >= nz:
+                continue
+            nb_idx = z1 * ny * nx + y1 * nx + x1
+            nb_sus = flag[nb_idx] & (TYPE_SU | TYPE_S)
+            if nb_sus == TYPE_F or nb_sus == TYPE_I or nb_sus == TYPE_IF:
+                counter += 1.0
+                rhot += f_mom_post[nb_idx + 0 * total_num]
+                uxt += f_mom_post[nb_idx + 1 * total_num]
+                uyt += f_mom_post[nb_idx + 2 * total_num]
+                uzt += f_mom_post[nb_idx + 3 * total_num]
+
+        rhon = rhot / counter if counter > 0.0 else 1.0
+        uxn = uxt / counter if counter > 0.0 else 0.0
+        uyn = uyt / counter if counter > 0.0 else 0.0
+        uzn = uzt / counter if counter > 0.0 else 0.0
+
+        # ---- Compute equilibrium second moments ----
+        # [REF] surface_2:529-548 — feq → second moments
+        pixx_eq = float(0.0); pixy_eq = float(0.0); pixz_eq = float(0.0)
+        piyy_eq = float(0.0); piyz_eq = float(0.0); pizz_eq = float(0.0)
+
+        for d_i in range(27):
+            cu = float(c_x[d_i]) * uxn + float(c_y[d_i]) * uyn + float(c_z[d_i]) * uzn
+            u2 = uxn * uxn + uyn * uyn + uzn * uzn
+            feq_d = rhon * float(w[d_i]) * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * u2)
+            feq_d += float(w[d_i])  # add back weight (bias trick)
+            pixx_eq += feq_d * float(c_x[d_i] * c_x[d_i])
+            pixy_eq += feq_d * float(c_x[d_i] * c_y[d_i])
+            pixz_eq += feq_d * float(c_x[d_i] * c_z[d_i])
+            piyy_eq += feq_d * float(c_y[d_i] * c_y[d_i])
+            piyz_eq += feq_d * float(c_y[d_i] * c_z[d_i])
+            pizz_eq += feq_d * float(c_z[d_i] * c_z[d_i])
+
+        inv_rhon = 1.0 / rhon
+        # Convert to stored stress format: S_ab = pi_ab / rho - CS2 * delta_ab
+        cs2 = float(1.0 / 3.0)
+        Sxx = pixx_eq * inv_rhon - cs2
+        Sxy = pixy_eq * inv_rhon
+        Sxz = pixz_eq * inv_rhon
+        Syy = piyy_eq * inv_rhon - cs2
+        Syz = piyz_eq * inv_rhon
+        Szz = pizz_eq * inv_rhon - cs2
+
+        f_mom_post[cur_ind + 0 * total_num] = rhon
+        f_mom_post[cur_ind + 1 * total_num] = uxn
+        f_mom_post[cur_ind + 2 * total_num] = uyn
+        f_mom_post[cur_ind + 3 * total_num] = uzn
+        f_mom_post[cur_ind + 4 * total_num] = Sxx
+        f_mom_post[cur_ind + 5 * total_num] = Sxy
+        f_mom_post[cur_ind + 6 * total_num] = Sxz
+        f_mom_post[cur_ind + 7 * total_num] = Syy
+        f_mom_post[cur_ind + 8 * total_num] = Syz
+        f_mom_post[cur_ind + 9 * total_num] = Szz
+
+    elif flagsn_sus == TYPE_IG:
+        # ---- Prevent fluid neighbours from being/becoming fluid ----
+        # [REF] surface_2:569-598
+        for d in range(1, 27):
+            x1 = i - int(c_x[d])
+            y1 = j - int(c_y[d])
+            z1 = k - int(c_z[d])
+            if x1 < 0 or x1 >= nx or y1 < 0 or y1 >= ny or z1 < 0 or z1 >= nz:
+                continue
+            nb_idx = z1 * ny * nx + y1 * nx + x1
+            nb_flags = flag[nb_idx]
+            nb_sus = nb_flags & (TYPE_SU | TYPE_S)
+            nb_non_su = nb_flags & ~TYPE_SU
+
+            if nb_sus == TYPE_F or nb_sus == TYPE_IF:
+                # Convert fluid/fluid-to-be neighbour to interface
+                flag[nb_idx] = nb_non_su | TYPE_I
+
+
+# ============================================================================
+# Free-surface step 3: mass exchange + reflag  [REF] mrLbmSolverGpu3D.cu:604-701
+# ============================================================================
+@wp.kernel
+def surface_3_kernel(
+    f_mom_post: wp.array(dtype=float),
+    mass: wp.array3d(dtype=float),
+    massex: wp.array3d(dtype=float),
+    phi: wp.array3d(dtype=float),
+    flag: wp.array(dtype=wp.int32),
+    total_num: int, nx: int, ny: int, nz: int,
+    c_x: wp.array(dtype=wp.int32),
+    c_y: wp.array(dtype=wp.int32),
+    c_z: wp.array(dtype=wp.int32),
+):
+    """Mass redistribution, phi update, and flag conversion.
+
+    [REF] surface_3 in mrLbmSolverGpu3D.cu:604-701.
+
+    For each non-solid cell:
+        - TYPE_F:   massex = mass - rho, mass = rho, phi = 1
+        - TYPE_I:   massex = excess(mass, rho), mass = clamp(mass, 0, rho),
+                    phi = calculate_phi(rho, mass, TYPE_I)
+        - TYPE_G:   massex = mass, mass = 0, phi = 0
+        - TYPE_IF:  flag → TYPE_F, massex = mass - rho, mass = rho, phi = 1
+        - TYPE_IG:  flag → TYPE_G, massex = mass, mass = 0, phi = 0
+        - TYPE_GI:  flag → TYPE_I, massex = excess(mass, rho),
+                    mass = clamp(mass, 0, rho), phi = calculate_phi(rho, mass, TYPE_I)
+
+        Distribute massex equally to fluid/interface neighbours.
+        Detect transitions: mass > rho & no GAS neighbours → TYPE_IF;
+                           mass < 0 & no Fluid neighbours → TYPE_IG.
+    """
+    i, j, k = wp.tid()
+    if i >= nx or j >= ny or k >= nz:
+        return
+
+    cur_ind = k * ny * nx + j * nx + i
+    flagsn = flag[cur_ind]
+    flagsn_sus = flagsn & (TYPE_SU | TYPE_S)
+
+    if (flagsn_sus & TYPE_S) != 0:
+        return
+
+    rhon = f_mom_post[cur_ind + 0 * total_num]
+    massn = mass[i, j, k]
+    massexn = float(0.0)
+    phin = float(0.0)
+
+    # ---- Per-type mass / phi / flag processing ----
+    if flagsn_sus == TYPE_F:
+        massexn = massn - rhon
+        massn = rhon
+        phin = 1.0
+    elif flagsn_sus == TYPE_I:
+        # Interface: excess if mass > rho or mass < 0
+        if massn > rhon:
+            massexn = massn - rhon
+        elif massn < 0.0:
+            massexn = massn
+        else:
+            massexn = 0.0
+        # Clamp mass to [0, rho]
+        if massn > rhon:
+            massn = rhon
+        if massn < 0.0:
+            massn = 0.0
+        phin = _calculate_phi(rhon, massn, TYPE_I)
+    elif flagsn_sus == TYPE_G:
+        massexn = massn
+        massn = 0.0
+        phin = 0.0
+    elif flagsn_sus == TYPE_IF:
+        # Interface → Fluid
+        non_su = flagsn & ~TYPE_SU
+        flag[cur_ind] = non_su | TYPE_F
+        massexn = massn - rhon
+        massn = rhon
+        phin = 1.0
+    elif flagsn_sus == TYPE_IG:
+        # Interface → Gas
+        non_su = flagsn & ~TYPE_SU
+        flag[cur_ind] = non_su | TYPE_G
+        massexn = massn
+        massn = 0.0
+        phin = 0.0
+    elif flagsn_sus == TYPE_GI:
+        # Gas → Interface
+        non_su = flagsn & ~TYPE_SU
+        flag[cur_ind] = non_su | TYPE_I
+        if massn > rhon:
+            massexn = massn - rhon
+        elif massn < 0.0:
+            massexn = massn
+        else:
+            massexn = 0.0
+        if massn > rhon:
+            massn = rhon
+        if massn < 0.0:
+            massn = 0.0
+        phin = _calculate_phi(rhon, massn, TYPE_I)
+
+    # ---- Distribute excess mass to fluid/interface neighbours ----
+    # [REF] surface_3:669-684
+    counter = int(0)
+    for d in range(1, 27):
+        x1 = i - int(c_x[d])
+        y1 = j - int(c_y[d])
+        z1 = k - int(c_z[d])
+        if x1 < 0 or x1 >= nx or y1 < 0 or y1 >= ny or z1 < 0 or z1 >= nz:
+            continue
+        nb_idx = z1 * ny * nx + y1 * nx + x1
+        nb_su = flag[nb_idx] & (TYPE_SU | TYPE_S)
+        if nb_su == TYPE_F or nb_su == TYPE_I or nb_su == TYPE_IF or nb_su == TYPE_GI:
+            counter = counter + 1
+
+    if counter > 0:
+        massn += 0.0  # massex goes to neighbours
+        massexn = massexn / float(counter)
+    else:
+        # Can't distribute — add back to local mass (mass conservation)
+        massn += massexn
+        massexn = 0.0
+
+    # ---- Write back ----
+    mass[i, j, k] = massn
+    massex[i, j, k] = massexn
+    phi[i, j, k] = phin
+
+    # ---- Detect and mark transitions ----
+    # [REF] surface_3 logic after mass redistribution
+    # Transition conditions after reflag check the updated flag:
+    new_flags = flag[cur_ind]
+    new_sus = new_flags & (TYPE_SU | TYPE_S)
+
+    if new_sus == TYPE_F or new_sus == TYPE_I:
+        # Check for mass > rho (fill) and mass < 0 (empty)
+        if massn > rhon:
+            # Cell overfull — convert to fluid if no gas neighbours
+            _has_gas = int(0)
+            for d in range(1, 27):
+                x1 = i - int(c_x[d])
+                y1 = j - int(c_y[d])
+                z1 = k - int(c_z[d])
+                if x1 < 0 or x1 >= nx or y1 < 0 or y1 >= ny or z1 < 0 or z1 >= nz:
+                    continue
+                nb_idx = z1 * ny * nx + y1 * nx + x1
+                nb_su_v = flag[nb_idx] & (TYPE_SU | TYPE_S)
+                if nb_su_v == TYPE_G:
+                    _has_gas = int(1)
+            if _has_gas == 0:
+                non_su = flag[cur_ind] & ~TYPE_SU
+                flag[cur_ind] = non_su | TYPE_IF
+        if massn < 0.0:
+            # Cell empty — convert to gas if no fluid neighbours
+            _has_fluid = int(0)
+            for d in range(1, 27):
+                x1 = i - int(c_x[d])
+                y1 = j - int(c_y[d])
+                z1 = k - int(c_z[d])
+                if x1 < 0 or x1 >= nx or y1 < 0 or y1 >= ny or z1 < 0 or z1 >= nz:
+                    continue
+                nb_idx = z1 * ny * nx + y1 * nx + x1
+                nb_su_v = flag[nb_idx] & (TYPE_SU | TYPE_S)
+                if nb_su_v == TYPE_F or nb_su_v == TYPE_IF:
+                    _has_fluid = int(1)
+            if _has_fluid == 0:
+                non_su = flag[cur_ind] & ~TYPE_SU
+                flag[cur_ind] = non_su | TYPE_IG
+
+
+# ============================================================================
+# Separation force skeleton (deferred to stage 6)
+# ============================================================================
+@wp.kernel
+def calculate_disjoint_kernel(
+    disjoin_force: wp.array3d(dtype=float),
+    nx: int, ny: int, nz: int,
+):
+    """Skeleton: zero out separation force (stage 6 deferred).
+
+    [REF] disjoin_force used in stream_collide_bvh for bubble separation.
+    Initialised to zero for stages 3-5.
+    """
+    i, j, k = wp.tid()
+    if i < nx and j < ny and k < nz:
+        disjoin_force[i, j, k] = 0.0
