@@ -128,6 +128,8 @@ def home_vof_fused_kernel(
     fy: float,
     fz: float,
     rho_g0: float,
+    home_fill_empty: int,
+    home_wall_eq: int,
     nx: int,
     ny: int,
     nz: int,
@@ -178,6 +180,12 @@ def home_vof_fused_kernel(
         rho_g = 0.2
     if rho_g > 1.8:
         rho_g = 1.8
+
+    # Home-FSLBM: gas equilibrium uses Guo half-force velocity u + F/2.
+    vg_x = vx + 0.5 * fx
+    vg_y = vy + 0.5 * fy
+    vg_z = vz + 0.5 * fz
+    vg_x, vg_y, vg_z = _clamp_u(vg_x, vg_y, vg_z)
 
     fk0 = int(face_kind[0])
     fk1 = int(face_kind[1])
@@ -310,12 +318,15 @@ def home_vof_fused_kernel(
         fhn = float(0.0)
         ntype = CELL_GAS
         if is_wall != 0:
-            # No-slip walls. (Vertical free-slip + wall Körner / rim-drain heuristics
-            # were tried for 1-cell leveling but caused mass loss; see docs.)
-            fhn = _solid_f_eq24(
-                rho_c, vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
-                uxp, uyp, uzp, cxi, cyi, czi, w,
-            )
+            # Home-FSLBM solid pull is f^eq(ρ, u_wall=0). Optional HOME Eq.24
+            # keeps non-eq stress (default for older wanphys runs).
+            if home_wall_eq != 0:
+                fhn = _feq_w(w, rho_c, uxp, uyp, uzp, float(cxi), float(cyi), float(czi))
+            else:
+                fhn = _solid_f_eq24(
+                    rho_c, vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+                    uxp, uyp, uzp, cxi, cyi, czi, w,
+                )
         else:
             ntype = int(cell_type[ni, nj, nk])
             if ntype == CELL_IF:
@@ -328,9 +339,11 @@ def home_vof_fused_kernel(
             if ntype == CELL_GAS:
                 has_gas = 1
                 # Eq. 11 free-surface BC (interface and emergency liquid–gas).
-                feg_i = _feq_w(w, rho_g, vx, vy, vz, float(cxi), float(cyi), float(czi))
+                feg_i = _feq_w(
+                    w, rho_g, vg_x, vg_y, vg_z, float(cxi), float(cyi), float(czi)
+                )
                 feg_o = _feq_w(
-                    w_arr[od], rho_g, vx, vy, vz,
+                    w_arr[od], rho_g, vg_x, vg_y, vg_z,
                     float(ocx), float(ocy), float(ocz),
                 )
                 fhn = feg_o - fon_opp + feg_i
@@ -353,9 +366,9 @@ def home_vof_fused_kernel(
                     syz_in[ni, nj, nk],
                     cxi, cyi, czi, w,
                 )
-                # Mass with F/I. Liquid also updates a shadow mass then
-                # surface3 snaps mass→ρ and redistributes the residual via massex
-                # (keeps Σmass≈Σρ_L+Σm_I from drifting one-sided).
+                # Mass with F/I. Interface uses θ·(fhn−fon_opp) like Home.
+                # Liquid uses the same opposite-link form: bare Home liquid
+                # ``fhn[i]-fon[i]`` drifts Σmass against interface in this port.
                 if ctype == CELL_LIQUID:
                     if ntype == CELL_LIQUID or ntype == CELL_INTERFACE:
                         massn = massn + (fhn - fon_opp)
@@ -408,14 +421,23 @@ def home_vof_fused_kernel(
     syz_out[i, j, k] = syz_o
     mass_out[i, j, k] = massn
 
-    # Fill/empty by mass only. Do NOT use has_fluid==0 / has_gas==0:
-    # thin wave crests are I–G only and would be erased (layer wipe).
+    # Fill/empty. Softened Home-FSLBM / TechRep-05-4 rules:
+    #   fill:  mass>ρ  OR  (no gas neighbor AND nearly full)
+    #   empty: mass<0  OR  (no fluid neighbor AND nearly empty)
+    # Bare TYPE_NO_G / TYPE_NO_F (Home GPU literal) evaporates thin I crests
+    # and thrash-fills wall menisci → O(10^4) Σmass loss + oscillatory "shaving".
     out_type = ctype
     if ctype == CELL_INTERFACE:
-        if massn > rho + 1.0e-4:
-            out_type = CELL_IF
-        elif massn < -1.0e-4:
-            out_type = CELL_IG
+        if home_fill_empty != 0:
+            if massn > rho or (has_gas == 0 and massn > 0.99 * rho):
+                out_type = CELL_IF
+            elif massn < 0.0 or (has_fluid == 0 and massn < 0.1 * rho):
+                out_type = CELL_IG
+        else:
+            if massn > rho + 1.0e-4:
+                out_type = CELL_IF
+            elif massn < -1.0e-4:
+                out_type = CELL_IG
     elif ctype == CELL_LIQUID:
         out_type = CELL_LIQUID
     cell_out[i, j, k] = out_type
@@ -921,6 +943,362 @@ def home_vof_salvage_mass_on_gas_kernel(
     phi[i, j, k] = phin
 
 
+def level_surface_high_to_low(
+    buf: "HomeVofGpuBuffers",
+    *,
+    rate: float = 0.35,
+    dz_min: int = 2,
+    wet_phi: float = 0.5,
+    climb_margin: int | None = None,
+) -> float:
+    """Global high->low free-surface leveling (host, once per call).
+
+    Uses a **main-pool band** around the median free-surface height so that
+    sparse wall-climb spikes (``corn`` / full ``z_p2p``) do not become the only
+    donors forever. Climb columns above ``median + climb_margin`` are peeled
+    onto pool receivers; within the pool, only ``z_hi_pool - z_lo_pool`` matters.
+
+    If pool high−low < ``dz_min`` and there are no climbers, returns 0.
+    Returns inventory delta of ``Σmass`` (≈0 if conservative).
+    """
+    ctype = buf.cell_type.numpy().copy()
+    phi = buf.phi.numpy().copy()
+    mass = buf.mass.numpy().copy()
+    rho = buf.rho.numpy().copy()
+    ux = buf.ux.numpy().copy()
+    uy = buf.uy.numpy().copy()
+    uz = buf.uz.numpy().copy()
+    sxx = buf.sxx.numpy().copy()
+    syy = buf.syy.numpy().copy()
+    szz = buf.szz.numpy().copy()
+    sxy = buf.sxy.numpy().copy()
+    sxz = buf.sxz.numpy().copy()
+    syz = buf.syz.numpy().copy()
+    nx, ny, nz = buf.shape
+    m0 = float(np.nansum(mass))
+
+    z_top = np.full((nx, ny), -1, dtype=np.int32)
+    for k in range(nz):
+        wet = (ctype[:, :, k] > 0) & (phi[:, :, k] > wet_phi)
+        z_top[wet] = k
+    wet_cols = z_top >= 0
+    if not np.any(wet_cols):
+        return 0.0
+
+    med = float(np.median(z_top[wet_cols]))
+    if climb_margin is None:
+        climb_margin = max(3, int(nz // 16))
+    climb_margin = int(max(2, climb_margin))
+
+    climber_mask = wet_cols & (z_top > int(np.floor(med)) + climb_margin)
+    pool_mask = wet_cols & (~climber_mask)
+    if not np.any(pool_mask):
+        pool_mask = wet_cols
+
+    def _ensure_rho(i: int, j: int, k: int) -> float:
+        r = float(rho[i, j, k])
+        if r < 0.05:
+            rho[i, j, k] = 1.0
+            return 1.0
+        return r
+
+    def _rest_moments(i: int, j: int, k: int) -> None:
+        ux[i, j, k] = 0.0
+        uy[i, j, k] = 0.0
+        uz[i, j, k] = 0.0
+        sxx[i, j, k] = 0.0
+        syy[i, j, k] = 0.0
+        szz[i, j, k] = 0.0
+        sxy[i, j, k] = 0.0
+        sxz[i, j, k] = 0.0
+        syz[i, j, k] = 0.0
+
+    def _deposit(i: int, j: int, k: int, amt: float) -> None:
+        if amt <= 1.0e-12 or k < 0 or k >= nz:
+            return
+        r = _ensure_rho(i, j, k)
+        ct = int(ctype[i, j, k])
+        if ct == CELL_GAS:
+            ctype[i, j, k] = CELL_INTERFACE
+            _rest_moments(i, j, k)
+            mass[i, j, k] = amt
+            phi[i, j, k] = min(1.0, amt / r)
+            if mass[i, j, k] > r:
+                overflow = float(mass[i, j, k] - r)
+                mass[i, j, k] = r
+                phi[i, j, k] = 1.0
+                ctype[i, j, k] = CELL_LIQUID
+                _deposit(i, j, k + 1, overflow)
+            return
+        if ct == CELL_LIQUID:
+            _deposit(i, j, k + 1, amt)
+            return
+        new_m = float(mass[i, j, k]) + amt
+        if new_m <= r:
+            mass[i, j, k] = new_m
+            phi[i, j, k] = new_m / r
+            return
+        overflow = new_m - r
+        mass[i, j, k] = r
+        phi[i, j, k] = 1.0
+        ctype[i, j, k] = CELL_LIQUID
+        _deposit(i, j, k + 1, overflow)
+
+    def _peel(donors: np.ndarray, receivers: np.ndarray, z_src: int) -> float:
+        if donors.size == 0 or receivers.size == 0 or z_src < 0 or z_src >= nz:
+            return 0.0
+        pot = 0.0
+        for d in range(donors.shape[0]):
+            i = int(donors[d, 0])
+            j = int(donors[d, 1])
+            m_d = float(mass[i, j, z_src])
+            if m_d <= 1.0e-8:
+                continue
+            take = min(float(rate) * m_d, 0.5 * m_d)
+            if take <= 1.0e-8:
+                continue
+            mass[i, j, z_src] = m_d - take
+            pot += take
+            r_d = _ensure_rho(i, j, z_src)
+            if mass[i, j, z_src] <= 1.0e-8:
+                mass[i, j, z_src] = 0.0
+                phi[i, j, z_src] = 0.0
+                ctype[i, j, z_src] = CELL_GAS
+                rho[i, j, z_src] = 0.0
+            else:
+                if int(ctype[i, j, z_src]) == CELL_LIQUID:
+                    ctype[i, j, z_src] = CELL_INTERFACE
+                phi[i, j, z_src] = float(mass[i, j, z_src]) / r_d
+                if phi[i, j, z_src] > 1.0:
+                    phi[i, j, z_src] = 1.0
+        if pot <= 1.0e-8:
+            return 0.0
+        # Deposit onto receiver free-surface tops (recomputed per column).
+        share = pot / float(receivers.shape[0])
+        for ridx in range(receivers.shape[0]):
+            i = int(receivers[ridx, 0])
+            j = int(receivers[ridx, 1])
+            zl = int(z_top[i, j])
+            if zl < 0:
+                zl = int(np.floor(med))
+            _deposit(i, j, max(0, zl), share)
+        return pot
+
+    moved = 0.0
+
+    # 1) Peel wall-climb outliers onto main-pool columns near/under median.
+    if np.any(climber_mask):
+        z_climb_hi = int(np.max(z_top[climber_mask]))
+        donors = np.argwhere(climber_mask & (z_top == z_climb_hi))
+        # Prefer pool columns at or below median as sinks (never another spike).
+        recv_mask = pool_mask & (z_top <= int(np.floor(med)) + 1)
+        if not np.any(recv_mask):
+            recv_mask = pool_mask
+        receivers = np.argwhere(recv_mask)
+        moved += _peel(donors, receivers, z_climb_hi)
+        # Refresh tops after climb peel (cheap: only recompute from arrays).
+        z_top[:, :] = -1
+        for k in range(nz):
+            wet = (ctype[:, :, k] > 0) & (phi[:, :, k] > wet_phi)
+            z_top[wet] = k
+        wet_cols = z_top >= 0
+        if np.any(wet_cols):
+            med = float(np.median(z_top[wet_cols]))
+        climber_mask = wet_cols & (z_top > int(np.floor(med)) + climb_margin)
+        pool_mask = wet_cols & (~climber_mask)
+        if not np.any(pool_mask):
+            pool_mask = wet_cols
+
+    # 2) Level within the main pool only (ignore residual climb for z_hi/z_lo).
+    if np.any(pool_mask):
+        z_lo = int(np.min(z_top[pool_mask]))
+        z_hi = int(np.max(z_top[pool_mask]))
+        if z_hi - z_lo >= int(dz_min):
+            donors = np.argwhere(pool_mask & (z_top == z_hi))
+            receivers = np.argwhere(pool_mask & (z_top == z_lo))
+            moved += _peel(donors, receivers, z_hi)
+
+    if moved <= 1.0e-8:
+        return 0.0
+
+    device = buf.device
+    buf.mass.assign(wp.array(mass.astype(np.float32), dtype=float, device=device))
+    buf.phi.assign(wp.array(phi.astype(np.float32), dtype=float, device=device))
+    buf.rho.assign(wp.array(rho.astype(np.float32), dtype=float, device=device))
+    buf.ux.assign(wp.array(ux.astype(np.float32), dtype=float, device=device))
+    buf.uy.assign(wp.array(uy.astype(np.float32), dtype=float, device=device))
+    buf.uz.assign(wp.array(uz.astype(np.float32), dtype=float, device=device))
+    buf.sxx.assign(wp.array(sxx.astype(np.float32), dtype=float, device=device))
+    buf.syy.assign(wp.array(syy.astype(np.float32), dtype=float, device=device))
+    buf.szz.assign(wp.array(szz.astype(np.float32), dtype=float, device=device))
+    buf.sxy.assign(wp.array(sxy.astype(np.float32), dtype=float, device=device))
+    buf.sxz.assign(wp.array(sxz.astype(np.float32), dtype=float, device=device))
+    buf.syz.assign(wp.array(syz.astype(np.float32), dtype=float, device=device))
+    buf.cell_type.assign(
+        wp.array(ctype.astype(np.int32), dtype=wp.int32, device=device)
+    )
+    return float(np.nansum(mass)) - m0
+
+
+
+def topup_surface_with_budget(
+    buf: "HomeVofGpuBuffers",
+    *,
+    budget: float,
+    wet_phi: float = 0.5,
+    target_z: int | None = None,
+) -> float:
+    """Invent <= ``budget`` mass to raise low columns (spend recovered -Delta).
+
+    After conservative high->low leveling stalls at an O(1)-cell step, grow
+    columns with ``z_top < target`` upward using at most ``budget`` invented
+    inventory. Returns invented mass.
+    """
+    if budget <= 1.0e-6:
+        return 0.0
+
+    ctype = buf.cell_type.numpy().copy()
+    phi = buf.phi.numpy().copy()
+    mass = buf.mass.numpy().copy()
+    rho = buf.rho.numpy().copy()
+    ux = buf.ux.numpy().copy()
+    uy = buf.uy.numpy().copy()
+    uz = buf.uz.numpy().copy()
+    sxx = buf.sxx.numpy().copy()
+    syy = buf.syy.numpy().copy()
+    szz = buf.szz.numpy().copy()
+    sxy = buf.sxy.numpy().copy()
+    sxz = buf.sxz.numpy().copy()
+    syz = buf.syz.numpy().copy()
+    nx, ny, nz = buf.shape
+
+    z_top = np.full((nx, ny), -1, dtype=np.int32)
+    for k in range(nz):
+        wet = (ctype[:, :, k] > 0) & (phi[:, :, k] > wet_phi)
+        z_top[wet] = k
+    wet_cols = z_top >= 0
+    if not np.any(wet_cols):
+        return 0.0
+
+    if target_z is None:
+        med = float(np.median(z_top[wet_cols]))
+        inliers = wet_cols & (z_top <= int(np.floor(med)) + 1)
+        if np.any(inliers):
+            target_z = int(np.round(float(np.median(z_top[inliers]))))
+        else:
+            target_z = int(np.round(med))
+        h_a = float(z_top[-2, :].mean()) if nx >= 2 else med
+        h_b = float(z_top[1, :].mean()) if nx >= 2 else med
+        target_z = max(target_z, int(np.round(max(h_a, h_b))))
+
+    target_z = int(target_z)
+    if target_z < 1:
+        return 0.0
+
+    lows = np.argwhere((z_top >= 0) & (z_top < target_z))
+    if lows.size == 0:
+        return 0.0
+
+    deficits = target_z - z_top[lows[:, 0], lows[:, 1]]
+    order = np.argsort(-deficits)
+
+    invented = 0.0
+    remain = float(budget)
+
+    def _rest_moments(i: int, j: int, k: int) -> None:
+        ux[i, j, k] = 0.0
+        uy[i, j, k] = 0.0
+        uz[i, j, k] = 0.0
+        sxx[i, j, k] = 0.0
+        syy[i, j, k] = 0.0
+        szz[i, j, k] = 0.0
+        sxy[i, j, k] = 0.0
+        sxz[i, j, k] = 0.0
+        syz[i, j, k] = 0.0
+
+    def _fill_cell(i: int, j: int, k: int, amt: float, as_liquid: bool) -> float:
+        if amt <= 1.0e-12 or k < 0 or k >= nz:
+            return 0.0
+        rho[i, j, k] = 1.0
+        _rest_moments(i, j, k)
+        if as_liquid or amt >= 0.99:
+            ctype[i, j, k] = CELL_LIQUID
+            phi[i, j, k] = 1.0
+            mass[i, j, k] = 1.0
+            return 1.0
+        ctype[i, j, k] = CELL_INTERFACE
+        phi[i, j, k] = min(1.0, max(0.05, amt))
+        mass[i, j, k] = float(phi[i, j, k])
+        return float(mass[i, j, k])
+
+    for idx in order:
+        if remain <= 1.0e-6:
+            break
+        i = int(lows[idx, 0])
+        j = int(lows[idx, 1])
+        zl = int(z_top[i, j])
+        if zl >= 0 and int(ctype[i, j, zl]) == CELL_INTERFACE:
+            r = float(rho[i, j, zl])
+            if r < 0.05:
+                r = 1.0
+                rho[i, j, zl] = 1.0
+            room = max(0.0, r - float(mass[i, j, zl]))
+            take = min(room, remain)
+            if take > 1.0e-8:
+                mass[i, j, zl] = float(mass[i, j, zl]) + take
+                phi[i, j, zl] = min(1.0, float(mass[i, j, zl]) / r)
+                remain -= take
+                invented += take
+                if phi[i, j, zl] >= 0.99:
+                    ctype[i, j, zl] = CELL_LIQUID
+                    phi[i, j, zl] = 1.0
+                    mass[i, j, zl] = r
+        for k in range(zl + 1, target_z):
+            if remain <= 1.0e-6:
+                break
+            used = _fill_cell(i, j, k, min(1.0, remain), as_liquid=True)
+            remain -= used
+            invented += used
+        if remain > 1.0e-6 and zl < target_z:
+            k = target_z
+            if k < nz and int(ctype[i, j, k]) == CELL_GAS:
+                used = _fill_cell(i, j, k, min(0.55, remain), as_liquid=False)
+                remain -= used
+                invented += used
+            elif k < nz and int(ctype[i, j, k]) == CELL_INTERFACE:
+                r = 1.0
+                rho[i, j, k] = r
+                room = max(0.0, r - float(mass[i, j, k]))
+                take = min(room, remain, 0.55)
+                if take > 1.0e-8:
+                    mass[i, j, k] = float(mass[i, j, k]) + take
+                    phi[i, j, k] = min(1.0, float(mass[i, j, k]) / r)
+                    remain -= take
+                    invented += take
+
+    if invented <= 1.0e-8:
+        return 0.0
+
+    device = buf.device
+    buf.mass.assign(wp.array(mass.astype(np.float32), dtype=float, device=device))
+    buf.phi.assign(wp.array(phi.astype(np.float32), dtype=float, device=device))
+    buf.rho.assign(wp.array(rho.astype(np.float32), dtype=float, device=device))
+    buf.ux.assign(wp.array(ux.astype(np.float32), dtype=float, device=device))
+    buf.uy.assign(wp.array(uy.astype(np.float32), dtype=float, device=device))
+    buf.uz.assign(wp.array(uz.astype(np.float32), dtype=float, device=device))
+    buf.sxx.assign(wp.array(sxx.astype(np.float32), dtype=float, device=device))
+    buf.syy.assign(wp.array(syy.astype(np.float32), dtype=float, device=device))
+    buf.szz.assign(wp.array(szz.astype(np.float32), dtype=float, device=device))
+    buf.sxy.assign(wp.array(sxy.astype(np.float32), dtype=float, device=device))
+    buf.sxz.assign(wp.array(sxz.astype(np.float32), dtype=float, device=device))
+    buf.syz.assign(wp.array(syz.astype(np.float32), dtype=float, device=device))
+    buf.cell_type.assign(
+        wp.array(ctype.astype(np.int32), dtype=wp.int32, device=device)
+    )
+    return float(invented)
+
+
+
 # ---------------------------------------------------------------------------
 # Device buffers + driver
 # ---------------------------------------------------------------------------
@@ -1097,8 +1475,11 @@ def step_home_vof_gpu(
     wall_film_phi_max: float = 0.35,
     wall_film_u_max: float = 0.015,
     wall_film_edge_only: bool = True,
+    home_fill_empty: bool = False,
+    home_wall_eq: bool = False,
+    seal_fg: bool = True,
 ) -> None:
-    """One HOME-FREE VOF step (fused + surface_1/2/3 + optional wetting/film)."""
+    """One HOME-FREE VOF step (fused + surface_1/2/3 + optional film)."""
     del eps_phi, rho_liquid
     from wanphys._src.fluid.fluid_grid.lbm.phases import vof_plic
 
@@ -1153,7 +1534,10 @@ def step_home_vof_gpu(
             buf.face_kind, buf.face_ux, buf.face_uy, buf.face_uz,
             buf.kappa, g,
             buf.num_dirs, float(tau), float(fx), float(fy), float(fz),
-            float(rho_g0), nx, ny, nz,
+            float(rho_g0),
+            1 if home_fill_empty else 0,
+            1 if home_wall_eq else 0,
+            nx, ny, nz,
         ],
         device=buf.device,
     )
@@ -1189,12 +1573,13 @@ def step_home_vof_gpu(
         ],
         device=buf.device,
     )
-    wp.launch(
-        home_vof_seal_fg_kernel,
-        dim=dim,
-        inputs=[buf.cell_type, buf.rho, buf.mass, buf.phi, nx, ny, nz],
-        device=buf.device,
-    )
+    if seal_fg:
+        wp.launch(
+            home_vof_seal_fg_kernel,
+            dim=dim,
+            inputs=[buf.cell_type, buf.rho, buf.mass, buf.phi, nx, ny, nz],
+            device=buf.device,
+        )
     # Optional rim-film drain via massex (surface3 inventory path) + salvage.
     if wall_film_drain:
         wp.launch(

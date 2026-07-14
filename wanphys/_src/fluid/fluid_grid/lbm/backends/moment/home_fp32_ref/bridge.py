@@ -20,9 +20,11 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.bc import (
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.vof_warp import (
     HomeVofGpuBuffers,
     alloc_home_vof_gpu,
+    level_surface_high_to_low,
     seed_home_vof_gpu,
     set_face_bc_gpu,
     step_home_vof_gpu,
+    topup_surface_with_budget,
     upload_home_vof_state,
 )
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.vof_step import (
@@ -207,9 +209,46 @@ class HomeFp32VofBridge:
             wall_film_phi_max=float(self.model.vof_wall_film_phi_max),
             wall_film_u_max=float(self.model.vof_wall_film_u_max),
             wall_film_edge_only=bool(self.model.vof_wall_film_edge_only),
+            home_fill_empty=bool(self.model.vof_home_fill_empty),
+            home_wall_eq=bool(self.model.vof_home_wall_eq),
+            seal_fg=bool(self.model.vof_seal_fg),
         )
         self.sync_to_state(state_out)
         state_out.f.zero_()
+
+    def level_high_to_low(self, state_out: LbmState | None = None) -> float:
+        """Once-per-frame: move mass from high free-surface tops to lower columns.
+
+        Returns inventory delta of ``Σmass`` (≈0 if conservative).
+        """
+        buf = self._ensure_gpu()
+        dmass = level_surface_high_to_low(
+            buf,
+            rate=float(self.model.vof_quiet_fill_rate),
+            dz_min=2,
+            wet_phi=0.5,
+        )
+        if state_out is not None:
+            self.sync_to_state(state_out)
+        return float(dmass)
+
+    def topup_with_budget(
+        self,
+        budget: float,
+        state_out: LbmState | None = None,
+        target_z: int | None = None,
+    ) -> float:
+        """Invent ≤``budget`` mass to raise low columns (``inf`` = fill all)."""
+        buf = self._ensure_gpu()
+        invented = topup_surface_with_budget(
+            buf,
+            budget=float(budget) if np.isfinite(budget) else 1.0e30,
+            wet_phi=0.5,
+            target_z=target_z,
+        )
+        if state_out is not None:
+            self.sync_to_state(state_out)
+        return float(invented)
 
     def copy_kappa_to(self, kappa_dst: wp.array) -> None:
         """Copy PLIC κ onto solver visual/metrics buffer (may be zero if γ=0)."""

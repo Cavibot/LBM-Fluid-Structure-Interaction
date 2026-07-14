@@ -105,6 +105,28 @@ class LbmModel(FluidGridModelBase):
     Face-only films are left to wetting; this targets the tall corner spikes
     that inflate ``z_p2p`` without stripping the whole wall meniscus.
     """
+    vof_home_fill_empty: bool = False
+    """Softer Home-FSLBM fill/empty (TechRep-05-4 style mass gates).
+
+    Fill: ``mass>ρ`` or (no gas neighbor and ``mass>0.99ρ``).
+    Empty: ``mass<0`` or (no fluid neighbor and ``mass<0.1ρ``).
+    Bare TYPE_NO_G/F without mass gates evaporates crests and thrash-cuts the pool.
+    """
+    vof_home_wall_eq: bool = False
+    """Wall pull uses Home ``f^eq(ρ, u_wall)`` instead of HOME Eq.24 stress retain."""
+    vof_seal_fg: bool = True
+    """After surface_3, face-only liquid–gas seal → interface. Home relies on
+    surface_1/2 only; set False for closer Home topology."""
+    vof_quiet_fill: bool = False
+    """Late-time high→low free-surface leveling (host, once per frame).
+
+    When armed, peels mass from columns with ``z_top ≥ median+1`` and deposits
+    onto lower face-neighbor columns. Does not drain pool bottom.
+    """
+    vof_quiet_fill_rate: float = 0.2
+    """Fraction of donor *top-cell* mass moved per leveling pass."""
+    vof_quiet_fill_u_max: float = 0.025
+    """Arm leveling only when mean |u| is below this (example gate)."""
 
     # ---- Solver backend -------------------------------------------------
     lbm_backend: str = "dist"

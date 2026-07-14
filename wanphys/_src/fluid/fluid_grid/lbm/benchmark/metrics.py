@@ -244,12 +244,16 @@ class SurfaceHeightMap:
 
     ``z_top[i, j]`` is the largest ``k`` with wet liquid/interface
     (``cell_type > 0`` and ``φ > wet_threshold``).  Dry columns are ``-1``.
+
+    ``p2p`` is full max−min (inflated by wall-climb spikes).
+    ``robust_p2p`` is p95−p05 of wet columns — better stop gate for quiet fill.
     """
 
     z_top: np.ndarray
     mean: float = 0.0
     rms: float = 0.0
     p2p: float = 0.0
+    robust_p2p: float = 0.0
     wet_columns: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -257,6 +261,7 @@ class SurfaceHeightMap:
             "mean": self.mean,
             "rms": self.rms,
             "p2p": self.p2p,
+            "robust_p2p": self.robust_p2p,
             "wet_columns": self.wet_columns,
             "shape": list(self.z_top.shape),
         }
@@ -294,10 +299,12 @@ def collect_surface_height_map(
         return SurfaceHeightMap(z_top=z_top)
 
     h = z_top[wet_cols].astype(np.float64)
+    p05, p95 = np.percentile(h, [5.0, 95.0])
     return SurfaceHeightMap(
         z_top=z_top,
         mean=float(np.mean(h)),
         rms=float(np.std(h)),
         p2p=float(np.max(h) - np.min(h)),
+        robust_p2p=float(p95 - p05),
         wet_columns=n_wet,
     )
