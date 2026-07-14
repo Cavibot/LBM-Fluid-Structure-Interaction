@@ -236,3 +236,68 @@ def collect_interface_roughness(
         kappa_rms=k_rms,
         wet_columns=n_wet,
     )
+
+
+@dataclass
+class SurfaceHeightMap:
+    """Per-column free-surface elevation (highest wet lattice ``k``).
+
+    ``z_top[i, j]`` is the largest ``k`` with wet liquid/interface
+    (``cell_type > 0`` and ``φ > wet_threshold``).  Dry columns are ``-1``.
+    """
+
+    z_top: np.ndarray
+    mean: float = 0.0
+    rms: float = 0.0
+    p2p: float = 0.0
+    wet_columns: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mean": self.mean,
+            "rms": self.rms,
+            "p2p": self.p2p,
+            "wet_columns": self.wet_columns,
+            "shape": list(self.z_top.shape),
+        }
+
+
+def collect_surface_height_map(
+    phi: np.ndarray,
+    cell_type: np.ndarray,
+    *,
+    wet_threshold: float = 0.5,
+) -> SurfaceHeightMap:
+    """Highest wet ``z`` (lattice ``k``) for each horizontal ``(i, j)``.
+
+    Unlike :func:`collect_interface_roughness` (which uses ``Σφ`` thickness),
+    this returns the actual free-surface elevation field.
+    """
+    phi_np = np.asarray(phi, dtype=np.float64)
+    ctype = np.asarray(cell_type)
+    if phi_np.ndim != 3 or ctype.shape != phi_np.shape:
+        raise ValueError(
+            f"phi/cell_type must be matching 3D arrays, got {phi_np.shape} / {ctype.shape}"
+        )
+
+    nx, ny, nz = phi_np.shape
+    wet = (ctype > 0) & (phi_np > float(wet_threshold))
+    # k index broadcast: shape (1,1,nz) → max over z among wet cells.
+    k_idx = np.arange(nz, dtype=np.int32)[None, None, :]
+    # Dry columns: max of empty → use -1 sentinel.
+    filled = np.where(wet, k_idx, np.int32(-1))
+    z_top = filled.max(axis=2)
+
+    wet_cols = z_top >= 0
+    n_wet = int(wet_cols.sum())
+    if n_wet == 0:
+        return SurfaceHeightMap(z_top=z_top)
+
+    h = z_top[wet_cols].astype(np.float64)
+    return SurfaceHeightMap(
+        z_top=z_top,
+        mean=float(np.mean(h)),
+        rms=float(np.std(h)),
+        p2p=float(np.max(h) - np.min(h)),
+        wet_columns=n_wet,
+    )

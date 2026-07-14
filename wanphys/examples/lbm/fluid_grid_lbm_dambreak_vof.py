@@ -23,6 +23,7 @@ import warp as wp
 from wanphys._src.fluid.fluid_grid.lbm import LbmDomain, LbmModel
 from wanphys._src.fluid.fluid_grid.lbm.benchmark.metrics import (
     collect_interface_roughness,
+    collect_surface_height_map,
 )
 from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRenderer
 
@@ -52,6 +53,10 @@ RAY_MARCH_STEPS: int = 800
 FRAME_DT: float = 1.0 / 60.0
 SIM_SUBSTEPS: int = 8
 
+# Free-surface height map (per-column max z) starts after this sim time.
+HEIGHT_MAP_START_T: float = 10.0
+HEIGHT_MAP_EVERY_FRAMES: int = 30
+
 
 class VofDamBreak:
     def __init__(self, viewer: FluidViewerGL, *, backend: str = BACKEND, n: int = N):
@@ -70,12 +75,15 @@ class VofDamBreak:
             self._substeps = SIM_SUBSTEPS
         else:
             # Conservative late-pool params. g∝1/n keeps Fr similar across N.
-            # Do not chase 1-cell wall leveling with free-slip / film drains
-            # (mass loss); see docs/wanphys/lbm_home_fslbm_one_cell_limit_zh.md.
+            # Baseline late-pool params. Strong wall κ wetting peels liquid off
+            # the walls into a frustum (四棱台); keep vof_wall_wetting=0.
+            # See docs/wanphys/lbm_home_fslbm_one_cell_limit_zh.md.
             gravity = -0.0020 * (float(n_ref) / float(self._n))
             tau = 0.51
             gamma = 1.5e-3
             self._substeps = max(SIM_SUBSTEPS, 12)
+            wall_wetting = 0.0
+            wall_film = False
 
         self.model = LbmModel(
             fluid_grid_res=(self._n, self._n, self._n),
@@ -89,6 +97,11 @@ class VofDamBreak:
             vof_epsilon=VOF_EPSILON,
             vof_gamma=gamma,
             vof_kappa_smooth=VOF_KAPPA_SMOOTH,
+            vof_wall_wetting=wall_wetting if self._backend == "home_fp32" else 0.0,
+            vof_wall_film_drain=wall_film if self._backend == "home_fp32" else False,
+            vof_wall_film_phi_max=0.95,
+            vof_wall_film_u_max=0.02,
+            vof_wall_film_edge_only=True,
             lambda_trt=LAMBDA_TRT,
             initial_density=RHO_LIQUID,
             gravity_x=0.0,
@@ -99,7 +112,11 @@ class VofDamBreak:
             f"VOF Dam-Break: {self._n}^3, lattice={self.model.lattice}, "
             f"backend={self.model.lbm_backend}, tau={self.model.tau}, "
             f"gz={gravity}, gamma={gamma}, substeps={self._substeps}, "
-            f"phase_mode=vof_sharp"
+            f"phase_mode=vof_sharp, "
+            f"collide={'NOCM-HOME' if self._backend == 'home_fp32' else 'TRT/dist'}, "
+            f"wall_wetting={self.model.vof_wall_wetting}, "
+            f"film_drain={self.model.vof_wall_film_drain} "
+            f"(edge_only={self.model.vof_wall_film_edge_only})"
         )
 
         self.domain = LbmDomain(self.model)
@@ -176,6 +193,7 @@ class VofDamBreak:
         viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
         self.frame_count = 0
         self._last_ms = 0.0
+        self._height_map = None  # SurfaceHeightMap after t >= HEIGHT_MAP_START_T
         print("Controls: [Space] unpause  [R] reset  [mouse] orbit")
 
     def step(self):
@@ -202,29 +220,54 @@ class VofDamBreak:
             interface = ctype == 1
             wet = (ctype > 0) & np.isfinite(rho)
             rho_finite = rho[np.isfinite(rho)]
-            vx = float(state.velocity_x.numpy()[wet].mean()) if wet.any() else 0.0
-            vz = float(state.velocity_z.numpy()[wet].mean()) if wet.any() else 0.0
+            vx_f = state.velocity_x.numpy()
+            vy_f = state.velocity_y.numpy()
+            vz_f = state.velocity_z.numpy()
+            vx = float(vx_f[wet].mean()) if wet.any() else 0.0
+            vz = float(vz_f[wet].mean()) if wet.any() else 0.0
+            speed = (
+                float(np.sqrt(vx_f[wet] ** 2 + vy_f[wet] ** 2 + vz_f[wet] ** 2).mean())
+                if wet.any()
+                else 0.0
+            )
             rho_max = float(rho_finite.max()) if rho_finite.size else float("nan")
-            # Column heights at A (xmax) vs B (xmin) free-surface φ>0.5.
             z_top = np.zeros(ctype.shape[:2], dtype=np.int32)
             for k in range(ctype.shape[2]):
                 wet_k = (ctype[:, :, k] > 0) & (phi[:, :, k] > 0.5)
                 z_top[wet_k] = k
             h_a = float(z_top[-2, :].mean()) if z_top.size else 0.0
             h_b = float(z_top[1, :].mean()) if z_top.size else 0.0
+            nxy = z_top.shape[0]
+            corn_max = int(
+                max(
+                    z_top[:2, :2].max(),
+                    z_top[:2, -2:].max(),
+                    z_top[-2:, :2].max(),
+                    z_top[-2:, -2:].max(),
+                )
+            ) if nxy >= 2 else 0
             kappa = None
             vof = self.domain.solver._vof_sharp
             if float(self.model.vof_gamma) > 0.0:
                 kappa = vof._kappa.numpy()
             rough = collect_interface_roughness(phi, ctype, kappa=kappa)
+            height_note = ""
+            if self.sim_time >= HEIGHT_MAP_START_T:
+                if self.frame_count % HEIGHT_MAP_EVERY_FRAMES == 0:
+                    self._height_map = collect_surface_height_map(phi, ctype)
+                hm = self._height_map
+                if hm is not None:
+                    height_note = (
+                        f" z̄={hm.mean:.2f} z_rms={hm.rms:.3f} z_p2p={hm.p2p:.2f}"
+                    )
             print(
                 f"[t={self.sim_time:.1f}s] L={liquid.sum()} I={interface.sum()} "
                 f"vol={vol:.1f} (Δ={vol-self._vol0:+.1f}) mass={mass_sum:.1f} "
                 f"rho_max={rho_max:.3f} "
-                f"v=({vx:+.4f},{vz:+.4f}) "
-                f"hA={h_a:.1f} hB={h_b:.1f} "
+                f"v=({vx:+.4f},{vz:+.4f}) |u|={speed:.4f} "
+                f"hA={h_a:.1f} hB={h_b:.1f} corn={corn_max} "
                 f"h_rms={rough.height_rms:.3f} h_p2p={rough.height_p2p:.2f} "
-                f"κ_rms={rough.kappa_rms:.3f} "
+                f"κ_rms={rough.kappa_rms:.3f}{height_note} "
                 f"sim={self._last_ms:.0f}ms backend={self.model.lbm_backend}",
                 file=sys.stderr,
                 flush=True,

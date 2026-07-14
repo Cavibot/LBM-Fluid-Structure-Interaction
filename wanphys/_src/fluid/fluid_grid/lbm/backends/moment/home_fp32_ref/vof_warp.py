@@ -688,6 +688,239 @@ def home_vof_seal_fg_kernel(
                     return
 
 
+@wp.kernel
+def home_vof_wall_wetting_kappa_kernel(
+    kappa: wp.array3d(dtype=float),
+    cell: wp.array3d(dtype=wp.int32),
+    wall_wetting: float,
+    nx: int,
+    ny: int,
+    nz: int,
+) -> None:
+    """Optional Young κ bias on vertical-wall *interface* cells only.
+
+    Strong / inset hydrophobic bias pulls the pool off the walls into a
+    frustum (四棱台). Keep this mild and face-only when enabled; default off.
+    ``wall_wetting`` ≈ cos θ_Y (negative → hydrophobic).
+    """
+    i, j, k = wp.tid()
+    if wall_wetting == 0.0:
+        return
+    # Interface only — biasing bulk liquid next to walls accelerates wall peel.
+    if int(cell[i, j, k]) != CELL_INTERFACE:
+        return
+    on_vwall = int(0)
+    if i == 0 or i == nx - 1 or j == 0 or j == ny - 1:
+        on_vwall = 1
+    if on_vwall == 0:
+        return
+    kappa[i, j, k] = kappa[i, j, k] + wall_wetting
+
+
+@wp.kernel
+def home_vof_wall_film_drain_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    rho: wp.array3d(dtype=float),
+    mass: wp.array3d(dtype=float),
+    massex: wp.array3d(dtype=float),
+    phi: wp.array3d(dtype=float),
+    ux: wp.array3d(dtype=float),
+    uy: wp.array3d(dtype=float),
+    uz: wp.array3d(dtype=float),
+    phi_max: float,
+    u_max: float,
+    edge_only: int,
+    nx: int,
+    ny: int,
+    nz: int,
+) -> None:
+    """Subgrid rim-film drain on vertical walls (mass → ``massex``, like surface3).
+
+    Targets climb coats with a dry inward (diagonal) face, near-stagnant
+    (|u| < u_max), φ < phi_max. When ``edge_only!=0``, only vertical domain
+    edges/corners (two walls) — faces stay intact, corners get cleaned.
+
+    Inventory rule matches fused gather; no receivers → keep cell.
+    """
+    i, j, k = wp.tid()
+    if int(cell[i, j, k]) != CELL_INTERFACE:
+        return
+
+    n_vwall = int(0)
+    inward_i = i
+    inward_j = j
+    if i == 0:
+        n_vwall = n_vwall + 1
+        inward_i = 1
+    elif i == nx - 1:
+        n_vwall = n_vwall + 1
+        inward_i = nx - 2
+    if j == 0:
+        n_vwall = n_vwall + 1
+        inward_j = 1
+    elif j == ny - 1:
+        n_vwall = n_vwall + 1
+        inward_j = ny - 2
+    # Near-corner band (edge + 1 cell inset): tall spikes often sit off the exact edge.
+    near_i = int(0)
+    near_j = int(0)
+    if i <= 1 or i >= nx - 2:
+        near_i = 1
+        if i == 1:
+            inward_i = 2
+        elif i == nx - 2:
+            inward_i = nx - 3
+    if j <= 1 or j >= ny - 2:
+        near_j = 1
+        if j == 1:
+            inward_j = 2
+        elif j == ny - 2:
+            inward_j = ny - 3
+    if edge_only != 0:
+        if near_i == 0 or near_j == 0:
+            return
+    elif n_vwall == 0:
+        return
+    if k <= 0:
+        return
+
+    ux_c = ux[i, j, k]
+    uy_c = uy[i, j, k]
+    uz_c = uz[i, j, k]
+    speed2 = ux_c * ux_c + uy_c * uy_c + uz_c * uz_c
+    if speed2 > u_max * u_max:
+        return
+
+    phin = phi[i, j, k]
+    if phin <= 1.0e-8:
+        cell[i, j, k] = CELL_GAS
+        mass[i, j, k] = 0.0
+        phi[i, j, k] = 0.0
+        rho[i, j, k] = 0.0
+        return
+
+    # Interior direction (away from the nearest vertical walls).
+    si = int(0)
+    sj = int(0)
+    if i <= 1:
+        si = 1
+    elif i >= nx - 2:
+        si = -1
+    if j <= 1:
+        sj = 1
+    elif j >= ny - 2:
+        sj = -1
+    if edge_only != 0 and (si == 0 or sj == 0):
+        return
+
+    # Stranded climb: no pool liquid / thick I toward domain interior at this k.
+    # (Diagonal-void failed when the whole corner column is an I film stack.)
+    pool = int(0)
+    for t in range(1, 3):
+        ni = i + t * si
+        nj = j + t * sj
+        if ni < 0 or ni >= nx or nj < 0 or nj >= ny:
+            continue
+        nt = int(cell[ni, nj, k])
+        if nt == CELL_LIQUID:
+            pool = 1
+        elif nt == CELL_INTERFACE and phi[ni, nj, k] > 0.25:
+            pool = 1
+    if pool != 0:
+        return
+
+    # Need a wet path below so mass can fall into the pool inventory.
+    supported = int(0)
+    if k > 0:
+        bt = int(cell[i, j, k - 1])
+        if bt == CELL_LIQUID or bt == CELL_INTERFACE:
+            supported = 1
+        nb = int(cell[i + si, j + sj, k - 1]) if (
+            i + si >= 0 and i + si < nx and j + sj >= 0 and j + sj < ny
+        ) else CELL_GAS
+        if nb == CELL_LIQUID or nb == CELL_INTERFACE:
+            supported = 1
+    if supported == 0:
+        return
+    if phin > phi_max:
+        return
+
+    # Must count ALL wet neighbors that will gather massex next fused step.
+    counter = int(0)
+    for di in range(-1, 2):
+        for dj in range(-1, 2):
+            for dk in range(-1, 2):
+                if di == 0 and dj == 0 and dk == 0:
+                    continue
+                ni = i + di
+                nj = j + dj
+                nk = k + dk
+                if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+                    continue
+                nt = int(cell[ni, nj, nk])
+                if nt == CELL_LIQUID or nt == CELL_INTERFACE:
+                    counter = counter + 1
+    if counter == 0:
+        return
+
+    # Gentle fractional drain: avoid full I→G topology thrash that leaks Σmass.
+    massn = mass[i, j, k]
+    if massn <= 1.0e-8:
+        cell[i, j, k] = CELL_GAS
+        mass[i, j, k] = 0.0
+        phi[i, j, k] = 0.0
+        rho[i, j, k] = 0.0
+        return
+    drain = 0.12 * massn
+    massex[i, j, k] = massex[i, j, k] + drain / float(counter)
+    massn = massn - drain
+    mass[i, j, k] = massn
+    rhon = rho[i, j, k]
+    if rhon < 0.05:
+        rhon = 1.0
+        rho[i, j, k] = rhon
+    phin = massn / rhon
+    if phin < 0.0:
+        phin = 0.0
+    if phin > 1.0:
+        phin = 1.0
+    phi[i, j, k] = phin
+    if massn <= 1.0e-6:
+        cell[i, j, k] = CELL_GAS
+        mass[i, j, k] = 0.0
+        phi[i, j, k] = 0.0
+        rho[i, j, k] = 0.0
+
+
+@wp.kernel
+def home_vof_salvage_mass_on_gas_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    rho: wp.array3d(dtype=float),
+    mass: wp.array3d(dtype=float),
+    phi: wp.array3d(dtype=float),
+) -> None:
+    """Re-open INTERFACE if gas still holds mass (missed recv / race)."""
+    i, j, k = wp.tid()
+    if int(cell[i, j, k]) != CELL_GAS:
+        return
+    massn = mass[i, j, k]
+    if massn <= 1.0e-6:
+        mass[i, j, k] = 0.0
+        phi[i, j, k] = 0.0
+        return
+    cell[i, j, k] = CELL_INTERFACE
+    rhon = rho[i, j, k]
+    if rhon < 0.05:
+        rhon = 1.0
+        rho[i, j, k] = rhon
+    phin = massn / rhon
+    if phin < 0.0:
+        phin = 0.0
+    if phin > 1.0:
+        phin = 1.0
+    phi[i, j, k] = phin
+
+
 # ---------------------------------------------------------------------------
 # Device buffers + driver
 # ---------------------------------------------------------------------------
@@ -859,8 +1092,13 @@ def step_home_vof_gpu(
     eps_phi: float = 1.0e-4,
     rho_liquid: float = 1.0,
     kappa_smooth: int = 2,
+    wall_wetting: float = 0.0,
+    wall_film_drain: bool = False,
+    wall_film_phi_max: float = 0.35,
+    wall_film_u_max: float = 0.015,
+    wall_film_edge_only: bool = True,
 ) -> None:
-    """One HOME-FREE VOF step (fused + surface_1/2/3 + optional PLIC γκ)."""
+    """One HOME-FREE VOF step (fused + surface_1/2/3 + optional wetting/film)."""
     del eps_phi, rho_liquid
     from wanphys._src.fluid.fluid_grid.lbm.phases import vof_plic
 
@@ -889,6 +1127,15 @@ def step_home_vof_gpu(
                 device=buf.device,
             )
             buf.kappa, buf.kappa_tmp = buf.kappa_tmp, buf.kappa
+        if float(wall_wetting) != 0.0:
+            wp.launch(
+                home_vof_wall_wetting_kappa_kernel,
+                dim=dim,
+                inputs=[
+                    buf.kappa, buf.cell_type, float(wall_wetting), nx, ny, nz,
+                ],
+                device=buf.device,
+            )
     else:
         buf.kappa.zero_()
 
@@ -948,5 +1195,23 @@ def step_home_vof_gpu(
         inputs=[buf.cell_type, buf.rho, buf.mass, buf.phi, nx, ny, nz],
         device=buf.device,
     )
-    # No wall-film / orphan heuristics here: ad-hoc drains lost mass and fought
-    # the 1-cell free-surface limit of single-phase FSLBM (see docs).
+    # Optional rim-film drain via massex (surface3 inventory path) + salvage.
+    if wall_film_drain:
+        wp.launch(
+            home_vof_wall_film_drain_kernel,
+            dim=dim,
+            inputs=[
+                buf.cell_type, buf.rho, buf.mass, buf.massex, buf.phi,
+                buf.ux, buf.uy, buf.uz,
+                float(wall_film_phi_max), float(wall_film_u_max),
+                1 if wall_film_edge_only else 0,
+                nx, ny, nz,
+            ],
+            device=buf.device,
+        )
+        wp.launch(
+            home_vof_salvage_mass_on_gas_kernel,
+            dim=dim,
+            inputs=[buf.cell_type, buf.rho, buf.mass, buf.phi],
+            device=buf.device,
+        )

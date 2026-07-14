@@ -202,6 +202,11 @@ class HomeFp32VofBridge:
             eps_phi=float(self.model.vof_epsilon),
             rho_liquid=float(self.model.initial_density),
             kappa_smooth=int(self.model.vof_kappa_smooth),
+            wall_wetting=float(self.model.vof_wall_wetting),
+            wall_film_drain=bool(self.model.vof_wall_film_drain),
+            wall_film_phi_max=float(self.model.vof_wall_film_phi_max),
+            wall_film_u_max=float(self.model.vof_wall_film_u_max),
+            wall_film_edge_only=bool(self.model.vof_wall_film_edge_only),
         )
         self.sync_to_state(state_out)
         state_out.f.zero_()

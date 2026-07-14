@@ -80,6 +80,31 @@ class LbmModel(FluidGridModelBase):
     is reconstructed from the interface cell moments (ρ,u,S).
     When False, classic FSLBM uses the raw opposite post-collide ``f_ī``.
     """
+    vof_wall_wetting: float = 0.0
+    """HOME vertical-wall Young bias added to PLIC κ on wall *interface* cells.
+
+    ``0`` disables (recommended). Negative (e.g. ``-0.3``) → mild hydrophobic.
+    Strong values or inset/corner amplification peel the pool off the walls
+    into a frustum (四棱台) free surface — avoid for dam-break visuals.
+    """
+    vof_wall_film_drain: bool = False
+    """HOME mass-conserving subgrid drain of stagnant vertical-wall films.
+
+    Moves thin dry-inward vertical-wall rim mass into ``massex`` for the next
+    fused gather (surface3 inventory rule). Never evaporates. Gated by
+    ``vof_wall_film_u_max``. Prefer ``vof_wall_wetting`` first; keep film off
+    unless rim coats remain.
+    """
+    vof_wall_film_phi_max: float = 0.35
+    """Drain candidates with φ below this (also: dry-inward rim coats)."""
+    vof_wall_film_u_max: float = 0.015
+    """Only drain wall films with |u| below this (near-quiescent gate)."""
+    vof_wall_film_edge_only: bool = True
+    """If True, film drain acts only on vertical domain edges/corners (2 walls).
+
+    Face-only films are left to wetting; this targets the tall corner spikes
+    that inflate ``z_p2p`` without stripping the whole wall meniscus.
+    """
 
     # ---- Solver backend -------------------------------------------------
     lbm_backend: str = "dist"
@@ -348,6 +373,14 @@ class LbmModel(FluidGridModelBase):
         if int(self.vof_kappa_smooth) < 0:
             raise ValueError(
                 f"vof_kappa_smooth must be >= 0, got {self.vof_kappa_smooth}"
+            )
+        if float(self.vof_wall_film_phi_max) <= 0.0:
+            raise ValueError(
+                f"vof_wall_film_phi_max must be > 0, got {self.vof_wall_film_phi_max}"
+            )
+        if float(self.vof_wall_film_u_max) <= 0.0:
+            raise ValueError(
+                f"vof_wall_film_u_max must be > 0, got {self.vof_wall_film_u_max}"
             )
         if self.psi_type not in (0, 1):
             raise ValueError(
