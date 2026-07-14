@@ -127,6 +127,12 @@ class LbmModel(FluidGridModelBase):
     """Fraction of donor *top-cell* mass moved per leveling pass."""
     vof_quiet_fill_u_max: float = 0.025
     """Arm leveling only when mean |u| is below this (example gate)."""
+    vof_orphan_reabsorb: bool = True
+    """When quiet-level is armed, reabsorb disconnected airborne liquid blobs."""
+    vof_orphan_max_cells: int = 96
+    """Orphan components with ≤ this many wet cells are folded into the pool."""
+    vof_orphan_height_margin: int = 3
+    """Also fold components whose min_z exceeds main-pool median + this margin."""
 
     # ---- Solver backend -------------------------------------------------
     lbm_backend: str = "dist"

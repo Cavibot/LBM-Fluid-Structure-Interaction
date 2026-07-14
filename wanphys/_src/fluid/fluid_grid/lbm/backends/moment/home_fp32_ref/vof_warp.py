@@ -1298,6 +1298,194 @@ def topup_surface_with_budget(
     return float(invented)
 
 
+def reabsorb_orphan_liquid(
+    buf: "HomeVofGpuBuffers",
+    *,
+    max_cells: int = 96,
+    height_margin: int = 3,
+    wet_mass: float = 1.0e-6,
+) -> tuple[float, int]:
+    """Conservative: fold disconnected airborne liquid blobs into the main pool.
+
+    Labels 6-connected wet components (liquid/interface with ``mass>wet_mass``).
+    The largest-by-mass component is the main pool. Other components are orphans
+    if they are small (``≤ max_cells``) **or** sit entirely above the main free
+    surface (``min_z > pool_median_z + height_margin``). Their mass is deposited
+    onto the main-pool free surface; inventory is conserved.
+
+    Returns ``(mass_moved, n_orphan_components)``.
+    """
+    ctype = buf.cell_type.numpy().copy()
+    phi = buf.phi.numpy().copy()
+    mass = buf.mass.numpy().copy()
+    rho = buf.rho.numpy().copy()
+    ux = buf.ux.numpy().copy()
+    uy = buf.uy.numpy().copy()
+    uz = buf.uz.numpy().copy()
+    sxx = buf.sxx.numpy().copy()
+    syy = buf.syy.numpy().copy()
+    szz = buf.szz.numpy().copy()
+    sxy = buf.sxy.numpy().copy()
+    sxz = buf.sxz.numpy().copy()
+    syz = buf.syz.numpy().copy()
+    nx, ny, nz = buf.shape
+
+    wet = (ctype > 0) & (mass > float(wet_mass))
+    if not np.any(wet):
+        return 0.0, 0
+
+    labels = -np.ones((nx, ny, nz), dtype=np.int32)
+    comps: list[list[tuple[int, int, int]]] = []
+    neighbors = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+
+    wet_idx = np.argwhere(wet)
+    for si, sj, sk in wet_idx:
+        si, sj, sk = int(si), int(sj), int(sk)
+        if labels[si, sj, sk] >= 0:
+            continue
+        cid = len(comps)
+        stack = [(si, sj, sk)]
+        labels[si, sj, sk] = cid
+        cells: list[tuple[int, int, int]] = []
+        while stack:
+            i, j, k = stack.pop()
+            cells.append((i, j, k))
+            for di, dj, dk in neighbors:
+                ni, nj, nk = i + di, j + dj, k + dk
+                if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+                    continue
+                if labels[ni, nj, nk] >= 0 or not wet[ni, nj, nk]:
+                    continue
+                labels[ni, nj, nk] = cid
+                stack.append((ni, nj, nk))
+        comps.append(cells)
+
+    if len(comps) <= 1:
+        return 0.0, 0
+
+    masses = np.array(
+        [sum(float(mass[i, j, k]) for i, j, k in cells) for cells in comps],
+        dtype=np.float64,
+    )
+    main_id = int(np.argmax(masses))
+    main_cells = comps[main_id]
+
+    z_top = np.full((nx, ny), -1, dtype=np.int32)
+    for i, j, k in main_cells:
+        if k > z_top[i, j]:
+            z_top[i, j] = k
+    main_cols = z_top >= 0
+    if not np.any(main_cols):
+        return 0.0, 0
+    pool_med = float(np.median(z_top[main_cols]))
+    elevation_cut = int(np.floor(pool_med)) + int(max(1, height_margin))
+
+    def _clear_cell(i: int, j: int, k: int) -> float:
+        taken = float(mass[i, j, k])
+        mass[i, j, k] = 0.0
+        phi[i, j, k] = 0.0
+        rho[i, j, k] = 0.0
+        ctype[i, j, k] = CELL_GAS
+        ux[i, j, k] = 0.0
+        uy[i, j, k] = 0.0
+        uz[i, j, k] = 0.0
+        sxx[i, j, k] = 0.0
+        syy[i, j, k] = 0.0
+        szz[i, j, k] = 0.0
+        sxy[i, j, k] = 0.0
+        sxz[i, j, k] = 0.0
+        syz[i, j, k] = 0.0
+        return taken
+
+    def _ensure_rho(i: int, j: int, k: int) -> float:
+        r = float(rho[i, j, k])
+        if r < 0.05:
+            rho[i, j, k] = 1.0
+            return 1.0
+        return r
+
+    def _deposit(i: int, j: int, k: int, amt: float) -> None:
+        if amt <= 1.0e-12 or k < 0 or k >= nz:
+            return
+        r = _ensure_rho(i, j, k)
+        ct = int(ctype[i, j, k])
+        if ct == CELL_GAS:
+            ctype[i, j, k] = CELL_INTERFACE
+            ux[i, j, k] = uy[i, j, k] = uz[i, j, k] = 0.0
+            sxx[i, j, k] = syy[i, j, k] = szz[i, j, k] = 0.0
+            sxy[i, j, k] = sxz[i, j, k] = syz[i, j, k] = 0.0
+            mass[i, j, k] = amt
+            phi[i, j, k] = min(1.0, amt / r)
+            if mass[i, j, k] > r:
+                overflow = float(mass[i, j, k] - r)
+                mass[i, j, k] = r
+                phi[i, j, k] = 1.0
+                ctype[i, j, k] = CELL_LIQUID
+                _deposit(i, j, k + 1, overflow)
+            return
+        if ct == CELL_LIQUID:
+            _deposit(i, j, k + 1, amt)
+            return
+        new_m = float(mass[i, j, k]) + amt
+        if new_m <= r:
+            mass[i, j, k] = new_m
+            phi[i, j, k] = new_m / r
+            return
+        overflow = new_m - r
+        mass[i, j, k] = r
+        phi[i, j, k] = 1.0
+        ctype[i, j, k] = CELL_LIQUID
+        _deposit(i, j, k + 1, overflow)
+
+    moved = 0.0
+    n_orphans = 0
+    receivers = np.argwhere(main_cols)
+    max_cells_i = int(max(1, max_cells))
+
+    for cid, cells in enumerate(comps):
+        if cid == main_id:
+            continue
+        n_cells = len(cells)
+        min_z = min(k for _, _, k in cells)
+        elevated = min_z > elevation_cut
+        small = n_cells <= max_cells_i
+        if not (small or elevated):
+            continue
+        pot = 0.0
+        for i, j, k in cells:
+            pot += _clear_cell(i, j, k)
+        if pot <= 1.0e-8:
+            continue
+        n_orphans += 1
+        moved += pot
+        share = pot / float(receivers.shape[0])
+        for ridx in range(receivers.shape[0]):
+            i = int(receivers[ridx, 0])
+            j = int(receivers[ridx, 1])
+            zl = int(z_top[i, j])
+            _deposit(i, j, max(0, zl), share)
+
+    if moved <= 1.0e-8:
+        return 0.0, 0
+
+    device = buf.device
+    buf.mass.assign(wp.array(mass.astype(np.float32), dtype=float, device=device))
+    buf.phi.assign(wp.array(phi.astype(np.float32), dtype=float, device=device))
+    buf.rho.assign(wp.array(rho.astype(np.float32), dtype=float, device=device))
+    buf.ux.assign(wp.array(ux.astype(np.float32), dtype=float, device=device))
+    buf.uy.assign(wp.array(uy.astype(np.float32), dtype=float, device=device))
+    buf.uz.assign(wp.array(uz.astype(np.float32), dtype=float, device=device))
+    buf.sxx.assign(wp.array(sxx.astype(np.float32), dtype=float, device=device))
+    buf.syy.assign(wp.array(syy.astype(np.float32), dtype=float, device=device))
+    buf.szz.assign(wp.array(szz.astype(np.float32), dtype=float, device=device))
+    buf.sxy.assign(wp.array(sxy.astype(np.float32), dtype=float, device=device))
+    buf.sxz.assign(wp.array(sxz.astype(np.float32), dtype=float, device=device))
+    buf.syz.assign(wp.array(syz.astype(np.float32), dtype=float, device=device))
+    buf.cell_type.assign(
+        wp.array(ctype.astype(np.int32), dtype=wp.int32, device=device)
+    )
+    return float(moved), int(n_orphans)
+
 
 # ---------------------------------------------------------------------------
 # Device buffers + driver

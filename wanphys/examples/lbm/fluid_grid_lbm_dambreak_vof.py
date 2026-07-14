@@ -132,6 +132,9 @@ class VofDamBreak:
             vof_quiet_fill=False,
             vof_quiet_fill_rate=0.35,
             vof_quiet_fill_u_max=0.025,
+            vof_orphan_reabsorb=True,
+            vof_orphan_max_cells=max(96, self._n),
+            vof_orphan_height_margin=3,
             lambda_trt=LAMBDA_TRT,
             initial_density=RHO_LIQUID,
             gravity_x=0.0,
@@ -238,14 +241,31 @@ class VofDamBreak:
         t0 = time.perf_counter()
         for _ in range(self._substeps):
             self.domain.step(self.sim_dt)
-        # High→low leveling: once per frame after substeps (never from below).
+        # High→low leveling + orphan reabsorb after substeps.
         home = self.domain.solver._home_fp32
+        did_host = False
+        if (
+            home is not None
+            and self._quiet_fill_armed
+            and bool(self.model.vof_orphan_reabsorb)
+            and not self._home_faithful
+        ):
+            moved, n_orph = home.reabsorb_orphans(self.domain.state)
+            did_host = True
+            if n_orph > 0 and self.frame_count % 30 == 0:
+                print(
+                    f"  [orphan] reabsorbed {n_orph} blobs mass={moved:.2f}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         if (
             home is not None
             and self._quiet_fill_armed
             and bool(self.model.vof_quiet_fill)
         ):
             home.level_high_to_low(self.domain.state)
+            did_host = True
+        if did_host:
             self.domain.solver._vof_sharp.update_visual_field(
                 self.domain.state, self._n, self._n, self._n
             )
@@ -350,9 +370,24 @@ class VofDamBreak:
                                 flush=True,
                             )
                         if home is not None and not self._topup_done:
-                            # Over-budget: fill every low column to target height.
+                            # Fold leftover airborne spray before |Δ| topup.
+                            if bool(self.model.vof_orphan_reabsorb):
+                                moved, n_orph = home.reabsorb_orphans(
+                                    self.domain.state
+                                )
+                                if n_orph > 0:
+                                    print(
+                                        f"  [orphan] pre-topup {n_orph} blobs "
+                                        f"mass={moved:.2f}",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
+                            # Spend at most recovered −Δ: invent ≤ max(0, vol0−mass).
+                            if home._gpu is not None:
+                                mass_sum = float(np.nansum(home._gpu.mass.numpy()))
+                            budget = max(0.0, float(self._vol0) - mass_sum)
                             invented = home.topup_with_budget(
-                                float("inf"), self.domain.state
+                                budget, self.domain.state
                             )
                             self.domain.solver._vof_sharp.update_visual_field(
                                 self.domain.state, self._n, self._n, self._n
@@ -362,7 +397,7 @@ class VofDamBreak:
                                 mass_sum = float(np.nansum(home._gpu.mass.numpy()))
                             print(
                                 f"  [topup] invented={invented:.2f} "
-                                f"(unbounded) "
+                                f"(budget=|Δ|={budget:.2f}) "
                                 f"mass={mass_sum:.1f} (Δ→{mass_sum-self._vol0:+.1f})",
                                 file=sys.stderr,
                                 flush=True,

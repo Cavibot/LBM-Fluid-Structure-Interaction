@@ -15,11 +15,20 @@ Run the C++ solver and visualize as phi frames appear:
     uv run --extra examples python -m wanphys.examples.lbm.home_fslbm_3d_pouring_visual \\
         --run --max-frames 30
 
+Continue after a previous run finished (Home-FSLBM checkpoint):
+
+    # from Home-FSLBM/build — extend to frame 1200 without restarting from 0
+    .\\Release\\lbm_flow_proj.exe 1200 resume
+
 Build Home-FSLBM first (from repo root)::
 
     cd Home-FSLBM/build
     cmake .. -DFLR_WITH_CUDA=ON -DFLR_RUN_3D=ON
     cmake --build . --config Release
+
+Checkpoint file (written every 10 frames + at end)::
+
+    Home-FSLBM/dataMR3D/checkpoint/latest.bin
 
 Controls: [Space] pause/resume  [R] reset  [mouse] orbit  [scroll] zoom
 """

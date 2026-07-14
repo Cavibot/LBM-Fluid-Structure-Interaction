@@ -21,6 +21,7 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.vof_warp im
     HomeVofGpuBuffers,
     alloc_home_vof_gpu,
     level_surface_high_to_low,
+    reabsorb_orphan_liquid,
     seed_home_vof_gpu,
     set_face_bc_gpu,
     step_home_vof_gpu,
@@ -249,6 +250,18 @@ class HomeFp32VofBridge:
         if state_out is not None:
             self.sync_to_state(state_out)
         return float(invented)
+
+    def reabsorb_orphans(self, state_out: LbmState | None = None) -> tuple[float, int]:
+        """Fold airborne orphan liquid blobs into the main pool (conservative)."""
+        buf = self._ensure_gpu()
+        moved, n_orphans = reabsorb_orphan_liquid(
+            buf,
+            max_cells=int(self.model.vof_orphan_max_cells),
+            height_margin=int(self.model.vof_orphan_height_margin),
+        )
+        if state_out is not None:
+            self.sync_to_state(state_out)
+        return float(moved), int(n_orphans)
 
     def copy_kappa_to(self, kappa_dst: wp.array) -> None:
         """Copy PLIC κ onto solver visual/metrics buffer (may be zero if γ=0)."""
