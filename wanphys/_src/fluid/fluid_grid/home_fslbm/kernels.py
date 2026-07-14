@@ -256,6 +256,12 @@ def stream_collide_kernel(
     pixx_star = float(0.0); pixy_star = float(0.0); pixz_star = float(0.0)
     piyy_star = float(0.0); piyz_star = float(0.0); pizz_star = float(0.0)
 
+    # Mass tracking [REF] stream_collide_bvh:806-936
+    # Stage 2 (single-phase): compute mass flux fhn - fon for TYPE_F cells.
+    massn = float(0.0)
+    if (flagsn & TYPE_F) != 0:
+        massn = mass[i, j, k]  # start with current cell mass
+
     for d in range(27):
         nx_i = i - c_x[d]
         ny_i = j - c_y[d]
@@ -342,6 +348,16 @@ def stream_collide_kernel(
                     d, coeffs, lattice_w,
                 )
 
+        # ---- Outgoing distribution (f_on) for mass flux ----
+        # [REF] stream_collide_bvh:779-803 — computed for every direction
+        fon_d = reconstruct_fi_at_index(
+            rho_cur, ux_cur, uy_cur, uz_cur,
+            Sxx_cur, Sxy_cur, Sxz_cur, Syy_cur, Syz_cur, Szz_cur,
+            d, coeffs, lattice_w,
+        )
+        if d > 0 and (flagsn & TYPE_F) != 0:
+            massn += pop_d - fon_d
+
         # Accumulate post-stream moments from pop_d
         # [REF] stream_collide_bvh:939-972
         rho_star += pop_d
@@ -370,6 +386,9 @@ def stream_collide_kernel(
     # ---- Central-moment MRT collision ----
     # [REF] mrUtilFuncGpu3D.h:424-471 (mlGetPIAfterCollision)
     # The collision operates on TRUE second-order moments (not stress).
+    # The collision uses pre-shift velocity (ux_star etc.); the Guo
+    # forcing half-step F/(2*rho) is applied AFTER collision in the
+    # output section, matching [REF] stream_collide_bvh.
     # omega = 1 / tau
     omega = 1.0 / tau
 
@@ -378,117 +397,79 @@ def stream_collide_kernel(
     V = uy_star
     W = uz_star
 
-    # Convert TRUE moments to the naming convention used in collision
-    # (pixx_t45 etc. are pre-collision TRUE moments)
-    pixx_t45 = pixx_star
-    pixy_t90 = pixy_star
-    pixz_t90 = pixz_star
-    piyy_t45 = piyy_star
-    piyz_t90 = piyz_star
-    pizz_t45 = pizz_star
-
-    # Collision — diagonal components
-    pixx_part = (2.0 * pixx_t45 - piyy_t45 - pizz_t45) / 3.0
-    piyy_part = (2.0 * piyy_t45 - pixx_t45 - pizz_t45) / 3.0
-    pizz_part = (2.0 * pizz_t45 - pixx_t45 - piyy_t45) / 3.0
-
-    RU2 = R * U * U
-    RV2 = R * V * V
-    RW2 = R * W * W
-    RUVW2 = (RU2 + RV2 + RW2) / 3.0
-
+    # =========================================================================
+    # Central-moment MRT collision [P4] Eq.(18-21); [P1] HOME-LBM
+    #
+    # 1. Convert TRUE second moments → central moments
+    #    κ_ab = π_ab / ρ  −  u_a * u_b
+    # 2. Relax central moments toward equilibrium: κ_eq = CS2*δ_ab
+    #    κ_ab_post = (1−ω)*κ_ab + ω*CS2*δ_ab
+    # 3. Convert back to TRUE moments + Guo force terms
+    #    Force coefficient: (2τ−1)/(2τ) = (1 − ω/2) / ω … no, the plan
+    #    document gives coeff_f = (2τ−1)/(2τ) * 1/ρ.
+    # =========================================================================
+    inv_rho = 1.0 / R
     om1 = 1.0 - omega
 
-    pixx_post = (
-        R / 3.0
-        + pixx_part * om1
-        + RUVW2
-        + (2.0 * RU2 * omega) / 3.0
-        - (1.0 * RV2 * omega) / 3.0
-        - (1.0 * RW2 * omega) / 3.0
-        + Fx * U
-    )
-    piyy_post = (
-        R / 3.0
-        + piyy_part * om1
-        + RUVW2
-        - (1.0 * RU2 * omega) / 3.0
-        + (2.0 * RV2 * omega) / 3.0
-        - (1.0 * RW2 * omega) / 3.0
-        + Fy * V
-    )
-    pizz_post = (
-        R / 3.0
-        + pizz_part * om1
-        + RUVW2
-        - (1.0 * RU2 * omega) / 3.0
-        - (1.0 * RV2 * omega) / 3.0
-        + (2.0 * RW2 * omega) / 3.0
-        + Fz * W
-    )
+    # ---- Step 1: TRUE → central moments ----
+    pixx_cm = pixx_star * inv_rho - U * U
+    pixy_cm = pixy_star * inv_rho - U * V
+    pixz_cm = pixz_star * inv_rho - U * W
+    piyy_cm = piyy_star * inv_rho - V * V
+    piyz_cm = piyz_star * inv_rho - V * W
+    pizz_cm = pizz_star * inv_rho - W * W
 
-    # Collision — off-diagonal components
-    pixy_post = (
-        pixy_t90
-        - pixy_t90 * omega
-        + U * V * R * omega
-        + (Fy * U) / 2.0
-        + (Fx * V) / 2.0
-    )
-    pixz_post = (
-        pixz_t90
-        - pixz_t90 * omega
-        + U * W * R * omega
-        + (Fz * U) / 2.0
-        + (Fx * W) / 2.0
-    )
-    piyz_post = (
-        piyz_t90
-        - piyz_t90 * omega
-        + V * W * R * omega
-        + (Fz * V) / 2.0
-        + (Fy * W) / 2.0
-    )
+    # ---- Step 2: MRT relaxation in central-moment space ----
+    pixx_cm_post = om1 * pixx_cm + omega * CS2
+    piyy_cm_post = om1 * piyy_cm + omega * CS2
+    pizz_cm_post = om1 * pizz_cm + omega * CS2
+    pixy_cm_post = om1 * pixy_cm
+    pixz_cm_post = om1 * pixz_cm
+    piyz_cm_post = om1 * piyz_cm
+
+    # ---- Step 3: central → TRUE moments + Guo force [P4] Eq.(18-21) ----
+    # coeff_f = (2τ−1) / (2τ) = (1 − ω/2) / ω … correcting for plan doc
+    # The plan document, section 3.2: coeff_f = (2.0*tau - 1.0)/(2.0*tau)/rho
+    # = (1 − ω/2) / ρ  (since τ = 1/ω, 2τ−1 = 2/ω−1, /2τ = (2−ω)/(2) = 1−ω/2)
+    coeff_f = (1.0 - 0.5 * omega) * inv_rho
+
+    pixx_post = R * (pixx_cm_post + U * U) + coeff_f * 2.0 * Fx * U
+    piyy_post = R * (piyy_cm_post + V * V) + coeff_f * 2.0 * Fy * V
+    pizz_post = R * (pizz_cm_post + W * W) + coeff_f * 2.0 * Fz * W
+    pixy_post = R * (pixy_cm_post + U * V) + coeff_f * (Fx * V + Fy * U)
+    pixz_post = R * (pixz_cm_post + U * W) + coeff_f * (Fx * W + Fz * U)
+    piyz_post = R * (piyz_cm_post + V * W) + coeff_f * (Fy * W + Fz * V)
 
     # ---- Convert TRUE post-collision moments to stored stress ----
     # Stored stress: S_ab = pi_ab / rho - CS2 * delta_ab
     # [REF] stream_collide_bvh:1046-1055
     #
-    # IMPORTANT: Guo forcing shifts velocity by du = F/(2*rho) after collision.
-    # The stored stress from collision corresponds to pre-shift velocity (U,V,W).
-    # We must add the shift-squared contribution du_a*du_b so that the stored
-    # stress matches the equilibrium of the shifted velocity (U+du, V+du, W+du).
-    # Without this correction, the stress-velocity inconsistency causes
-    # spurious dissipation that makes body-force-driven flows (Poiseuille,
-    # gravity) decay to wrong steady states.
+    # Guo forcing: velocity is shifted by du = F/(2*rho) AFTER collision.
+    # The stored stress from collision corresponds to pre-shift velocity.
+    # We add du_a*du_b so the stress matches the shifted velocity's equilibrium.
     inv_R = 1.0 / R
     du_x = Fx * inv_R * 0.5
     du_y = Fy * inv_R * 0.5
     du_z = Fz * inv_R * 0.5
 
-    # ---- Velocity clamp on final (shifted) velocity ----
-    # [REF] normalizing_clamp — applied AFTER force shift so that
-    #       |U + du| ≤ max_vel is strictly enforced.
-    u_new_x = U + du_x
-    u_new_y = V + du_y
-    u_new_z = W + du_z
-    vel_sq = u_new_x * u_new_x + u_new_y * u_new_y + u_new_z * u_new_z
+    u_out_x = U + du_x
+    u_out_y = V + du_y
+    u_out_z = W + du_z
+    vel_sq = u_out_x * u_out_x + u_out_y * u_out_y + u_out_z * u_out_z
     max_v2 = max_vel * max_vel
     if vel_sq > max_v2:
         scale = max_vel / wp.sqrt(vel_sq)
-        u_new_x = u_new_x * scale
-        u_new_y = u_new_y * scale
-        u_new_z = u_new_z * scale
-        # Also scale du for the stress correction below
-        du_x = u_new_x - U
-        du_y = u_new_y - V
-        du_z = u_new_z - W
+        u_out_x = u_out_x * scale
+        u_out_y = u_out_y * scale
+        u_out_z = u_out_z * scale
+        du_x = u_out_x - U
+        du_y = u_out_y - V
+        du_z = u_out_z - W
 
     f_mom_post[cur_ind + 0 * total_num] = R
-    f_mom_post[cur_ind + 1 * total_num] = u_new_x
-    f_mom_post[cur_ind + 2 * total_num] = u_new_y
-    f_mom_post[cur_ind + 3 * total_num] = u_new_z
-    # Diagonal: add du_a^2 (the collision already accounts for linear term)
+    f_mom_post[cur_ind + 1 * total_num] = u_out_x
+    f_mom_post[cur_ind + 2 * total_num] = u_out_y
+    f_mom_post[cur_ind + 3 * total_num] = u_out_z
     f_mom_post[cur_ind + 4 * total_num] = pixx_post * inv_R - CS2 + du_x * du_x
     f_mom_post[cur_ind + 5 * total_num] = pixy_post * inv_R + du_x * du_y
     f_mom_post[cur_ind + 6 * total_num] = pixz_post * inv_R + du_x * du_z
@@ -496,8 +477,12 @@ def stream_collide_kernel(
     f_mom_post[cur_ind + 8 * total_num] = piyz_post * inv_R + du_y * du_z
     f_mom_post[cur_ind + 9 * total_num] = pizz_post * inv_R - CS2 + du_z * du_z
 
-    # ---- Scalar fields (pass-through for now) ----
-    mass[i, j, k] = R
+    # ---- Scalar fields ----
+    # Mass: use mass flux from fhn-fon for TYPE_F [REF], rho_star for others
+    if (flagsn & TYPE_F) != 0:
+        mass[i, j, k] = massn
+    else:
+        mass[i, j, k] = R
     phi[i, j, k] = 1.0
     force_x[i, j, k] = Fx
     force_y[i, j, k] = Fy

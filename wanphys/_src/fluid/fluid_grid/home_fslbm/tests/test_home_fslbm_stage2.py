@@ -169,8 +169,8 @@ if QUICK:
     check("B.9 Parabolic (skipped)", True)
     check("B.10 Courant (skipped)", True)
 else:
-    print("  Running 8000 steps...")
-    for _ in range(8000):
+    print("  Running 20000 steps...")
+    for _ in range(20000):
         sp.step(sap, sbp, 1.0)
         sap, sbp = sbp, sap
         sap.f_mom, sap.f_mom_post = sap.f_mom_post, sap.f_mom
