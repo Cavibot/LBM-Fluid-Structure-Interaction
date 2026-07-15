@@ -589,6 +589,22 @@ def stream_collide_bvh_kernel(
                 f_streamed[di] = reconstruct_distribution(
                     nr, nu, nv, nw, nSxx, nSxy, nSxz, nSyy, nSyz, nSzz, di)
     
+    # ---- Also reconstruct outgoing distributions from current cell (fon, lines 790-803) ----
+    fon = array_27()
+    for di in range(27):
+        cr = f_mom[0 * stride + cur_idx]
+        cu = f_mom[1 * stride + cur_idx]
+        cv = f_mom[2 * stride + cur_idx]
+        cw = f_mom[3 * stride + cur_idx]
+        cSxx = f_mom[4 * stride + cur_idx] + CS2
+        cSxy = f_mom[5 * stride + cur_idx]
+        cSxz = f_mom[6 * stride + cur_idx]
+        cSyy = f_mom[7 * stride + cur_idx] + CS2
+        cSyz = f_mom[8 * stride + cur_idx]
+        cSzz = f_mom[9 * stride + cur_idx] + CS2
+        fon[di] = reconstruct_distribution(
+            cr, cu, cv, cw, cSxx, cSxy, cSxz, cSyy, cSyz, cSzz, di)
+    
     # ---- STEP 3: Compute macroscopic moments from streamed distributions ----
     rho_new, ux_new, uy_new, uz_new = compute_rho_u(f_streamed)
     
@@ -640,14 +656,14 @@ def stream_collide_bvh_kernel(
             if nflag_su & (TYPE_F | TYPE_I):
                 nphi = phi[ni, nj, nk]
                 inv_di = OPPOSITE[di]
-                dflux = f_streamed[di] - f_streamed[inv_di]
+                dflux = f_streamed[di] - fon[inv_di]
                 if nflag_su == TYPE_F:
                     massn += dflux
                 else:  # TYPE_I
                     massn += 0.5 * (nphi + phij[0]) * dflux
             elif nflag_su == TYPE_G:
                 # Fill gas-side incoming distribution
-                f_streamed[di] = feg[OPPOSITE[di]] - f_streamed[OPPOSITE[di]] + feg[di]
+                f_streamed[di] = feg[OPPOSITE[di]] - fon[OPPOSITE[di]] + feg[di]
         
         mass[i, j, k] = massn
         phi[i, j, k] = calculate_phi(rho_new, massn, TYPE_I)
@@ -791,7 +807,27 @@ def surface_3_kernel(
         massn = wp.clamp(massn, 0.0, rhon)
         phin = calculate_phi(rhon, massn, TYPE_I)
     
-    # === Phase B: reconstruct 27 distributions from f_mom_post (lines 730-740) ===
+    # === Phase B1: pull-streaming from neighbor moments (lines 729-777) ===
+    fhn = array_27()
+    for di in range(27):
+        ni = wp.clamp(i - CX[di], 0, nx-1)
+        nj = wp.clamp(j - CY[di], 0, ny-1)
+        nk = wp.clamp(k - CZ[di], 0, nz-1)
+        n_idx = ni * ny * nz + nj * nz + nk
+        nr = f_mom_post[0 * stride + n_idx]
+        nu = f_mom_post[1 * stride + n_idx]
+        nv = f_mom_post[2 * stride + n_idx]
+        nw = f_mom_post[3 * stride + n_idx]
+        nSxx = f_mom_post[4 * stride + n_idx] + CS2
+        nSxy = f_mom_post[5 * stride + n_idx]
+        nSxz = f_mom_post[6 * stride + n_idx]
+        nSyy = f_mom_post[7 * stride + n_idx] + CS2
+        nSyz = f_mom_post[8 * stride + n_idx]
+        nSzz = f_mom_post[9 * stride + n_idx] + CS2
+        fhn[di] = reconstruct_distribution(nr, nu, nv, nw,
+                    nSxx, nSxy, nSxz, nSyy, nSyz, nSzz, di)
+    
+    # === Phase B2: reconstruct outgoing distributions from current cell (fon, lines 790-803) ===
     ux = f_mom_post[1 * stride + idx]
     uy = f_mom_post[2 * stride + idx]
     uz = f_mom_post[3 * stride + idx]
@@ -802,9 +838,9 @@ def surface_3_kernel(
     Syz = f_mom_post[8 * stride + idx]
     Szz = f_mom_post[9 * stride + idx] + CS2
     
-    fhn = array_27()
+    fon = array_27()
     for di in range(27):
-        fhn[di] = reconstruct_distribution(rhon, ux, uy, uz,
+        fon[di] = reconstruct_distribution(rhon, ux, uy, uz,
                     Sxx, Sxy, Sxz, Syy, Syz, Szz, di)
     
     # === Phase C: interface pressure boundary (lines 840-910) ===
@@ -848,7 +884,7 @@ def surface_3_kernel(
         if nflags_su & (TYPE_F | TYPE_I):
             nphi = phi[ni, nj, nk]
             opp_di = OPPOSITE[di]
-            dflux = fhn[di] - fhn[opp_di]
+            dflux = fhn[di] - fon[opp_di]
             if nflags_su == TYPE_F:
                 massn += dflux
             else:
@@ -863,7 +899,7 @@ def surface_3_kernel(
             nflags_su = flag[ni, nj, nk] & TYPE_SU_MASK
             if nflags_su == TYPE_G:
                 opp_di = OPPOSITE[di]
-                fhn[di] = feg[opp_di] - fhn[opp_di] + feg[di]
+                fhn[di] = feg[opp_di] - fon[opp_di] + feg[di]
     
     # === Phase F: write-back (lines 937-1055 continued in stream_collide_bvh) ===
     mass[i, j, k] = massn
@@ -1484,7 +1520,7 @@ HOME-LBM 的核心创新在于仅存储前三个速度矩（共 10 个标量：�
 4. Monge 曲面片拟合: z(x,y) = A·x² + B·y² + C·xy + H·x + I·y
    通过最小二乘法（5×5 LU 分解）对邻居接口点求解
 5. 平均曲率:
-   κ = 2[A(1+I²) + B(1+H²) - C·H·I] / (1+H²+I²)^(3/2)
+   κ = [A(1+I²) + B(1+H²) - C·H·I] / (1+H²+I²)^(3/2)
 
 plic_cube: 单位立方体-平面相交体积的解析解
 （SZ & Kawano 2022 方法，采用简化对称情形）。
