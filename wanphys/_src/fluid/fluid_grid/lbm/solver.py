@@ -1,22 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""D3Q19 Lattice Boltzmann method – BGK solver pipeline."""
+"""D3Q19 FullF/HOME stream-physics-collide-encode pipeline."""
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import warp as wp
 
 from ..base import FluidGridSolverBase
-from . import kernels
+from . import collisions, encoding, kernels, streaming
 from .model import LbmModel
-from .state import LbmState
+from .state import FullFLbmState, HomeLbmState, LbmState, LbmStateBase
 
 
 class LbmSolver(FluidGridSolverBase):
-    """D3Q19 BGK-LBM solver with Guo forcing and halfway bounce-back.
+    """D3Q19 LBM solver with pluggable persistent encoding and collision.
 
     The solver owns temporary arrays for macroscopic moments that are
     reused across steps.  Distribution functions and visualisation fields
@@ -75,6 +75,56 @@ class LbmSolver(FluidGridSolverBase):
             (self.nx, self.ny, self.nz), dtype=float, device=self.device
         )
 
+        self._collision_name = model.resolved_collision
+        backend_types = {
+            "srt": collisions.SrtCollision,
+            "trt": collisions.TrtCollision,
+            "home_nocm": collisions.HomeNocmMrtCollision,
+        }
+        self._collision_backend = backend_types[self._collision_name]()
+        self._collision_kind = self._collision_backend.input_kind
+
+        # ---- Explicit-population scratch ---------------------------------
+        self._f_star = None
+        self._f_post = None
+        if self._collision_kind == "population":
+            self._f_star = wp.zeros(19 * self._stride, dtype=float, device=self.device)
+            if model.encoding == "home":
+                self._f_post = wp.zeros(19 * self._stride, dtype=float, device=self.device)
+
+        # ---- Encoded-moment scratch (rho, rho*u, rho*S) -------------------
+        shape = (self.nx, self.ny, self.nz)
+        self._moments: tuple[wp.array3d, ...] = ()
+        self._post_moments: tuple[wp.array3d, ...] = ()
+        if self._collision_kind == "moments":
+            self._moments = tuple(
+                wp.zeros(shape, dtype=float, device=self.device) for _ in range(10)
+            )
+            if model.encoding == "fullf":
+                self._post_moments = tuple(
+                    wp.zeros(shape, dtype=float, device=self.device) for _ in range(10)
+                )
+        if self._collision_name == "home_nocm" and any(
+            g != 0.0 for g in (model.gravity_x, model.gravity_y, model.gravity_z)
+        ):
+            raise NotImplementedError("HOME-NOCM forcing is not implemented in this iteration")
+        if model.encoding == "home" and any(
+            g != 0.0 for g in (model.gravity_x, model.gravity_y, model.gravity_z)
+        ):
+            raise NotImplementedError("HOME encoding with prescribed force is not implemented")
+        unsupported_bc = [t for t in model.bc_types if t not in (0, 3)]
+        if unsupported_bc and not model.has_moving_walls:
+            raise NotImplementedError(
+                "The post-collision pipeline currently supports only periodic "
+                "and static halfway bounce-back boundaries"
+            )
+
+    def create_state(self, requires_grad: bool = False) -> LbmStateBase:
+        """Create the concrete persistent state selected by the model."""
+        if self.model.encoding == "home":
+            return HomeLbmState(self.model, requires_grad=requires_grad)
+        return FullFLbmState(self.model, requires_grad=requires_grad)
+
     # ------------------------------------------------------------------
     # Boundary condition helpers
     # ------------------------------------------------------------------
@@ -118,6 +168,11 @@ class LbmSolver(FluidGridSolverBase):
             Prescribed velocity ``(ux, uy, uz)`` in lattice units.  Only
             used when *bc_type* == 1 (Zou-He).
         """
+        if bc_type not in (0, 3) and not self.model.has_moving_walls:
+            raise NotImplementedError(
+                "The post-collision pipeline currently supports only periodic "
+                "and static halfway bounce-back boundaries"
+            )
         types = list(self.model.bc_types)
         vels = list(self.model.bc_velocity)
         types[face] = bc_type
@@ -131,6 +186,215 @@ class LbmSolver(FluidGridSolverBase):
     # ------------------------------------------------------------------
 
     def step(
+        self,
+        state_in: LbmStateBase,
+        state_out: LbmStateBase,
+        dt: float,
+        contacts: Any | None = None,
+        control: Any | None = None,
+    ) -> None:
+        """Advance ``post-collision -> stream -> collide -> post-collision``."""
+        if self.model.has_moving_walls:
+            if not isinstance(state_in, FullFLbmState) or not isinstance(state_out, FullFLbmState):
+                raise NotImplementedError("HOME encoding does not support rigid/moving-wall coupling")
+            self._step_legacy(state_in, state_out, dt, contacts, control)
+            return
+
+        del contacts, control, dt
+        self._copy_boundary_fields(state_in, state_out)
+        px, py, pz = self.model._periodic_ints
+
+        # 1. transport: encoding selects provider, collision selects collector
+        if self._collision_kind == "population":
+            assert self._f_star is not None
+            self._stream_to_populations(state_in, px, py, pz)
+            # 2. physics: local moments, then force/hydrodynamic closure
+            wp.launch(
+                kernels.compute_moments_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    self._f_star, self._stride, self.nx, self.ny, self.nz,
+                    self._rho, self._ux, self._uy, self._uz,
+                ],
+                device=self.device,
+            )
+            self._prepare_population_physics(state_out)
+            if self.model.use_regularization and self.model.omega_reg > 0.0:
+                wp.launch(
+                    kernels.reg_trt_kernel,
+                    dim=(self.nx, self.ny, self.nz),
+                    inputs=[
+                        self._f_star, self._rho, self._ux, self._uy, self._uz,
+                        float(self.model.omega_reg), px, py, pz,
+                        self.nx, self.ny, self.nz, self._stride,
+                    ],
+                    device=self.device,
+                )
+            # 3. EPC collision
+            if isinstance(state_out, FullFLbmState):
+                output_f = state_out.f_post
+            else:
+                assert self._f_post is not None
+                output_f = self._f_post
+            omega_even, omega_odd = self._collision_backend.relaxation_rates(self.model)
+            wp.launch(
+                collisions.epc_collision_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    self._f_star, self._rho, self._ux, self._uy, self._uz,
+                    output_f, omega_even, omega_odd,
+                    self.ny, self.nz, self._stride,
+                ],
+                device=self.device,
+            )
+            self._apply_population_force(output_f)
+            # 4. encode
+            if isinstance(state_out, HomeLbmState):
+                self._encode_populations_to_home(output_f, state_out)
+        else:
+            self._stream_to_moments(state_in, px, py, pz)
+            m = self._moments
+            if isinstance(state_out, HomeLbmState):
+                collision_target_moments = state_out.kinetic_fields
+            else:
+                collision_target_moments = self._post_moments
+            wp.launch(
+                streaming.moment_velocity_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[m[0], m[1], m[2], m[3], self._ux, self._uy, self._uz],
+                device=self.device,
+            )
+            wp.launch(
+                collisions.home_nocm_collision_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[*m, *collision_target_moments, float(self.model.omega)],
+                device=self.device,
+            )
+            if isinstance(state_out, FullFLbmState):
+                pm = self._post_moments
+                wp.launch(
+                    encoding.home_to_populations_kernel,
+                    dim=(self.nx, self.ny, self.nz),
+                    inputs=[*pm, state_out.f_post, self.ny, self.nz, self._stride],
+                    device=self.device,
+                )
+            wp.copy(self._rho, m[0])
+
+        self._write_observables(state_out)
+
+    def _copy_boundary_fields(self, state_in: LbmStateBase, state_out: LbmStateBase) -> None:
+        for name in ("solid_phi", "solid_body_id", "vel_solid_u", "vel_solid_v", "vel_solid_w"):
+            wp.copy(getattr(state_out, name), getattr(state_in, name))
+
+    def _home_inputs(self, state: HomeLbmState) -> list[wp.array]:
+        return list(state.kinetic_fields)
+
+    def _stream_to_populations(self, state: LbmStateBase, px: int, py: int, pz: int) -> None:
+        assert self._f_star is not None
+        common = [state.solid_phi, self._f_star, px, py, pz, self.nx, self.ny, self.nz, self._stride]
+        if isinstance(state, FullFLbmState):
+            kernel = streaming.stream_fullf_to_populations_kernel
+            inputs = [state.f_post, *common]
+        elif isinstance(state, HomeLbmState):
+            kernel = streaming.stream_home_to_populations_kernel
+            inputs = [*self._home_inputs(state), *common]
+        else:
+            raise TypeError(f"Unsupported LBM state type: {type(state).__name__}")
+        wp.launch(kernel, dim=(self.nx, self.ny, self.nz), inputs=inputs, device=self.device)
+
+    def _stream_to_moments(self, state: LbmStateBase, px: int, py: int, pz: int) -> None:
+        tail = [state.solid_phi, *self._moments, px, py, pz, self.nx, self.ny, self.nz]
+        if isinstance(state, FullFLbmState):
+            kernel = streaming.stream_fullf_to_moments_kernel
+            inputs = [state.f_post, *tail, self._stride]
+        elif isinstance(state, HomeLbmState):
+            kernel = streaming.stream_home_to_moments_kernel
+            inputs = [*self._home_inputs(state), *tail]
+        else:
+            raise TypeError(f"Unsupported LBM state type: {type(state).__name__}")
+        wp.launch(kernel, dim=(self.nx, self.ny, self.nz), inputs=inputs, device=self.device)
+
+    def _prepare_population_physics(self, state_out: LbmStateBase) -> None:
+        G_sc = float(self.model.G)
+        if G_sc == 0.0:
+            return
+        self._step_count += 1
+        if self._step_count % self._sc_stride == 1:
+            px, py, pz = self.model._periodic_ints
+            wp.launch(
+                kernels.compute_shan_chen_force_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    self._rho, state_out.solid_phi, self._fx, self._fy, self._fz,
+                    G_sc, int(self.model.psi_type), float(self.model.psi_ref),
+                    float(self.model.sc_solid_psi_scale), float(self.model.sc_boundary_psi),
+                    float(self.model.cs_a), float(self.model.cs_b), float(self.model.cs_T),
+                    int(self.model.sc_homogeneous_early_out),
+                    float(self.model.sc_homogeneous_rel_tol), px, py, pz,
+                    self.nx, self.ny, self.nz,
+                ],
+                device=self.device,
+            )
+        wp.launch(
+            kernels.apply_velocity_shift_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                self._ux, self._uy, self._uz, self._rho,
+                self._fx, self._fy, self._fz,
+                float(self.model.gravity_x), float(self.model.gravity_y), float(self.model.gravity_z),
+                float(self.model.tau), self.nx, self.ny, self.nz,
+            ],
+            device=self.device,
+        )
+
+    def _apply_population_force(self, f_post: wp.array) -> None:
+        gx, gy, gz = float(self.model.gravity_x), float(self.model.gravity_y), float(self.model.gravity_z)
+        if self.model.G == 0.0 and (gx != 0.0 or gy != 0.0 or gz != 0.0):
+            wp.launch(
+                kernels.apply_guo_force_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[f_post, gx, gy, gz, float(self.model.omega), self.nx, self.ny, self.nz, self._stride],
+                device=self.device,
+            )
+        if self.model.G != 0.0:
+            wp.launch(
+                kernels.restore_physical_velocity_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    self._ux, self._uy, self._uz, self._rho,
+                    self._fx, self._fy, self._fz, gx, gy, gz,
+                    float(self.model.tau), self.nx, self.ny, self.nz,
+                ],
+                device=self.device,
+            )
+
+    def _encode_populations_to_home(self, f_post: wp.array, state: HomeLbmState) -> None:
+        wp.launch(
+            encoding.populations_to_home_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[f_post, *state.kinetic_fields, self.ny, self.nz, self._stride],
+            device=self.device,
+        )
+
+    def _write_observables(self, state_out: LbmStateBase) -> None:
+        wp.copy(state_out.density, self._rho)
+        wp.copy(state_out.velocity_x, self._ux)
+        wp.copy(state_out.velocity_y, self._uy)
+        wp.copy(state_out.velocity_z, self._uz)
+        if self.model.G != 0.0:
+            wp.copy(state_out.force_x, self._fx)
+            wp.copy(state_out.force_y, self._fy)
+            wp.copy(state_out.force_z, self._fz)
+        else:
+            state_out.force_x.zero_()
+            state_out.force_y.zero_()
+            state_out.force_z.zero_()
+        wp.launch(kernels.moments_to_mac_u_kernel, dim=(self.nx + 1, self.ny, self.nz), inputs=[self._ux, state_out.vel_u, self.nx], device=self.device)
+        wp.launch(kernels.moments_to_mac_v_kernel, dim=(self.nx, self.ny + 1, self.nz), inputs=[self._uy, state_out.vel_v, self.ny], device=self.device)
+        wp.launch(kernels.moments_to_mac_w_kernel, dim=(self.nx, self.ny, self.nz + 1), inputs=[self._uz, state_out.vel_w, self.nz], device=self.device)
+
+    # Temporary compatibility path for moving-wall/momentum-exchange coupling.
+    def _step_legacy(
         self,
         state_in: LbmState,
         state_out: LbmState,
@@ -372,7 +636,7 @@ class LbmSolver(FluidGridSolverBase):
 
     def initialize_equilibrium(
         self,
-        state: LbmState,
+        state: LbmStateBase,
         rho0: float = 1.0,
         u0: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> None:
@@ -393,21 +657,25 @@ class LbmSolver(FluidGridSolverBase):
         """
         u0x, u0y, u0z = u0
 
-        wp.launch(
-            kernels.initialize_equilibrium_kernel,
-            dim=(self.nx, self.ny, self.nz),
-            inputs=[
-                state.f,
-                rho0,
-                u0x,
-                u0y,
-                u0z,
-                self.nx,
-                self.ny,
-                self.nz,
-                self._stride,
-            ],
-        )
+        if isinstance(state, FullFLbmState):
+            wp.launch(
+                kernels.initialize_equilibrium_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    state.f_post, rho0, u0x, u0y, u0z,
+                    self.nx, self.ny, self.nz, self._stride,
+                ],
+                device=self.device,
+            )
+        elif isinstance(state, HomeLbmState):
+            wp.launch(
+                encoding.initialize_home_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[*state.kinetic_fields, rho0, u0x, u0y, u0z],
+                device=self.device,
+            )
+        else:
+            raise TypeError(f"Unsupported LBM state type: {type(state).__name__}")
 
         # Populate macroscopic fields for consistency
         state.density.fill_(rho0)

@@ -49,8 +49,10 @@ class TestLbmShanChenWallForce(unittest.TestCase):
                 1.0,         # psi_ref
                 float(solid_psi_scale),
                 float(boundary_psi),
+                0.5, 4.0, 0.07,  # Carnahan-Starling parameters (unused here)
                 0,           # homogeneous_early_out disabled for exact 3^3 test
                 0.15,
+                0, 0, 0,    # non-periodic axes
                 nx, ny, nz,
             ],
             device=device,
@@ -85,8 +87,10 @@ class TestLbmShanChenWallForce(unittest.TestCase):
                 1.0,
                 1.0,
                 -1.0,
+                0.5, 4.0, 0.07,
                 int(homogeneous_early_out),
                 0.15,
+                0, 0, 0,
                 nx, ny, nz,
             ],
             device=device,
@@ -214,7 +218,7 @@ class TestLbmShanChenWallForce(unittest.TestCase):
     def test_model_rejects_invalid_shan_chen_parameters(self) -> None:
         """Invalid SC controls should fail fast at model construction."""
         with self.assertRaises(ValueError):
-            LbmModel(fluid_grid_res=(4, 4, 4), psi_type=2)
+            LbmModel(fluid_grid_res=(4, 4, 4), psi_type=3)
         with self.assertRaises(ValueError):
             LbmModel(fluid_grid_res=(4, 4, 4), psi_ref=0.0)
         with self.assertRaises(ValueError):

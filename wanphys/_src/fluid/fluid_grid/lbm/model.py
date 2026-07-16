@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
-
 from ..base import FluidGridModelBase
 
 
@@ -28,6 +26,18 @@ class LbmModel(FluidGridModelBase):
 
     Kinematic viscosity (lattice units):
         ``nu = c_s² · (τ - 0.5) = (1/3) · (τ - 0.5)``.
+    """
+
+    # ---- Persistent encoding / collision backend ------------------------
+    encoding: str = "fullf"
+    """Persistent kinetic encoding: ``"fullf"`` or ``"home"``."""
+
+    collision: str | None = None
+    """Collision backend.
+
+    ``None`` preserves the legacy selection rule: ``lambda_trt == 0`` uses
+    SRT and ``lambda_trt > 0`` uses TRT.  ``raw_mrt`` and ``nocm_mrt`` are
+    reserved names and intentionally fail fast until implemented.
     """
 
     # ---- BGK collision ---------------------------------------------------
@@ -185,6 +195,13 @@ class LbmModel(FluidGridModelBase):
         return 1.0 / self.tau
 
     @property
+    def resolved_collision(self) -> str:
+        """Return the concrete collision identifier used by the solver."""
+        if self.collision is not None:
+            return self.collision
+        return "trt" if self.lambda_trt > 0.0 else "srt"
+
+    @property
     def kinematic_viscosity(self) -> float:
         """Kinematic viscosity ν in lattice units: (1/3)·(τ - 0.5)."""
         return (1.0 / 3.0) * (self.tau - 0.5)
@@ -193,9 +210,9 @@ class LbmModel(FluidGridModelBase):
     def _periodic_ints(self) -> tuple[int, int, int]:
         """Periodic flags as ints ``(px, py, pz)`` for kernel passing."""
         return (
-            int(self.bc_periodic[0]),
-            int(self.bc_periodic[1]),
-            int(self.bc_periodic[2]),
+            int(self.bc_periodic[0] or (self.bc_types[0] == 3 and self.bc_types[1] == 3)),
+            int(self.bc_periodic[1] or (self.bc_types[2] == 3 and self.bc_types[3] == 3)),
+            int(self.bc_periodic[2] or (self.bc_types[4] == 3 and self.bc_types[5] == 3)),
         )
 
     # ---- Boundary conditions (per face) -----------------------------------
@@ -255,6 +272,29 @@ class LbmModel(FluidGridModelBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        self.encoding = str(self.encoding).lower()
+        if self.encoding not in ("fullf", "home"):
+            raise ValueError(
+                f"LBM encoding must be 'fullf' or 'home', got {self.encoding!r}"
+            )
+        if self.collision is not None:
+            self.collision = str(self.collision).lower()
+        declared_collisions = {
+            "srt", "trt", "home_nocm", "raw_mrt", "nocm_mrt"
+        }
+        if self.collision is not None and self.collision not in declared_collisions:
+            raise ValueError(
+                f"Unknown LBM collision {self.collision!r}; expected one of "
+                f"{sorted(declared_collisions)}"
+            )
+        if self.collision in ("raw_mrt", "nocm_mrt"):
+            raise NotImplementedError(
+                f"LBM collision {self.collision!r} is reserved but not implemented"
+            )
+        if self.encoding == "home" and self.G != 0.0:
+            raise NotImplementedError("HOME encoding with Shan-Chen force is not supported")
+        if self.use_regularization and self.resolved_collision != "trt":
+            raise ValueError("LBM regularization is supported only by TRT collision")
         if self.tau <= 0.5:
             raise ValueError(
                 f"LBM relaxation time tau must be > 0.5 for stability, "

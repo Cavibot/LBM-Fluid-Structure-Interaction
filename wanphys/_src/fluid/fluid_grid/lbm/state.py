@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""D3Q19 Lattice Boltzmann method – time-varying simulation state."""
+"""Persistent D3Q19 kinetic-state encodings."""
 
 from __future__ import annotations
 
@@ -15,144 +15,136 @@ if TYPE_CHECKING:
     from .model import LbmModel
 
 
-class LbmState(DomainState):
-    """GPU-resident state for a D3Q19 LBM simulation.
-
-    Stores 19 distribution functions in a single flat array and exposes
-    cell-centred macroscopic fields (density, velocity) together
-    with MAC staggered velocity fields for visualisation and rigid-body
-    coupling compatibility.
-
-    Parameters
-    ----------
-    model:
-        Static LBM configuration.
-    requires_grad:
-        If ``True``, allocate arrays with gradient tracking enabled.
-    """
+class LbmStateBase(DomainState):
+    """Fields shared by FullF and HOME persistent kinetic states."""
 
     def __init__(self, model: LbmModel, requires_grad: bool = False) -> None:
-        self.model: LbmModel = model
-        nx: int = int(model.nx)
-        ny: int = int(model.ny)
-        nz: int = int(model.nz)
-        self.res: tuple[int, int, int] = (nx, ny, nz)
-        self.device: wp.Device = model._device
-        self.requires_grad: bool = requires_grad
+        self.model = model
+        nx, ny, nz = int(model.nx), int(model.ny), int(model.nz)
+        self.res = (nx, ny, nz)
+        self.device = model._device
+        self.requires_grad = requires_grad
+        self._stride = nx * ny * nz
 
-        # Stride for flattening (nx, ny, nz) → 1D
-        self._stride: int = nx * ny * nz
+        self.density = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
+        self.velocity_x = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
+        self.velocity_y = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
+        self.velocity_z = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
 
-        # ---- Distribution functions (flat: 19 × N) -----------------------
-        self.f: wp.array = wp.zeros(
+        self.vel_u = wp.zeros((nx + 1, ny, nz), dtype=float, device=self.device)
+        self.vel_v = wp.zeros((nx, ny + 1, nz), dtype=float, device=self.device)
+        self.vel_w = wp.zeros((nx, ny, nz + 1), dtype=float, device=self.device)
+        self.vel_solid_u = wp.zeros((nx + 1, ny, nz), dtype=float, device=self.device)
+        self.vel_solid_v = wp.zeros((nx, ny + 1, nz), dtype=float, device=self.device)
+        self.vel_solid_w = wp.zeros((nx, ny, nz + 1), dtype=float, device=self.device)
+
+        self.solid_phi = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
+        self.solid_phi.fill_(1000.0)
+        self.solid_body_id = wp.full(
+            (nx, ny, nz), -1, dtype=wp.int32, device=self.device
+        )
+
+        self.force_x = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
+        self.force_y = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
+        self.force_z = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
+
+    def clear_forces(self) -> None:
+        """LBM has no accumulated force buffer in the DomainState sense."""
+
+    def _clear_common(self) -> None:
+        for field in (
+            self.density, self.velocity_x, self.velocity_y, self.velocity_z,
+            self.vel_u, self.vel_v, self.vel_w,
+            self.vel_solid_u, self.vel_solid_v, self.vel_solid_w,
+            self.force_x, self.force_y, self.force_z,
+        ):
+            field.zero_()
+        self.solid_phi.fill_(1000.0)
+        self.solid_body_id.fill_(-1)
+
+    def _copy_common_to(self, target: "LbmStateBase") -> None:
+        for name in (
+            "density", "velocity_x", "velocity_y", "velocity_z",
+            "vel_u", "vel_v", "vel_w",
+            "vel_solid_u", "vel_solid_v", "vel_solid_w",
+            "solid_phi", "solid_body_id", "force_x", "force_y", "force_z",
+        ):
+            wp.copy(getattr(target, name), getattr(self, name))
+
+
+class FullFLbmState(LbmStateBase):
+    """Post-collision FullF state with all 19 D3Q19 populations."""
+
+    def __init__(self, model: LbmModel, requires_grad: bool = False) -> None:
+        super().__init__(model, requires_grad)
+        self.f_post = wp.zeros(
             19 * self._stride,
             dtype=float,
             device=self.device,
             requires_grad=requires_grad,
         )
 
-        # ---- Cell-centred macroscopic fields ------------------------------
-        self.density: wp.array3d = wp.zeros(
-            (nx, ny, nz), dtype=float, device=self.device
-        )
-        self.velocity_x: wp.array3d = wp.zeros(
-            (nx, ny, nz), dtype=float, device=self.device
-        )
-        self.velocity_y: wp.array3d = wp.zeros(
-            (nx, ny, nz), dtype=float, device=self.device
-        )
-        self.velocity_z: wp.array3d = wp.zeros(
-            (nx, ny, nz), dtype=float, device=self.device
-        )
-
-        # ---- MAC staggered velocity (for visualisation / coupling) --------
-        self.vel_u: wp.array3d = wp.zeros(
-            (nx + 1, ny, nz), dtype=float, device=self.device
-        )
-        self.vel_v: wp.array3d = wp.zeros(
-            (nx, ny + 1, nz), dtype=float, device=self.device
-        )
-        self.vel_w: wp.array3d = wp.zeros(
-            (nx, ny, nz + 1), dtype=float, device=self.device
-        )
-        self.vel_solid_u: wp.array3d = wp.zeros(
-            (nx + 1, ny, nz), dtype=float, device=self.device
-        )
-        self.vel_solid_v: wp.array3d = wp.zeros(
-            (nx, ny + 1, nz), dtype=float, device=self.device
-        )
-        self.vel_solid_w: wp.array3d = wp.zeros(
-            (nx, ny, nz + 1), dtype=float, device=self.device
-        )
-
-        # ---- Solid boundary -------------------------------------------------
-        self.solid_phi: wp.array3d = wp.zeros(
-            (nx, ny, nz), dtype=float, device=self.device
-        )
-        self.solid_phi.fill_(1000.0)
-        self.solid_body_id: wp.array3d = wp.full(
-            (nx, ny, nz), -1, dtype=wp.int32, device=self.device
-        )
-
-        # ---- Shan-Chen / total body force (for visualisation / debug) ----
-        self.force_x: wp.array3d = wp.zeros(
-            (nx, ny, nz), dtype=float, device=self.device
-        )
-        self.force_y: wp.array3d = wp.zeros(
-            (nx, ny, nz), dtype=float, device=self.device
-        )
-        self.force_z: wp.array3d = wp.zeros(
-            (nx, ny, nz), dtype=float, device=self.device
-        )
-
-    # ------------------------------------------------------------------
-    # DomainState protocol
-    # ------------------------------------------------------------------
-
-    def clear_forces(self) -> None:
-        """LBM has no accumulated forces – no-op for protocol compliance."""
-        pass
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+    @property
+    def f(self) -> wp.array:
+        """Compatibility alias for the post-collision population buffer."""
+        return self.f_post
 
     def clear(self) -> None:
-        """Zero all fields and reset solid SDF to a large value."""
-        self.f.zero_()
-        self.density.zero_()
-        self.velocity_x.zero_()
-        self.velocity_y.zero_()
-        self.velocity_z.zero_()
-        self.vel_u.zero_()
-        self.vel_v.zero_()
-        self.vel_w.zero_()
-        self.vel_solid_u.zero_()
-        self.vel_solid_v.zero_()
-        self.vel_solid_w.zero_()
-        self.solid_phi.fill_(1000.0)
-        self.solid_body_id.fill_(-1)
-        self.force_x.zero_()
-        self.force_y.zero_()
-        self.force_z.zero_()
+        self.f_post.zero_()
+        self._clear_common()
 
-    def clone(self) -> "LbmState":
-        """Deep-copy all GPU arrays into a new :class:`LbmState`."""
-        new_state: LbmState = LbmState(self.model, requires_grad=self.requires_grad)
-        wp.copy(new_state.f, self.f)
-        wp.copy(new_state.density, self.density)
-        wp.copy(new_state.velocity_x, self.velocity_x)
-        wp.copy(new_state.velocity_y, self.velocity_y)
-        wp.copy(new_state.velocity_z, self.velocity_z)
-        wp.copy(new_state.vel_u, self.vel_u)
-        wp.copy(new_state.vel_v, self.vel_v)
-        wp.copy(new_state.vel_w, self.vel_w)
-        wp.copy(new_state.vel_solid_u, self.vel_solid_u)
-        wp.copy(new_state.vel_solid_v, self.vel_solid_v)
-        wp.copy(new_state.vel_solid_w, self.vel_solid_w)
-        wp.copy(new_state.solid_phi, self.solid_phi)
-        wp.copy(new_state.solid_body_id, self.solid_body_id)
-        wp.copy(new_state.force_x, self.force_x)
-        wp.copy(new_state.force_y, self.force_y)
-        wp.copy(new_state.force_z, self.force_z)
-        return new_state
+    def clone(self) -> "FullFLbmState":
+        target = FullFLbmState(self.model, self.requires_grad)
+        wp.copy(target.f_post, self.f_post)
+        self._copy_common_to(target)
+        return target
+
+
+class HomeLbmState(LbmStateBase):
+    """Post-collision HOME state storing density-weighted Hermite moments.
+
+    The ten persistent fields are ``rho``, ``rho*u`` and the six symmetric
+    components of ``rho*S``.  No full population array is retained.
+    """
+
+    def __init__(self, model: LbmModel, requires_grad: bool = False) -> None:
+        super().__init__(model, requires_grad)
+        shape = self.res
+
+        def make() -> wp.array3d:
+            return wp.zeros(
+                shape,
+                dtype=float,
+                device=self.device,
+                requires_grad=requires_grad,
+            )
+
+        self.rho = make()
+        self.rho_u_x, self.rho_u_y, self.rho_u_z = make(), make(), make()
+        self.rho_s_xx, self.rho_s_yy, self.rho_s_zz = make(), make(), make()
+        self.rho_s_xy, self.rho_s_xz, self.rho_s_yz = make(), make(), make()
+
+    @property
+    def kinetic_fields(self) -> tuple[wp.array3d, ...]:
+        return (
+            self.rho,
+            self.rho_u_x, self.rho_u_y, self.rho_u_z,
+            self.rho_s_xx, self.rho_s_yy, self.rho_s_zz,
+            self.rho_s_xy, self.rho_s_xz, self.rho_s_yz,
+        )
+
+    def clear(self) -> None:
+        for field in self.kinetic_fields:
+            field.zero_()
+        self._clear_common()
+
+    def clone(self) -> "HomeLbmState":
+        target = HomeLbmState(self.model, self.requires_grad)
+        for dst, src in zip(target.kinetic_fields, self.kinetic_fields):
+            wp.copy(dst, src)
+        self._copy_common_to(target)
+        return target
+
+
+# Backward-compatible public name.  The default encoding remains FullF.
+LbmState = FullFLbmState

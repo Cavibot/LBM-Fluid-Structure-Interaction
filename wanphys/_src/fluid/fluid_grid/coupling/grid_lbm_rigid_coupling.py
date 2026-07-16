@@ -62,6 +62,10 @@ class GridLbmRigidCoupling(CompositeSimulation):
         fluid_domain: LbmDomain,
         rigid_domain: RigidDomain,
     ):
+        if fluid_domain.model.encoding != "fullf":
+            raise NotImplementedError(
+                "GridLbmRigidCoupling currently supports only FullF encoding"
+            )
         super().__init__()
         self._fluid_domain = fluid_domain
         self._rigid_domain = rigid_domain

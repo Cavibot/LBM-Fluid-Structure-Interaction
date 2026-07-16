@@ -6,11 +6,14 @@
 from .domain import LbmDomain
 from .model import LbmModel
 from .solver import LbmSolver
-from .state import LbmState
+from .state import FullFLbmState, HomeLbmState, LbmState, LbmStateBase
 
 __all__ = [
     "LbmDomain",
     "LbmModel",
     "LbmSolver",
     "LbmState",
+    "LbmStateBase",
+    "FullFLbmState",
+    "HomeLbmState",
 ]

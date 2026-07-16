@@ -1,4 +1,36 @@
-# LBM 性能测试操作说明
+# LBM 测试操作说明
+
+## 0. 架构与数值正确性测试
+
+FullF/HOME 编码与碰撞后端的核心回归命令：
+
+```bash
+uv run python -m unittest \
+  newton.tests.test_lbm_state_encoding \
+  newton.tests.test_lbm_streaming_matrix \
+  newton.tests.test_lbm_collision_backends \
+  newton.tests.test_lbm_home_nocm \
+  newton.tests.test_lbm_shan_chen_wall_force \
+  newton.tests.test_lbm_rigid_coupling -v
+```
+
+覆盖内容：
+
+- FullF/HOME 两种持久 State；
+- FullF/HOME provider × EPC/EMC collector；
+- SRT、TRT 与 HOME-NOCM；
+- HOME reconstruction 与 NumPy 参考公式；
+- periodic/static halfway bounce-back；
+- FullF Shan-Chen 回归；
+- 旧 moving-wall/MEM FullF 兼容路径；
+- 未实现组合的 fail-fast 行为。
+
+当前有 14 项历史可视化测试引用已经从仓库移除的示例模块，例如
+`fluid_grid_lbm_dambreak`、`fluid_grid_lbm_dambreak_falling_sphere_visual` 和
+`_lbm_falling_sphere_scene`。它们在模块导入阶段失败，不能作为当前核心 LBM
+回归结果；恢复这些示例或删除陈旧测试应作为独立清理任务。
+
+## 1. 性能测试范围
 
 本文档用于指导如何测试 LBM 求解器和 LBM 示例的运行性能。测试内容主要包括：
 
@@ -8,7 +40,7 @@
 - GPU 显存占用
 - 测试结果出图
 
-## 1. 测试前准备
+## 2. 测试前准备
 
 所有命令都在项目根目录执行：
 
@@ -24,7 +56,7 @@ nvidia-smi
 
 如果 `nvidia-smi` 能正常显示显卡信息，就可以继续测试。推荐先从小网格开始，确认环境可运行后再跑大网格。
 
-## 2. 快速冒烟测试
+## 3. 快速冒烟测试
 
 先跑一个很小的纯 LBM 测试，确认 Warp、CUDA、LBM kernel 都能正常工作：
 
@@ -47,7 +79,7 @@ Average     : ... ms -> ... FPS
 GPU Memory  : ...
 ```
 
-## 3. 纯 LBM 分辨率扫描
+## 4. 纯 LBM 分辨率扫描
 
 用于测试不同网格规模下，纯 LBM 求解器的性能变化。
 
@@ -74,11 +106,11 @@ uv run python scripts/bench/bench_lbm.py \
 - `160^3` 接近或低于 60 FPS：开始进入压力区
 - `192^3` 低于 30 FPS：适合压力测试或离线录制
 
-## 4. 测试真实 LBM 示例
+## 5. 测试真实 LBM 示例
 
 使用 `bench_lbm_run.py` 可以运行现有示例，并拆分统计模拟和渲染耗时。
 
-### 4.1 只测模拟性能
+### 5.1 只测模拟性能
 
 使用 `null` viewer，不打开真实 OpenGL 渲染：
 
@@ -92,7 +124,7 @@ uv run python scripts/bench/bench_lbm_run.py \
 
 `null` viewer 的结果主要反映模拟本身的耗时。
 
-### 4.2 测试真实 GL 渲染性能
+### 5.2 测试真实 GL 渲染性能
 
 使用 `gl` viewer，会统计模拟加 OpenGL/SSFR 渲染的总耗时：
 
@@ -114,7 +146,7 @@ uv run python scripts/bench/bench_lbm_run.py \
 
 如果 `Step only` 接近 `Total Frame`，说明瓶颈主要是模拟；如果 `Render only` 很高，说明瓶颈在渲染。
 
-## 5. 覆盖子步数和网格大小
+## 6. 覆盖子步数和网格大小
 
 有时需要临时改变示例的 `SIM_SUBSTEPS` 或 `N`，可以使用：
 
@@ -142,7 +174,7 @@ uv run python scripts/bench/bench_lbm_run.py \
 
 这说明两组结果虽然 FPS 不同，但单个 LBM step 的性能基本一致。
 
-## 6. 生成逐帧 CSV
+## 7. 生成逐帧 CSV
 
 如果需要分析卡顿、尖峰、P99，可以保存逐帧数据：
 
@@ -168,7 +200,7 @@ uv run python scripts/bench/bench_lbm_run.py \
 - P99 是否由少数尖峰造成
 - GL viewer 是否带来额外波动
 
-## 7. 生成性能图
+## 8. 生成性能图
 
 当已经生成汇总 CSV 后，可以用绘图脚本输出 PNG：
 
@@ -191,9 +223,9 @@ scripts/bench/bench_results/resolution_scaling.png
 - `example_comparison.png`：比较不同 LBM 示例的 FPS 和显存
 - `resolution_scaling.png`：比较不同网格分辨率下的性能变化
 
-## 8. 如何解读结果
+## 9. 如何解读结果
 ~~交给AI~~
-### 8.1 Avg ms 和 Avg FPS
+### 9.1 Avg ms 和 Avg FPS
 
 `Avg ms` 是平均每帧耗时，越低越好。
 
@@ -211,7 +243,7 @@ FPS = 1000 / Avg ms
 17.87 ms -> 1000 / 17.87 = 56 FPS
 ```
 
-### 8.2 P50、P99、Min、Max
+### 9.2 P50、P99、Min、Max
 
 - `P50`：一半帧比它快，一半帧比它慢
 - `P99`：99% 帧都不超过这个耗时
@@ -219,13 +251,13 @@ FPS = 1000 / Avg ms
 
 如果 `Avg` 很好但 `P99` 很高，说明偶尔有卡顿尖峰。
 
-### 8.3 Warp Mem 和 Process Mem
+### 9.3 Warp Mem 和 Process Mem
 
 `Warp Mem` 更接近 LBM 数据结构本身使用的显存。
 
 `Process Mem` 来自 `nvidia-smi`，包含 CUDA 上下文、驱动、JIT、库加载等开销，也可能受其他 GPU 进程影响。因此它适合作为运行时参考，不适合作为精确的 LBM 数组占用。
 
-## 9. 推荐测试流程
+## 10. 推荐测试流程
 
 完整测试建议按这个顺序执行：
 
@@ -237,9 +269,9 @@ FPS = 1000 / Avg ms
 6. 使用 `plot_bench_results.py` 出图。
 7. 根据 `Avg`、`P99`、显存判断推荐网格规模。
 
-## 10. 常见问题
+## 11. 常见问题
 
-### 10.1 第一次运行有编译输出
+### 11.1 第一次运行有编译输出
 
 第一次运行会看到类似：
 
@@ -249,12 +281,12 @@ Module ... load on device 'cuda:0' took ... ms (compiled)
 
 这是 Warp 编译 kernel 的时间。正式测试会通过 warm-up 排除启动阶段的不稳定。
 
-### 10.2 `gl` 比 `null` 慢多少算正常
+### 11.2 `gl` 比 `null` 慢多少算正常
 
 如果 `gl` 比 `null` 慢 5% 到 15%，通常是正常的。  
 如果慢很多，需要检查 SSFR 参数、窗口大小、GPU 同步和显存压力。
 
-### 10.3 P99 明显高于平均值
+### 11.3 P99 明显高于平均值
 
 可能原因：
 
@@ -265,7 +297,7 @@ Module ... load on device 'cuda:0' took ... ms (compiled)
 
 可以通过增加帧数、关闭诊断输出、查看逐帧 CSV 来确认。
 
-### 10.4 不同 substeps 的结果怎么比较
+### 11.4 不同 substeps 的结果怎么比较
 
 不要只看 FPS，要换算每个 substep 的耗时：
 
@@ -274,4 +306,3 @@ ms_per_substep = Avg ms / substeps
 ```
 
 这样才能判断求解器本身是不是变快或变慢。
-

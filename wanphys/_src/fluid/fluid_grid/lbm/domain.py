@@ -9,7 +9,7 @@ from wanphys._src.core.domain import Domain
 
 from .model import LbmModel
 from .solver import LbmSolver
-from .state import LbmState
+from .state import LbmStateBase
 
 
 class LbmDomain(Domain):
@@ -42,8 +42,8 @@ class LbmDomain(Domain):
         self._solver: LbmSolver = solver or LbmSolver(model)
 
         # Double-buffered state (created lazily or via create_state)
-        self._state_in: LbmState | None = None
-        self._state_out: LbmState | None = None
+        self._state_in: LbmStateBase | None = None
+        self._state_out: LbmStateBase | None = None
 
     # ------------------------------------------------------------------
     # Domain protocol
@@ -65,19 +65,19 @@ class LbmDomain(Domain):
         return self._solver
 
     @property
-    def state(self) -> LbmState:
+    def state(self) -> LbmStateBase:
         """Current (active) simulation state."""
         if self._state_in is None:
             self.create_state()
         return self._state_in
 
-    def create_state(self) -> LbmState:
+    def create_state(self) -> LbmStateBase:
         """Allocate the double-buffered GPU state from the model.
 
         Returns the newly created active state.
         """
-        self._state_in = LbmState(self._model)
-        self._state_out = LbmState(self._model)
+        self._state_in = self._solver.create_state()
+        self._state_out = self._solver.create_state()
         return self._state_in
 
     def step(
@@ -86,6 +86,8 @@ class LbmDomain(Domain):
         contacts: object = None,
     ) -> None:
         """Advance the domain by *dt* (accepted but ignored - see :class:`LbmSolver`)."""
+        if self._state_in is None or self._state_out is None:
+            self.create_state()
         self._solver.step(
             self._state_in,
             self._state_out,

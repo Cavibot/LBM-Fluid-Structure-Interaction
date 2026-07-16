@@ -1,5 +1,11 @@
 # 基于 Newton 引擎的 LBM 网格流体模拟模块
 
+> 实现状态说明（2026-07-16）：本文主体记录的是原 FullF 融合
+> collide-stream 与刚体耦合实现。当前核心求解器已经重整为 post-collision
+> 持久状态上的 `stream -> physics -> collide -> encode` 流水线，并加入
+> FullF/HOME 编码以及 SRT/TRT/HOME-NOCM backend。moving-wall/MEM 暂时保留
+> 原 FullF 兼容路径。准确的当前范围以 `execution-plan.md` 为准。
+
 
 **摘要**  
 
