@@ -700,23 +700,21 @@ def stream_collide_bvh_kernel(
                 cSxx, cSxy, cSxz, cSyy, cSyz, cSzz,
                 opp,
             )
+            # ---- Convert from physical to HOME-stored format (ref line 776) ----
+            f_streamed[di] -= w3d[di]
         else:
             nflag_int = int(flag[ni, nj, nk])
             nflag_bo = nflag_int & C.TYPE_BO_MASK
 
             if nflag_bo == C.TYPE_S:
-                # ---- Solid neighbour: bounce-back (lines 743-748) ----
-                # Bounce-back replaces the incoming distribution with the
-                # equilibrium from the current node (stationary wall) or
-                # with a moving-wall correction.
-                # For now: simple bounce-back (equilibrium at current node).
+                # ---- Solid neighbour: bounce-back (ref lines 743-748) ----
+                # Stationary-wall half-way bounce-back: replace incoming
+                # distribution with equilibrium at current-cell density
+                # and zero velocity.  calculate_f_eq_d3q27 returns the
+                # HOME-stored format directly (no -= w3d needed).
                 # Moving-wall correction will be added in a later refinement.
                 opp = opposite[di]
-                f_streamed[di] = reconstruct_distribution(
-                    cr, cu, cv, cw,
-                    cSxx, cSxy, cSxz, cSyy, cSyz, cSzz,
-                    opp,
-                )
+                f_streamed[di] = calculate_f_eq_d3q27(cr, 0.0, 0.0, 0.0, opp)
             else:
                 # ---- Fluid/interface/gas neighbour: normal stream (lines 764-777) ----
                 nidx = ni * ny * nz + nj * nz + nk
@@ -735,6 +733,8 @@ def stream_collide_bvh_kernel(
                     nSxx, nSxy, nSxz, nSyy, nSyz, nSzz,
                     di,
                 )
+                # ---- Convert from physical to HOME-stored format (ref line 776) ----
+                f_streamed[di] -= w3d[di]
 
     # ---- Also reconstruct outgoing distributions (fon, lines 790-803) ----
     for di in range(27):
@@ -743,6 +743,8 @@ def stream_collide_bvh_kernel(
             cSxx, cSxy, cSxz, cSyy, cSyz, cSzz,
             di,
         )
+        # ---- Convert from physical to HOME-stored format (ref line 803) ----
+        fon[di] -= w3d[di]
 
     # =====================================================================
     # Phase B: Restore full populations and compute post-streaming moments
@@ -868,9 +870,12 @@ def stream_collide_bvh_kernel(
             uyn_corrected = uyn_corrected * scale
             uzn_corrected = uzn_corrected * scale
 
-        # ---- Gas boundary condition: replace incoming from gas side ----
-        # For each direction di, if the neighbour in OPPOSITE[di] is gas (TYPE_G),
-        # replace f_streamed[di] with equilibrium at gas_pressure + corrected velocity.
+        # ---- Gas boundary condition: free-surface bounce-back (ref lines 930-934) ----
+        # For each direction di, if the neighbour at (i + cx[di], ...) is gas (TYPE_G),
+        # replace f_streamed[di] with the reference formula:
+        #   f_streamed[di] = feg[di] - fon[opp] + feg[opp]
+        # where opp = opposite[di], feg[*] = gas equilibrium, fon[opp] = outgoing
+        # distribution from the current cell toward the gas neighbour.
         for di in range(27):
             opp = opposite[di]
             ni = i - cx[opp]
@@ -894,10 +899,18 @@ def stream_collide_bvh_kernel(
             nflag_int2 = int(flag[ni, nj, nk])
             nflag_su2 = nflag_int2 & C.TYPE_SU_MASK
             if nflag_su2 == C.TYPE_G:
-                # Replace with equilibrium at gas pressure (Guo forcing form)
-                f_streamed[di] = calculate_f_eq_d3q27(
+                # ---- Reference free-surface gas BC (mrLbmSolverGpu3D.cu:930-934) ----
+                # feg[*] is HOME-stored; fon is HOME-stored (after -= w3d fix).
+                # The formula ensures the incoming distribution from the gas side
+                # reflects the gas pressure while correctly subtracting the
+                # outgoing flux toward the gas.
+                feg_di = calculate_f_eq_d3q27(
                     gas_pressure, uxn_corrected, uyn_corrected, uzn_corrected, di,
                 )
+                feg_opp = calculate_f_eq_d3q27(
+                    gas_pressure, uxn_corrected, uyn_corrected, uzn_corrected, opp,
+                )
+                f_streamed[di] = feg_opp - fon[opp] + feg_di
 
         # ---- Mass exchange: compute Δmass (Phase D skeleton) ----
         # TODO Phase 2: Full mass exchange logic (lines 926-929, 780-999)
