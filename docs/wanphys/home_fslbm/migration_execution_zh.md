@@ -24,6 +24,11 @@
 > 与 WanPhys 和 Newton 项目的标准做法一致。详见
 > [迁移计划 §1.4](migration_plan_zh.md#14-warp-微分需求说明)。
 
+> **编码规范**：测试代码及 kernel 源码中的注释、文档字符串、断言消息
+> **禁止使用 Unicode 特殊字符**（如 Sigma、rho、middle-dot、箭头等）。
+> 请使用纯 ASCII 替代写法（sum、rho、*、-> 等）。含 Unicode 的字符串
+> 会导致自动化编辑工具匹配失败。
+
 ### 6.2 `test_constants.py` — 格子常数与标记枚举
 
 | 测试名称 | 验证内容 | 输入 | 预期结果 |

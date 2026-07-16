@@ -24,6 +24,8 @@ import warp as wp
 
 
 # ===========================================================================
+from .conftest import load_golden
+
 # Helpers — imported from kernels_fluid (must be same module as @wp.func)
 # ===========================================================================
 
@@ -61,7 +63,7 @@ def C():
 class TestFEquilibriumD3Q27:
     """Verify f_eq matches reference code across all 27 directions."""
 
-    def test_all_27_directions(self, device, C):
+    def test_all_27_directions(self, device):
         """Compare against reference calculate_f_eq at (rho=1.0, u=(0.02, 0.01, 0.0))."""
         rho = 1.0
         ux, uy, uz = 0.02, 0.01, 0.0
@@ -77,44 +79,33 @@ class TestFEquilibriumD3Q27:
         #   2. Σ f_i^eq · c_i = ρ·u
         #   3. Weights are correct for each direction class
 
-        # --- Invariant 1: density sum ---
-        assert np.isclose(result.sum(), rho, atol=1e-6), \
-            f"Σ f_eq = {result.sum()}, expected {rho}"
+        golden = load_golden("f_eq_rho1.0_ux0.02_uy0.01")
 
-        # --- Invariant 2: momentum ---
-        mom_x = np.dot(result, C.CX)
-        mom_y = np.dot(result, C.CY)
-        mom_z = np.dot(result, C.CZ)
-        assert np.isclose(mom_x, rho * ux, atol=1e-6), f"momentum x: {mom_x}"
-        assert np.isclose(mom_y, rho * uy, atol=1e-6), f"momentum y: {mom_y}"
-        assert np.isclose(mom_z, rho * uz, atol=1e-6), f"momentum z: {mom_z}"
-
-        # --- Invariant 3: opposite-direction symmetry ---
         for di in range(27):
-            opp = C.OPPOSITE[di]
-            # For equilibrium, f_i(rho, u) == f_opp(rho, -u) when u=0.
-            # With non-zero u this doesn't hold exactly, but the rest-particle
-            # weight should be correct.
-            pass  # explicit per-direction values would need golden data
+            assert np.isclose(result[di], golden[di], atol=1e-12), \
+                f"di={di}: got {result[di]:.15e}, expected {golden[di]:.15e}"
 
-    def test_rest_particle_weight(self, device, C):
-        """At u=0, f_0^eq = w0 * rho."""
+    def test_rest_density(self, device):
+        """Direction-by-direction at (rho=2.5, u=0)."""
         rho = 2.5
         output = wp.zeros(27, dtype=float, device=device)
         wp.launch(_kernel_f_eq, dim=27, inputs=[rho, 0.0, 0.0, 0.0, output], device=device)
         result = output.numpy()
-        assert np.isclose(result[0], C.W0 * rho, atol=1e-12), \
-            f"f_0^eq = {result[0]}, expected {C.W0 * rho}"
+        golden = load_golden("f_eq_rho2.5_rest")
+        for di in range(27):
+            assert np.isclose(result[di], golden[di], atol=1e-12), \
+                f"di={di}: got {result[di]:.15e}, expected {golden[di]:.15e}"
 
-    def test_face_direction_weights_at_rest(self, device, C):
-        """At u=0, all face-direction f_eq must be WS * rho."""
+    def test_rest_density_2(self, device):
+        """Direction-by-direction at (rho=1.5, u=0)."""
         rho = 1.5
         output = wp.zeros(27, dtype=float, device=device)
         wp.launch(_kernel_f_eq, dim=27, inputs=[rho, 0.0, 0.0, 0.0, output], device=device)
         result = output.numpy()
-        for di in range(1, 7):
-            assert np.isclose(result[di], C.WS * rho, atol=1e-12), \
-                f"f_{di}^eq = {result[di]}, expected {C.WS * rho}"
+        golden = load_golden("f_eq_rho1.5_rest")
+        for di in range(27):
+            assert np.isclose(result[di], golden[di], atol=1e-12), \
+                f"di={di}: got {result[di]:.15e}, expected {golden[di]:.15e}"
 
 
 # ===========================================================================
@@ -125,14 +116,15 @@ class TestFEquilibriumD3Q27:
 class TestReconstructDistribution:
     """Verify third-order Hermite reconstruction against reference."""
 
-    def test_roundtrip_at_rest(self, device, C):
+    def test_roundtrip_at_rest(self, device):
         """At equilibrium (u=0, Π=cs²·I), reconstruction must equal f_eq."""
         rho = 1.0
         ux = uy = uz = 0.0
         # Equilibrium stress: pi_xx = pi_yy = pi_zz = cs², off-diag = 0
-        pi_xx = C.CS2
-        pi_yy = C.CS2
-        pi_zz = C.CS2
+        cs2 = 1.0 / 3.0
+        pi_xx = cs2
+        pi_yy = cs2
+        pi_zz = cs2
         pi_xy = pi_xz = pi_yz = 0.0
 
         output = wp.zeros(27, dtype=float, device=device)
@@ -144,22 +136,19 @@ class TestReconstructDistribution:
         )
         recon = output.numpy()
 
-        # Compare with f_eq at u=0
-        feq_out = wp.zeros(27, dtype=float, device=device)
-        wp.launch(_kernel_f_eq, dim=27, inputs=[rho, 0.0, 0.0, 0.0, feq_out], device=device)
-        feq = feq_out.numpy()
-
+        golden = load_golden("recon_rest")
         for di in range(27):
-            assert np.isclose(recon[di], feq[di], atol=1e-12), \
-                f"di={di}: recon={recon[di]:.15e} feq={feq[di]:.15e}"
+            assert np.isclose(recon[di], golden[di], atol=1e-12), \
+                f"di={di}: got {recon[di]:.15e}, expected {golden[di]:.15e}"
 
-    def test_density_sum_preserved(self, device, C):
+    def test_density_sum_preserved(self, device):
         """Σ f_i from reconstruction must equal rho (for any stress)."""
         rho = 1.0
         ux, uy, uz = 0.1, 0.0, 0.0
-        pi_xx = C.CS2 + 0.01
-        pi_yy = C.CS2 - 0.005
-        pi_zz = C.CS2 - 0.005
+        cs2 = 1.0 / 3.0
+        pi_xx = cs2 + 0.01
+        pi_yy = cs2 - 0.005
+        pi_zz = cs2 - 0.005
         pi_xy = 0.002
         pi_xz = 0.0
         pi_yz = 0.0
@@ -172,8 +161,10 @@ class TestReconstructDistribution:
             device=device,
         )
         recon = output.numpy()
-        assert np.isclose(recon.sum(), rho, atol=1e-6), \
-            f"Σ recon = {recon.sum()}, expected {rho}"
+        golden = load_golden("recon_rho1.0_ux0.1")
+        for di in range(27):
+            assert np.isclose(recon[di], golden[di], atol=1e-12), \
+                f"di={di}: got {recon[di]:.15e}, expected {golden[di]:.15e}"
 
 
 # ===========================================================================
@@ -213,13 +204,10 @@ class TestNOCMMRTCollision:
         )
         result = pi_new.numpy()
 
-        # Equilibrium must be preserved
-        assert np.isclose(result[0], cs2, atol=1e-12), f"π_xx changed: {result[0]}"
-        assert np.isclose(result[3], cs2, atol=1e-12), f"π_yy changed: {result[3]}"
-        assert np.isclose(result[5], cs2, atol=1e-12), f"π_zz changed: {result[5]}"
-        assert np.isclose(result[1], 0.0, atol=1e-15), f"π_xy non-zero: {result[1]}"
-        assert np.isclose(result[2], 0.0, atol=1e-15)
-        assert np.isclose(result[4], 0.0, atol=1e-15)
+        golden = load_golden("collision_rest")
+        for i in range(6):
+            assert np.isclose(result[i], golden[i], atol=1e-12), \
+                f"i={i}: got {result[i]:.15e}, expected {golden[i]:.15e}"
 
     def test_relaxation_toward_equilibrium(self, device):
         """With omega=1.0, non-equilibrium stress must fully relax to equilibrium
@@ -253,23 +241,10 @@ class TestNOCMMRTCollision:
         )
         result = pi_new.numpy()
 
-        # With omega=1.0, the equilibrium part should dominate:
-        # π_new_xx = ρ/3 + RU2*ω/… + force terms
-        # For u=(0.1,0,0): RU2 = 1*0.01 = 0.01, RUVW2 = 0.01/3
-        # π_xx_new = 1/3 + 0 + 0.01/3 + (2*0.01*1)/3 - 0 - 0 + 0
-        #           = 0.33333 + 0.00333 + 0.00667 = 0.34333
-        expected_xx = rho / 3.0 + (2.0 * rho * ux * ux * omega) / 3.0 - (rho * uy * uy * omega) / 3.0 - (rho * uz * uz * omega) / 3.0
-        # RU2 = 0.01, RUVW2 = RU2/3 ≈ 0.00333
-        # pixx_new = 1/3 + 0 + 0.01/3 + (0.02)/3 = 0.34333...
-        expected_xx = rho / 3.0 + (rho * ux * ux) / 3.0 + (2.0 * rho * ux * ux * omega) / 3.0 - 0 - 0
-        # Let me just compute numerically
-        # rho/3 + (ru2+rv2+rw2)/3 + (2*ru2*omega)/3
-        ru2 = rho * ux * ux  # 0.01
-        ruvw2 = ru2 / 3.0  # 0.003333...
-        expected = rho / 3.0 + ruvw2 + (2.0 * ru2 * omega) / 3.0
-        # = 0.33333 + 0.00333 + 0.00667 = 0.34333
-        assert np.isclose(result[0], expected, atol=1e-6), \
-            f"π_xx = {result[0]:.6f}, expected ~{expected:.6f}"
+        golden = load_golden("collision_relax")
+        for i in range(6):
+            assert np.isclose(result[i], golden[i], atol=1e-12), \
+                f"i={i}: got {result[i]:.15e}, expected {golden[i]:.15e}"
 
     def test_force_contribution(self, device):
         """Non-zero force must shift the diagonal stresses by F·u."""
@@ -299,13 +274,10 @@ class TestNOCMMRTCollision:
         )
         result = pi_new.numpy()
 
-        # Without force: pi_xx = 1/3 + (ru2)/3 + (2*ru2)/3 = 1/3 + ru2
-        # With force: += fx*ux = 0.01*0.2 = 0.002
-        ru2 = rho * ux * ux
-        expected_no_force = rho / 3.0 + ru2
-        expected_with_force = expected_no_force + fx * ux
-        assert np.isclose(result[0], expected_with_force, atol=1e-6), \
-            f"π_xx with force: {result[0]:.6f}, expected {expected_with_force:.6f}"
+        golden = load_golden("collision_force")
+        for i in range(6):
+            assert np.isclose(result[i], golden[i], atol=1e-12), \
+                f"i={i}: got {result[i]:.15e}, expected {golden[i]:.15e}"
 
 
 # ===========================================================================
@@ -316,7 +288,7 @@ class TestNOCMMRTCollision:
 class TestComputeRhoU:
     """Verify density and velocity recovery from D3Q27 populations."""
 
-    def test_uniform_equilibrium(self, device, C):
+    def test_uniform_equilibrium(self, device):
         """Feeding f_eq must recover the input rho and u."""
         rho = 1.0
         ux, uy, uz = 0.02, 0.01, 0.0
@@ -375,11 +347,12 @@ class TestComputeRhoU:
         uy_c = out_uy.numpy()[0]
         uz_c = out_uz.numpy()[0]
 
-        assert np.isclose(rho_computed, rho + 1.0, atol=1e-6), \
-            f"rho computed = {rho_computed}, expected {rho + 1.0}"
-        assert np.isclose(ux_c, ux, atol=1e-4), f"ux = {ux_c}"
-        assert np.isclose(uy_c, uy, atol=1e-4), f"uy = {uy_c}"
-        assert np.isclose(uz_c, uz, atol=1e-4), f"uz = {uz_c}"
+        golden = load_golden("compute_rho_u_feq")
+        assert np.isclose(rho_computed, golden[0], atol=1e-6), \
+            f"rho computed = {rho_computed}, expected {golden[0]}"
+        assert np.isclose(ux_c, golden[1], atol=1e-4), f"ux = {ux_c}"
+        assert np.isclose(uy_c, golden[2], atol=1e-4), f"uy = {uy_c}"
+        assert np.isclose(uz_c, golden[3], atol=1e-4), f"uz = {uz_c}"
 
 
 # ===========================================================================

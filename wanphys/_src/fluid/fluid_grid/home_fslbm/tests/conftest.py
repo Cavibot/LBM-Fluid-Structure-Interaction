@@ -5,7 +5,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import pytest
+
+# ---------------------------------------------------------------------------
+# Golden data loader
+# ---------------------------------------------------------------------------
+
+GOLDEN_DIR = Path(__file__).parent / "golden_data"
+
+
+def load_golden(name: str) -> np.ndarray:
+    """Load a golden data file (one float per line) as a numpy array."""
+    return np.loadtxt(GOLDEN_DIR / f"{name}.txt", dtype=np.float32)
 
 # ---------------------------------------------------------------------------
 # Deferred imports — warp must be imported after pytest collection
