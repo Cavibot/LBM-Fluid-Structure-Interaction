@@ -61,3 +61,5 @@ nul
 .stfolder/
 
 results.csv
+# Git worktrees
+worktrees/
