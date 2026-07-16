@@ -156,10 +156,21 @@ class HomeFslbmSolver(FluidGridSolverBase):
         wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
         wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
 
-        # ---- Prepare body force from gravity ----
+        # ---- Inject gravity into body-force arrays ----
         gx: float = float(self.model.gravity_x)
         gy: float = float(self.model.gravity_y)
         gz: float = float(self.model.gravity_z)
+        if gx != 0.0 or gy != 0.0 or gz != 0.0:
+            wp.launch(
+                kernels_fluid.add_gravity_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    state_out.force_x,
+                    state_out.force_y,
+                    state_out.force_z,
+                    gx, gy, gz,
+                ],
+            )
 
         # ---- Launch stream_collide_bvh (THE single kernel, Audit item B4) ----
         wp.launch(
@@ -275,18 +286,21 @@ class HomeFslbmSolver(FluidGridSolverBase):
 
         N = self._stride
 
-        # Host-side arrays for init
+        # Host-side arrays for init.
+        # Reference fMom storage convention: velocity + half-force correction
+        # for [1..3]; traceless stress S_ab = Pi_ab/rho - cs²*delta_ab for [4..9].
+        # Equilibrium: S_xx_eq = ux², S_xy_eq = ux*uy, etc.
         f_mom_data = np.zeros((C.NUM_MOMENTS, N), dtype=np.float32)
         f_mom_data[C.M_RHO, :] = rho0
-        f_mom_data[C.M_UX, :] = rho0 * ux
-        f_mom_data[C.M_UY, :] = rho0 * uy
-        f_mom_data[C.M_UZ, :] = rho0 * uz
-        f_mom_data[C.M_SXX, :] = rho0 * (pi_xx_eq - C.CS2)
-        f_mom_data[C.M_SXY, :] = rho0 * pi_xy_eq
-        f_mom_data[C.M_SXZ, :] = rho0 * pi_xz_eq
-        f_mom_data[C.M_SYY, :] = rho0 * (pi_yy_eq - C.CS2)
-        f_mom_data[C.M_SYZ, :] = rho0 * pi_yz_eq
-        f_mom_data[C.M_SZZ, :] = rho0 * (pi_zz_eq - C.CS2)
+        f_mom_data[C.M_UX, :] = ux
+        f_mom_data[C.M_UY, :] = uy
+        f_mom_data[C.M_UZ, :] = uz
+        f_mom_data[C.M_SXX, :] = ux * ux
+        f_mom_data[C.M_SXY, :] = ux * uy
+        f_mom_data[C.M_SXZ, :] = ux * uz
+        f_mom_data[C.M_SYY, :] = uy * uy
+        f_mom_data[C.M_SYZ, :] = uy * uz
+        f_mom_data[C.M_SZZ, :] = uz * uz
 
         wp.copy(state.f_mom, wp.array(f_mom_data.flatten(), dtype=float, device=self.device))
         wp.copy(state.f_mom_post, state.f_mom)

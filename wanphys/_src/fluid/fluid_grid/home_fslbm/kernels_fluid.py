@@ -691,17 +691,9 @@ def stream_collide_bvh_kernel(
             if nk < 0: nk += nz
             elif nk >= nz: nk -= nz
 
-        # Out-of-bounds → reconstruct using current cell's own moments
-        # (equivalent to equilibrium bounce-back at domain wall)
+        # Out-of-bounds → zero-velocity equilibrium bounce-back (matches TYPE_S branch)
         if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
-            opp = opposite[di]
-            f_streamed[di] = reconstruct_distribution(
-                cr, cu, cv, cw,
-                cSxx, cSxy, cSxz, cSyy, cSyz, cSzz,
-                opp,
-            )
-            # ---- Convert from physical to HOME-stored format (ref line 776) ----
-            f_streamed[di] -= w3d[di]
+            f_streamed[di] = calculate_f_eq_d3q27(cr, 0.0, 0.0, 0.0, di)
         else:
             nflag_int = int(flag[ni, nj, nk])
             nflag_bo = nflag_int & C.TYPE_BO_MASK
@@ -1015,7 +1007,7 @@ def stream_collide_bvh_kernel(
 
     pi_new = ml_get_pi_after_collision(
         rho_new, ux_new, uy_new, uz_new,
-        fx, fy, fz,
+        FX_scaled, FY_scaled, FZ_scaled,
         omega_eff,
         pixx_old, pixy_old, pixz_old,
         piyy_old, piyz_old, pizz_old,
@@ -1033,13 +1025,12 @@ def stream_collide_bvh_kernel(
     #   fMomPost[8] = Π_yz_new / ρ
     #   fMomPost[9] = Π_zz_new / ρ - c_s²
 
-    half_dt_inv_rho = 0.5 / rho_new
     inv_rho_new = 1.0 / rho_new
 
     f_mom_post[C.M_RHO * stride + cur_idx] = rho_new
-    f_mom_post[C.M_UX * stride + cur_idx] = ux_new + fx * half_dt_inv_rho
-    f_mom_post[C.M_UY * stride + cur_idx] = uy_new + fy * half_dt_inv_rho
-    f_mom_post[C.M_UZ * stride + cur_idx] = uz_new + fz * half_dt_inv_rho
+    f_mom_post[C.M_UX * stride + cur_idx] = ux_new + fx * 0.5
+    f_mom_post[C.M_UY * stride + cur_idx] = uy_new + fy * 0.5
+    f_mom_post[C.M_UZ * stride + cur_idx] = uz_new + fz * 0.5
     f_mom_post[C.M_SXX * stride + cur_idx] = pi_new.xx * inv_rho_new - C.CS2
     f_mom_post[C.M_SXY * stride + cur_idx] = pi_new.xy * inv_rho_new
     f_mom_post[C.M_SXZ * stride + cur_idx] = pi_new.xz * inv_rho_new
@@ -1159,3 +1150,24 @@ def swap_moments_kernel(
             f_mom[m * stride + tid] = f_mom_post[m * stride + tid]
         for m in range(C.NUM_DIRS_GAS):
             g_mom[m * gas_stride + tid] = g_mom_post[m * gas_stride + tid]
+
+
+# ============================================================================
+# 7. Gravity injection kernel — add gravity to body-force arrays
+# ============================================================================
+
+
+@wp.kernel
+def add_gravity_kernel(
+    force_x: wp.array3d(dtype=float),
+    force_y: wp.array3d(dtype=float),
+    force_z: wp.array3d(dtype=float),
+    gx: float,
+    gy: float,
+    gz: float,
+):
+    """Add constant gravity to per-cell body-force arrays."""
+    i, j, k = wp.tid()
+    force_x[i, j, k] = force_x[i, j, k] + gx
+    force_y[i, j, k] = force_y[i, j, k] + gy
+    force_z[i, j, k] = force_z[i, j, k] + gz
