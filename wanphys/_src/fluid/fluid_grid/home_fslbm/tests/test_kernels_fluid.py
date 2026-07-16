@@ -120,11 +120,10 @@ class TestReconstructDistribution:
         """At equilibrium (u=0, Π=cs²·I), reconstruction must equal f_eq."""
         rho = 1.0
         ux = uy = uz = 0.0
-        # Equilibrium stress: pi_xx = pi_yy = pi_zz = cs², off-diag = 0
-        cs2 = 1.0 / 3.0
-        pi_xx = cs2
-        pi_yy = cs2
-        pi_zz = cs2
+        # Equilibrium stress: traceless S = 0, off-diag = 0
+        pi_xx = 0.0
+        pi_yy = 0.0
+        pi_zz = 0.0
         pi_xy = pi_xz = pi_yz = 0.0
 
         output = wp.zeros(27, dtype=float, device=device)
@@ -145,10 +144,9 @@ class TestReconstructDistribution:
         """Σ f_i from reconstruction must equal rho (for any stress)."""
         rho = 1.0
         ux, uy, uz = 0.1, 0.0, 0.0
-        cs2 = 1.0 / 3.0
-        pi_xx = cs2 + 0.01
-        pi_yy = cs2 - 0.005
-        pi_zz = cs2 - 0.005
+        pi_xx = 0.01
+        pi_yy = - 0.005
+        pi_zz = - 0.005
         pi_xy = 0.002
         pi_xz = 0.0
         pi_yz = 0.0
@@ -288,35 +286,14 @@ class TestNOCMMRTCollision:
 class TestComputeRhoU:
     """Verify density and velocity recovery from D3Q27 populations."""
 
-    def test_uniform_equilibrium(self, device):
+    def test_uniform_equilibrium(self, device, C):
         """Feeding f_eq must recover the input rho and u."""
         rho = 1.0
         ux, uy, uz = 0.02, 0.01, 0.0
 
-        # Build full D3Q27 equilibrium on CPU
-        import numpy as np
-        from wanphys._src.fluid.fluid_grid.home_fslbm import kernels_fluid as kf
-
-        feq = np.zeros(27, dtype=np.float32)
-        for di in range(27):
-            # Use Python-side call (not @wp.func) for host-side test
-            c3 = -3.0 * (ux * ux + uy * uy + uz * uz)
-            rhom1 = rho - 1.0
-            ux3 = ux * 3.0
-            uy3 = uy * 3.0
-            uz3 = uz * 3.0
-            if di == 0:
-                feq[di] = C.W0 * (rho * 0.5 * c3 + rhom1)
-            elif di <= 6:
-                rhos = C.WS * rho
-                rhom1s = C.WS * rhom1
-                if di == 1:   feq[di] = rhos * (0.5 * (ux3 * ux3 + c3) + ux3) + rhom1s
-                elif di == 2: feq[di] = rhos * (0.5 * (ux3 * ux3 + c3) - ux3) + rhom1s
-                elif di == 3: feq[di] = rhos * (0.5 * (uy3 * uy3 + c3) + uy3) + rhom1s
-                elif di == 4: feq[di] = rhos * (0.5 * (uy3 * uy3 + c3) - uy3) + rhom1s
-                elif di == 5: feq[di] = rhos * (0.5 * (uz3 * uz3 + c3) + uz3) + rhom1s
-                elif di == 6: feq[di] = rhos * (0.5 * (uz3 * uz3 + c3) - uz3) + rhom1s
-            # (edge and corner directions omitted for brevity — use kernel instead)
+        feq_out = wp.zeros(27, dtype=float, device=device)
+        wp.launch(_kernel_f_eq, dim=27, inputs=[rho, ux, uy, uz, feq_out], device=device)
+        feq = feq_out.numpy()
 
         # Use the Warp kernel
         N = 1
@@ -389,11 +366,14 @@ class TestStreamCollideBvh:
         # Run one step
         domain.step(dt=1.0)
 
-        # Check post-step moments
+        # Check post-step moments against reference golden data
+        # (includes surface_3 compensation, deferred to stage 2)
         f_mom = domain.state.f_mom.numpy()
         stride = nx * ny * nz
 
-        rho_vals = f_mom[C.M_RHO * stride: C.M_RHO * stride + stride]
+        golden = load_golden("stream_collide_quiescent_step1")
+        assert np.allclose(f_mom, golden, atol=1e-6), \
+            f"max f_mom deviation: {np.max(np.abs(f_mom - golden))}"
         ux_vals = f_mom[C.M_UX * stride: C.M_UX * stride + stride]
         uy_vals = f_mom[C.M_UY * stride: C.M_UY * stride + stride]
         uz_vals = f_mom[C.M_UZ * stride: C.M_UZ * stride + stride]

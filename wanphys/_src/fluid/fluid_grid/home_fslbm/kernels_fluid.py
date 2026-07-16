@@ -210,8 +210,10 @@ def reconstruct_distribution(
     ux, uy, uz:
         Velocity components (M[1..3] / ρ).
     pi_xx ... pi_zz:
-        Full stress-tensor components Π_αβ (not traceless).
-        For diagonal: pass stored value + c_s².
+        Traceless stress components S_αβ = Π_αβ/ρ − c_s²·δ_αβ.
+        Pass the stored f_mom[M_SXX] etc. values directly.
+        (Matches reference: ``mrUtilFuncGpu3D.h:153`` first parameter
+        ``pixx`` is the traceless stored value, not the full stress.)
     di:
         Direction index 0..26.
 
@@ -327,7 +329,7 @@ def reconstruct_distribution(
     if di == 23:   # (+1,-1,+1)
         return _W3 * (A0 + Ax_t3 + Axx_t3 - Axxy_t9 + Axxz_t9 - Axy_t9 + Axyy_t9 - Axyz_t27 + Axz_t9 + Axzz_t9 - Ay_t3 + Ayy_t3 - Ayyz_t9 + Ayz_t9 - Ayzz_t9 + Az_t3 + Azz_t3)
     if di == 24:   # (-1,+1,-1)
-        return _W3 * (A0 - Ax_t3 + Axx_t3 + Axxy_t9 - Axxz_t9 - Axy_t9 - Axyy_t9 + Axyz_t27 - Axz_t9 + Axzz_t9 + Ay_t3 + Ayy_t3 + Ayyz_t9 - Ayz_t9 - Ayzz_t9 - Az_t3 + Azz_t3)
+        return _W3 * (A0 - Ax_t3 + Axx_t3 + Axxy_t9 - Axxz_t9 - Axy_t9 - Axyy_t9 + Axyz_t27 + Axz_t9 - Axzz_t9 + Ay_t3 + Ayy_t3 - Ayyz_t9 - Ayz_t9 + Ayzz_t9 - Az_t3 + Azz_t3)
     if di == 25:   # (-1,-1,-1) — wait, reference has 25→(-1,-1,-1) and 26→(+1,-1,-1)
         return _W3 * (A0 - Ax_t3 + Axx_t3 + Axxy_t9 + Axxz_t9 - Axy_t9 - Axyy_t9 - Axyz_t27 - Axz_t9 - Axzz_t9 + Ay_t3 + Ayy_t3 + Ayyz_t9 + Ayz_t9 + Ayzz_t9 + Az_t3 + Azz_t3)
     if di == 26:   # (+1,-1,-1)
@@ -654,12 +656,12 @@ def stream_collide_bvh_kernel(
     cu = f_mom[C.M_UX * stride + cur_idx]
     cv = f_mom[C.M_UY * stride + cur_idx]
     cw = f_mom[C.M_UZ * stride + cur_idx]
-    cSxx = f_mom[C.M_SXX * stride + cur_idx] + C.CS2
+    cSxx = f_mom[C.M_SXX * stride + cur_idx]
     cSxy = f_mom[C.M_SXY * stride + cur_idx]
     cSxz = f_mom[C.M_SXZ * stride + cur_idx]
-    cSyy = f_mom[C.M_SYY * stride + cur_idx] + C.CS2
+    cSyy = f_mom[C.M_SYY * stride + cur_idx]
     cSyz = f_mom[C.M_SYZ * stride + cur_idx]
-    cSzz = f_mom[C.M_SZZ * stride + cur_idx] + C.CS2
+    cSzz = f_mom[C.M_SZZ * stride + cur_idx]
 
     # ---- Pull-streaming: gather from 27 neighbours (lines 741-777) ----
     # For each direction di, we pull the distribution f_i from the neighbour
@@ -722,12 +724,12 @@ def stream_collide_bvh_kernel(
                 nu = f_mom[C.M_UX * stride + nidx]
                 nv = f_mom[C.M_UY * stride + nidx]
                 nw = f_mom[C.M_UZ * stride + nidx]
-                nSxx = f_mom[C.M_SXX * stride + nidx] + C.CS2
+                nSxx = f_mom[C.M_SXX * stride + nidx]
                 nSxy = f_mom[C.M_SXY * stride + nidx]
                 nSxz = f_mom[C.M_SXZ * stride + nidx]
-                nSyy = f_mom[C.M_SYY * stride + nidx] + C.CS2
+                nSyy = f_mom[C.M_SYY * stride + nidx]
                 nSyz = f_mom[C.M_SYZ * stride + nidx]
-                nSzz = f_mom[C.M_SZZ * stride + nidx] + C.CS2
+                nSzz = f_mom[C.M_SZZ * stride + nidx]
                 f_streamed[di] = reconstruct_distribution(
                     nr, nu, nv, nw,
                     nSxx, nSxy, nSxz, nSyy, nSyz, nSzz,
