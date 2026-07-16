@@ -31,7 +31,7 @@ def _constants():
 
 @pytest.fixture(scope="session")
 def default_model(_warp, _constants):
-    """32^3 HomeFslbmModel with device='cpu' for unit-test repeatability."""
+    """32^3 HomeFslbmModel — follows Warp default device for consistency."""
     from wanphys._src.fluid.fluid_grid.home_fslbm.model import HomeFslbmModel
 
     return HomeFslbmModel(
@@ -39,7 +39,6 @@ def default_model(_warp, _constants):
         fluid_grid_cell_size=1.0,
         omega=1.0,
         turbulence_radius=3,
-        device="cpu",
     )
 
 

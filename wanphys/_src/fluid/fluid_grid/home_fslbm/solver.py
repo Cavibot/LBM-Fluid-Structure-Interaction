@@ -221,7 +221,6 @@ class HomeFslbmSolver(FluidGridSolverBase):
                 self._w3d,
                 self._opposite,
             ],
-            device=self.device,
         )
 
         # ---- Post-step swap: f_mom_post → f_mom ----
