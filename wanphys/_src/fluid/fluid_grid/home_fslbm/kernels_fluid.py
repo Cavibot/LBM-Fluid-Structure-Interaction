@@ -330,7 +330,7 @@ def reconstruct_distribution(
         return _W3 * (A0 + Ax_t3 + Axx_t3 - Axxy_t9 + Axxz_t9 - Axy_t9 + Axyy_t9 - Axyz_t27 + Axz_t9 + Axzz_t9 - Ay_t3 + Ayy_t3 - Ayyz_t9 + Ayz_t9 - Ayzz_t9 + Az_t3 + Azz_t3)
     if di == 24:   # (-1,+1,-1)
         return _W3 * (A0 - Ax_t3 + Axx_t3 + Axxy_t9 - Axxz_t9 - Axy_t9 - Axyy_t9 + Axyz_t27 + Axz_t9 - Axzz_t9 + Ay_t3 + Ayy_t3 - Ayyz_t9 - Ayz_t9 + Ayzz_t9 - Az_t3 + Azz_t3)
-    if di == 25:   # (-1,-1,-1) — wait, reference has 25→(-1,-1,-1) and 26→(+1,-1,-1)
+    if di == 25:   # (-1,+1,+1)
         return _W3 * (A0 - Ax_t3 + Axx_t3 + Axxy_t9 + Axxz_t9 - Axy_t9 - Axyy_t9 - Axyz_t27 - Axz_t9 - Axzz_t9 + Ay_t3 + Ayy_t3 + Ayyz_t9 + Ayz_t9 + Ayzz_t9 + Az_t3 + Azz_t3)
     if di == 26:   # (+1,-1,-1)
         return _W3 * (A0 + Ax_t3 + Axx_t3 - Axxy_t9 - Axxz_t9 - Axy_t9 + Axyy_t9 + Axyz_t27 - Axz_t9 + Axzz_t9 - Ay_t3 + Ayy_t3 - Ayyz_t9 + Ayz_t9 - Ayzz_t9 - Az_t3 + Azz_t3)
@@ -708,13 +708,8 @@ def stream_collide_bvh_kernel(
 
             if nflag_bo == C.TYPE_S:
                 # ---- Solid neighbour: bounce-back (ref lines 743-748) ----
-                # Stationary-wall half-way bounce-back: replace incoming
-                # distribution with equilibrium at current-cell density
-                # and zero velocity.  calculate_f_eq_d3q27 returns the
-                # HOME-stored format directly (no -= w3d needed).
-                # Moving-wall correction will be added in a later refinement.
-                opp = opposite[di]
-                f_streamed[di] = calculate_f_eq_d3q27(cr, 0.0, 0.0, 0.0, opp)
+                # fhn[i] = feq[i] — equilibrium in direction i at wall density
+                f_streamed[di] = calculate_f_eq_d3q27(cr, 0.0, 0.0, 0.0, di)
             else:
                 # ---- Fluid/interface/gas neighbour: normal stream (lines 764-777) ----
                 nidx = ni * ny * nz + nj * nz + nk
@@ -745,6 +740,30 @@ def stream_collide_bvh_kernel(
         )
         # ---- Convert from physical to HOME-stored format (ref line 803) ----
         fon[di] -= w3d[di]
+
+    # ---- Mass accumulation from neighbours (ref lines 806-826) ----
+    massn = mass[i, j, k]
+    for di in range(1, 27):
+        ni2 = i - cx[di]
+        nj2 = j - cy[di]
+        nk2 = k - cz[di]
+        if px == 1:
+            if ni2 < 0: ni2 += nx
+            elif ni2 >= nx: ni2 -= nx
+        if py == 1:
+            if nj2 < 0: nj2 += ny
+            elif nj2 >= ny: nj2 -= ny
+        if pz == 1:
+            if nk2 < 0: nk2 += nz
+            elif nk2 >= nz: nk2 -= nz
+        if ni2 >= 0 and ni2 < nx and nj2 >= 0 and nj2 < ny and nk2 >= 0 and nk2 < nz:
+            massn += massex[ni2, nj2, nk2]
+
+    if flagsn_su == C.TYPE_F:
+        for di in range(1, 27):
+            massn += f_streamed[di] - fon[di]
+
+    mass[i, j, k] = massn
 
     # =====================================================================
     # Phase B: Restore full populations and compute post-streaming moments
