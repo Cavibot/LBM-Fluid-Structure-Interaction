@@ -17,6 +17,13 @@
 
 所有测试使用 `pytest` 运行，`conftest.py` 提供 `default_model`（32³ 网格）、`default_domain` 等 fixture。金标准数据存储在 `tests/golden_data/` 下，格式为参考代码二进制转储。
 
+> **编译注意事项**：`kernels_fluid.py` 包含大型单体 kernel（`stream_collide_bvh_kernel`），
+> 其多循环嵌套、条件 break 及 27 方向条件返回的 `@wp.func` 超出 Warp 1.12
+> adjoint 代码生成器的处理能力。由于 HOME-FSLBM 阶段 1 无需微分，模块顶部已通过
+> `wp.set_module_options({"enable_backward": False})` 禁用 backward 代码生成，
+> 与 WanPhys 和 Newton 项目的标准做法一致。详见
+> [迁移计划 §1.4](migration_plan_zh.md#14-warp-微分需求说明)。
+
 ### 6.2 `test_constants.py` — 格子常数与标记枚举
 
 | 测试名称 | 验证内容 | 输入 | 预期结果 |

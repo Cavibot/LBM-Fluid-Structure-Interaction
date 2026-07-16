@@ -66,6 +66,19 @@
 - N 相可混溶/不可混溶泛化（论文二）
 - 润湿/接触角
 
+### 1.4 Warp 微分需求说明
+
+本次迁移的 HOME-FSLBM 求解器**不涉及可微分物理（differentiable physics）**。所有 kernel
+（`stream_collide_bvh_kernel`、测试 wrapper kernel、`swap_moments_kernel`）均为前向仿真，
+无需梯度计算。因此在 `kernels_fluid.py` 模块顶部通过
+`wp.set_module_options({"enable_backward": False})` 禁用 Warp 的 adjoint 代码生成：
+
+- 这与 WanPhys 已有模块（`broad_phase_bvh.py`、`broad_phase_hash.py`、`broad_phase_sap.py`）
+  及 Newton 上游（kamino solver 中十余个模块）的做法一致。
+- 若远期需引入微分（如流固耦合优化、参数校准），应参照 `SPH_diff` 模块的模式：
+  将大型 kernel 拆分为独立可微子模块，对复杂 `@wp.func` 使用 `@wp.func_grad` 手写 adjoint，
+  仅对需要梯度的模块开启 backward。
+
 ---
 
 ## 2. 参考系统分析

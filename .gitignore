@@ -61,6 +61,8 @@ nul
 .stfolder/
 
 results.csv
+
+# Makoto-LeMain's ignore
 /.deepseek
 /docs/papers
-/temp
+/wanphys/_src/fluid/fluid_grid/home_fslbm/tests/test.log
