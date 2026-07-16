@@ -1,6 +1,6 @@
 # Home-FSLBM 迁移计划审核意见书
 
-> **审核对象**: `docs/wanphys/home_fslbm_migration_plan_zh.md`
+> **审核对象**: [迁移计划](migration_plan_zh.md)
 > **参考代码**: `docs/papers/锐界面动力学自由表面流与泡沫/Home-FSLBM/`
 > **审核日期**: 2026-07-15
 > **审核标准**: 禁止简化、禁止降级；所有模块必须精确复现参考代码行为

@@ -569,4 +569,4 @@ def load_golden(filename: str) -> dict:
 
 ---
 
-*本计划已按审核意见 `home_fslbm_migration_audit_zh.md` 修订。全部 10 个阻塞项（B1-B10）和 6 个强建议项（S1-S6）均已处理。关键更正：YACCLAB CCL（禁止简化）、wp.float64 气泡数组、CMR-MRT 气体碰撞（非 BGK）、单一 stream_collide_bvh kernel 内联湍流、两阶段求解器管线、补充 4 个 State 字段、补充 9 个遗漏 kernel、State 继承 DomainState（非 FluidGridStateBase）、turbulence_radius=3、新增金标准数据生成流程章节。*
+*本计划已按审核意见 [初次审核意见书](migration_audit_zh.md) 及 [二次审核意见书](migration_reaudit_zh.md) 修订。全部 10 个阻塞项（B1-B10）和 6 个强建议项（S1-S6）均已处理。关键更正：YACCLAB CCL（禁止简化）、wp.float64 气泡数组、CMR-MRT 气体碰撞（非 BGK）、单一 stream_collide_bvh kernel 内联湍流、两阶段求解器管线、补充 4 个 State 字段、补充 9 个遗漏 kernel、State 继承 DomainState（非 FluidGridStateBase）、turbulence_radius=3、新增金标准数据生成流程章节。*
