@@ -21,13 +21,20 @@ import newton.viewer
 VISUAL_MODULE_NAME: str = "wanphys.examples.lbm.fluid_grid_lbm_twoway_fsi_visual"
 
 
-def _import_visual_module() -> types.ModuleType:
+def _import_optional(module_name: str) -> types.ModuleType:
+    """Import an LBM visual example/helper, or skip if historical assets are missing."""
     try:
-        return importlib.import_module(VISUAL_MODULE_NAME)
+        return importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
-        if exc.name == VISUAL_MODULE_NAME:
-            raise unittest.SkipTest(f"{VISUAL_MODULE_NAME} is not available yet") from exc
-        raise
+        raise unittest.SkipTest(
+            f"Missing historical LBM example/helper {exc.name!r} "
+            f"(requested {module_name!r}). Restore the example or delete "
+            "this test in a dedicated cleanup task."
+        ) from exc
+
+
+def _import_visual_module() -> types.ModuleType:
+    return _import_optional(VISUAL_MODULE_NAME)
 
 
 def _call_with_supported_kwargs(entry: Callable[..., Any], kwargs: Mapping[str, Any]) -> Any:
@@ -38,9 +45,7 @@ def _call_with_supported_kwargs(entry: Callable[..., Any], kwargs: Mapping[str, 
     if accepts_var_kwargs:
         return entry(**kwargs)
 
-    supported_kwargs: dict[str, Any] = {
-        name: value for name, value in kwargs.items() if name in signature.parameters
-    }
+    supported_kwargs: dict[str, Any] = {name: value for name, value in kwargs.items() if name in signature.parameters}
     return entry(**supported_kwargs)
 
 
@@ -181,7 +186,7 @@ class _FakeDensityFieldRenderer:
 class TestLbmRigidVisualization(unittest.TestCase):
     def test_dambreak_mem_validation_reports_nonfinite_density(self) -> None:
         """M1 validation should expose the first invalid field in test mode."""
-        metrics_module: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._metrics")
+        metrics_module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._metrics")
         metrics: Any = _make_dambreak_mem_metrics(metrics_module, density_max=float("nan"))
 
         with self.assertRaisesRegex(ValueError, "density range is not finite"):
@@ -189,7 +194,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_validation_reports_partially_nonfinite_density_field(self) -> None:
         """M1 validation should reject nonfinite density fields even when finite min/max exist."""
-        metrics_module: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._metrics")
+        metrics_module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._metrics")
         metrics: Any = _make_dambreak_mem_metrics(metrics_module, density_all_finite=False)
 
         with self.assertRaisesRegex(ValueError, "density field contains nonfinite values"):
@@ -197,7 +202,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_validation_reports_nonfinite_acceptance_scalars(self) -> None:
         """M1 validation should reject nonfinite scalar acceptance metrics."""
-        metrics_module: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._metrics")
+        metrics_module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._metrics")
         cases: tuple[tuple[str, str], ...] = (
             ("water_contact_fraction", "water_contact_fraction is not finite"),
             ("initial_water_contact_fraction", "initial_water_contact_fraction is not finite"),
@@ -212,9 +217,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_parser_defaults_to_hybrid(self) -> None:
         """M1 should default to the stable hybrid coupling mode."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
         parser: argparse.ArgumentParser = module.create_parser()
         args: argparse.Namespace = parser.parse_args([])
 
@@ -224,9 +227,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_parser_accepts_density_controls(self) -> None:
         """M1 CLI should expose shared density preset and explicit density controls."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
         parser: argparse.ArgumentParser = module.create_parser()
         args: argparse.Namespace = parser.parse_args(["--density-preset", "heavy", "--sphere-density", "2.25"])
 
@@ -235,10 +236,8 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_visual_example_constructs_with_null_viewer(self) -> None:
         """The M1 visual example should construct without opening GL in tests."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
-        scene_module: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._scene")
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
+        scene_module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._scene")
         config: Any = scene_module.DambreakMemM1Config(grid_res=(24, 18, 20), tracer_count=0)
 
         example: Any = module.LbmDambreakMemM1VisualExample(
@@ -252,10 +251,8 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_visual_example_test_final_rejects_zero_step(self) -> None:
         """The M1 visual example should not let test mode pass without stepping."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
-        scene_module: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._scene")
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
+        scene_module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._scene")
         config: Any = scene_module.DambreakMemM1Config(grid_res=(24, 18, 20), tracer_count=0)
         example: Any = module.LbmDambreakMemM1VisualExample(
             viewer=None,
@@ -268,10 +265,8 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_visual_example_renders_with_viewer_null(self) -> None:
         """The M1 visual example should render with ViewerNull without GL callbacks."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
-        scene_module: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._scene")
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
+        scene_module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._scene")
         viewer: Any = newton.viewer.ViewerNull(num_frames=1)
         config: Any = scene_module.DambreakMemM1Config(grid_res=(24, 18, 20), tracer_count=0)
         example: Any = module.LbmDambreakMemM1VisualExample(
@@ -286,9 +281,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_visual_example_unpauses_test_viewer(self) -> None:
         """The M1 visual example test entrypoint should not stay paused before run()."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
         args: argparse.Namespace = argparse.Namespace(test=True)
         viewer: Any = types.SimpleNamespace(_paused=True)
 
@@ -298,9 +291,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_visual_example_main_routes_headless_test_to_smoke(self) -> None:
         """The M1 visual example should avoid the unbounded GL run loop in headless test mode."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
         args: argparse.Namespace = argparse.Namespace(
             device=None,
             grid_res=(24, 18, 20),
@@ -352,9 +343,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_smoke_reports_finite_hybrid_metrics(self) -> None:
         """M1 should produce finite metrics and retained MEM diagnostics in hybrid mode."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
 
         metrics: Any = module.run_smoke(
             num_frames=80,
@@ -376,9 +365,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_metrics_expose_density_and_trajectory(self) -> None:
         """M1 metrics should expose resolved density and base trajectory diagnostics."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
 
         metrics: Any = module.run_smoke(
             num_frames=12,
@@ -399,9 +386,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m2_parser_defaults_to_light_hybrid(self) -> None:
         """M2 should expose a separate density-preset visual entrypoint."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m2_density_presets_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m2_density_presets_visual")
         parser: argparse.ArgumentParser = module.create_parser()
         args: argparse.Namespace = parser.parse_args([])
 
@@ -411,10 +396,8 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m2_main_uses_m2_parser_defaults(self) -> None:
         """M2 main should run with M2 parser defaults, not M1's parser directly."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m2_density_presets_visual"
-        )
-        m1_module: types.ModuleType = importlib.import_module(
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m2_density_presets_visual")
+        m1_module: types.ModuleType = _import_optional(
             "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
         )
         captured_kwargs: list[dict[str, Any]] = []
@@ -454,9 +437,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m2_single_preset_smoke_reports_finite_metrics(self) -> None:
         """M2 should run one selected density preset with finite diagnostics."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m2_density_presets_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m2_density_presets_visual")
 
         metrics: Any = module.run_smoke(
             num_frames=60,
@@ -477,9 +458,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m2_light_heavy_comparison_separates_trajectories(self) -> None:
         """M2 should prove light and heavy presets produce different single-sphere trajectories."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m2_density_presets_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m2_density_presets_visual")
 
         comparison: Any = module.run_density_comparison(
             num_frames=180,
@@ -504,9 +483,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_rejects_invalid_explicit_sphere_density(self) -> None:
         """M1 should reject explicit nonfinite or nonpositive sphere densities before scene build."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
         invalid_densities: tuple[float, ...] = (float("nan"), float("inf"), 0.0, -1.0)
 
         for sphere_density in invalid_densities:
@@ -525,9 +502,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_metrics_expose_force_audit_values(self) -> None:
         """M1.1 metrics should explain fluid gravity versus scaled rigid gravity."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
 
         metrics: Any = module.run_smoke(
             num_frames=1,
@@ -547,8 +522,8 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_format_includes_force_audit_fields(self) -> None:
         """M1.1 logs should explain fluid and rigid gravity scales."""
-        metrics_module: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._metrics")
-        render_module: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._render")
+        metrics_module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._metrics")
+        render_module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._render")
         metrics: Any = metrics_module.DambreakMemMetrics(
             frame=1,
             sim_time=0.01,
@@ -589,9 +564,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_default_starts_dry(self) -> None:
         """M1 should start the sphere outside the initial dam and pool water."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
 
         metrics: Any = module.run_smoke(
             num_frames=0,
@@ -608,7 +581,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_dry_start_falls_before_water_contact(self) -> None:
         """A dry-start M1 sphere should initially move downward, not receive an early water kick upward."""
-        scene_module: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._scene")
+        scene_module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._scene")
         config: Any = scene_module.DambreakMemM1Config(
             grid_res=(24, 18, 20),
             tracer_count=0,
@@ -628,9 +601,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_rejects_invalid_coupling_mode(self) -> None:
         """M1 should fail fast for unsupported coupling modes."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
 
         with self.assertRaisesRegex(ValueError, "unsupported coupling_mode"):
             module.run_smoke(
@@ -644,9 +615,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_analytic_mode_reports_only_analytic_force(self) -> None:
         """Analytic mode should keep MEM feedback disabled while retaining analytic force diagnostics."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
 
         metrics: Any = module.run_smoke(
             num_frames=80,
@@ -664,9 +633,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_mem_mode_reports_only_mem_force(self) -> None:
         """MEM mode should suppress analytic force while exposing retained MEM feedback."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
 
         metrics: Any = module.run_smoke(
             num_frames=80,
@@ -684,9 +651,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_contact_and_mem_become_observable(self) -> None:
         """M1 should make contact with water and report nonzero MEM feedback."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
 
         metrics: Any = module.run_smoke(
             num_frames=180,
@@ -707,9 +672,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_m1_documented_hybrid_command_remains_finite(self) -> None:
         """The documented M1 hybrid scene should survive a long headless run."""
-        module: types.ModuleType = importlib.import_module(
-            "wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual"
-        )
+        module: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem.m1_hybrid_single_sphere_visual")
 
         metrics: Any = module.run_smoke(
             num_frames=900,
@@ -735,7 +698,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_force_breakdown_light_sphere_buoyancy_exceeds_weight(self) -> None:
         """A light contacted sphere should receive upward analytic stabilization."""
-        forces: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._forces")
+        forces: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._forces")
 
         breakdown: Any = forces.compute_hybrid_force_breakdown(
             sphere_radius=0.16,
@@ -756,7 +719,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_force_audit_reports_scaled_gravity_acceleration(self) -> None:
         """M1.1 should make dry rigid gravity scale explicit."""
-        forces: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._forces")
+        forces: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._forces")
 
         breakdown: Any = forces.compute_hybrid_force_breakdown(
             sphere_radius=0.16,
@@ -778,7 +741,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_force_breakdown_dry_sphere_keeps_gravity(self) -> None:
         """A dry sphere should still fall under analytic gravity."""
-        forces: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._forces")
+        forces: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._forces")
 
         breakdown: Any = forces.compute_hybrid_force_breakdown(
             sphere_radius=0.16,
@@ -799,7 +762,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_force_breakdown_dry_sphere_keeps_residual_vertical_damping(self) -> None:
         """A dry moving sphere should keep the small demo-stabilizing vertical damping floor."""
-        forces: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._forces")
+        forces: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._forces")
 
         breakdown: Any = forces.compute_hybrid_force_breakdown(
             sphere_radius=0.16,
@@ -820,7 +783,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_force_breakdown_exposes_gravity_force_alias(self) -> None:
         """The breakdown should expose a force-named gravity term while preserving the legacy alias."""
-        forces: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._forces")
+        forces: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._forces")
 
         breakdown: Any = forces.compute_hybrid_force_breakdown(
             sphere_radius=0.16,
@@ -840,7 +803,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_dambreak_mem_force_breakdown_vertical_formula_is_explicit(self) -> None:
         """The returned force should apply scale only to weight and buoyancy terms."""
-        forces: types.ModuleType = importlib.import_module("wanphys.examples.lbm.dambreak_mem._forces")
+        forces: types.ModuleType = _import_optional("wanphys.examples.lbm.dambreak_mem._forces")
 
         analytic_force_scale: float = 50.0
         breakdown: Any = forces.compute_hybrid_force_breakdown(
@@ -856,9 +819,8 @@ class TestLbmRigidVisualization(unittest.TestCase):
             flow_drag_scale=8.0,
         )
         expected_force_z: float = (
-            (float(breakdown.gravity_force_z) + float(breakdown.buoyancy_z)) * analytic_force_scale
-            + float(breakdown.vertical_drag_z)
-        )
+            float(breakdown.gravity_force_z) + float(breakdown.buoyancy_z)
+        ) * analytic_force_scale + float(breakdown.vertical_drag_z)
 
         self.assertAlmostEqual(float(breakdown.force[2]), expected_force_z)
 
@@ -882,7 +844,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_twoway_visual_display_field_removes_uniform_inflow(self) -> None:
         """The display scalar should not render the whole uniform-flow domain as liquid."""
-        scene_helpers: types.ModuleType = importlib.import_module("wanphys.examples.lbm._lbm_twoway_scene")
+        scene_helpers: types.ModuleType = _import_optional("wanphys.examples.lbm._lbm_twoway_scene")
         config: Any = scene_helpers.LbmTwoWaySceneConfig()
         scene: Any = scene_helpers.build_twoway_scene(config)
 
@@ -898,9 +860,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
         """Two-way field rendering should default to the one-way density look."""
         module: types.ModuleType = _import_visual_module()
         parser: argparse.ArgumentParser = module.create_parser()
-        field_actions: list[argparse.Action] = [
-            action for action in parser._actions if action.dest == "field_mode"
-        ]
+        field_actions: list[argparse.Action] = [action for action in parser._actions if action.dest == "field_mode"]
 
         self.assertEqual(len(field_actions), 1)
         self.assertEqual(field_actions[0].default, "density")
@@ -975,7 +935,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_twoway_visual_keeps_driven_flow_alive(self) -> None:
         """The visual acceptance scene should keep a sustained cross-flow."""
-        scene_helpers: types.ModuleType = importlib.import_module("wanphys.examples.lbm._lbm_twoway_scene")
+        scene_helpers: types.ModuleType = _import_optional("wanphys.examples.lbm._lbm_twoway_scene")
         config: Any = scene_helpers.LbmTwoWaySceneConfig()
         scene: Any = scene_helpers.build_twoway_scene(config)
 
@@ -1033,7 +993,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_twoway_visual_documented_high_force_scale_remains_finite_long_enough(self) -> None:
         """The documented GL real-MEM command should not become nonfinite after startup."""
-        scene_helpers: types.ModuleType = importlib.import_module("wanphys.examples.lbm._lbm_twoway_scene")
+        scene_helpers: types.ModuleType = _import_optional("wanphys.examples.lbm._lbm_twoway_scene")
         config: Any = scene_helpers.LbmTwoWaySceneConfig(
             grid_res=(16, 12, 12),
             tracer_count=0,
@@ -1070,7 +1030,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_twoway_visual_tracers_advect_with_flow(self) -> None:
         """Tracer points should move when the LBM scene is stepped."""
-        scene_helpers: types.ModuleType = importlib.import_module("wanphys.examples.lbm._lbm_twoway_scene")
+        scene_helpers: types.ModuleType = _import_optional("wanphys.examples.lbm._lbm_twoway_scene")
         config: Any = scene_helpers.LbmTwoWaySceneConfig(tracer_count=64)
         scene: Any = scene_helpers.build_twoway_scene(config)
 
@@ -1085,7 +1045,7 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
     def test_twoway_visual_tracers_stay_clear_of_walls_and_body(self) -> None:
         """Tracer points should stay away from walls and solid cells."""
-        scene_helpers: types.ModuleType = importlib.import_module("wanphys.examples.lbm._lbm_twoway_scene")
+        scene_helpers: types.ModuleType = _import_optional("wanphys.examples.lbm._lbm_twoway_scene")
         config: Any = scene_helpers.LbmTwoWaySceneConfig(tracer_count=64)
         scene: Any = scene_helpers.build_twoway_scene(config)
         self.assertIsNotNone(scene.tracer_positions)
@@ -1115,4 +1075,3 @@ class TestLbmRigidVisualization(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-

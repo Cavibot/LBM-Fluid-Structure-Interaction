@@ -23,9 +23,7 @@ class TestLbmStateEncoding(unittest.TestCase):
         self.assertEqual(state.f_post.size, 19 * 2 * 3 * 4)
 
     def test_home_state_has_ten_persistent_fields_and_no_fullf(self) -> None:
-        domain = LbmDomain(
-            LbmModel(fluid_grid_res=(2, 3, 4), device="cpu", encoding="home")
-        )
+        domain = LbmDomain(LbmModel(fluid_grid_res=(2, 3, 4), device="cpu", encoding="home"))
         state = domain.create_state()
         self.assertIsInstance(state, HomeLbmState)
         self.assertEqual(len(state.kinetic_fields), 10)
@@ -33,9 +31,7 @@ class TestLbmStateEncoding(unittest.TestCase):
         self.assertFalse(hasattr(state, "f_post"))
 
     def test_domain_double_buffers_use_same_concrete_type(self) -> None:
-        domain = LbmDomain(
-            LbmModel(fluid_grid_res=(2, 2, 2), device="cpu", encoding="home")
-        )
+        domain = LbmDomain(LbmModel(fluid_grid_res=(2, 2, 2), device="cpu", encoding="home"))
         domain.create_state()
         self.assertIsInstance(domain._state_in, HomeLbmState)
         self.assertIsInstance(domain._state_out, HomeLbmState)
@@ -46,16 +42,12 @@ class TestLbmStateEncoding(unittest.TestCase):
             "srt",
         )
         self.assertEqual(
-            LbmModel(
-                fluid_grid_res=(2, 2, 2), device="cpu", lambda_trt=0.001
-            ).resolved_collision,
+            LbmModel(fluid_grid_res=(2, 2, 2), device="cpu", lambda_trt=0.001).resolved_collision,
             "trt",
         )
         for name in ("raw_mrt", "nocm_mrt"):
             with self.assertRaises(NotImplementedError):
-                LbmModel(
-                    fluid_grid_res=(2, 2, 2), device="cpu", collision=name
-                )
+                LbmModel(fluid_grid_res=(2, 2, 2), device="cpu", collision=name)
 
     def test_invalid_combinations_fail_fast(self) -> None:
         with self.assertRaises(ValueError):
@@ -63,19 +55,25 @@ class TestLbmStateEncoding(unittest.TestCase):
         with self.assertRaises(ValueError):
             LbmModel(fluid_grid_res=(2, 2, 2), device="cpu", collision="unknown")
         with self.assertRaises(NotImplementedError):
+            LbmModel(fluid_grid_res=(2, 2, 2), device="cpu", encoding="home", G=-1.0)
+        with self.assertRaises(NotImplementedError):
             LbmModel(
-                fluid_grid_res=(2, 2, 2), device="cpu", encoding="home", G=-1.0
+                fluid_grid_res=(2, 2, 2),
+                device="cpu",
+                encoding="fullf",
+                collision="home_nocm",
+                G=-1.0,
             )
         with self.assertRaises(ValueError):
             LbmModel(
-                fluid_grid_res=(2, 2, 2), device="cpu",
-                collision="srt", use_regularization=True,
+                fluid_grid_res=(2, 2, 2),
+                device="cpu",
+                collision="srt",
+                use_regularization=True,
             )
 
     def test_home_rigid_coupling_fails_at_construction(self) -> None:
-        model = LbmModel(
-            fluid_grid_res=(2, 2, 2), device="cpu", encoding="home"
-        )
+        model = LbmModel(fluid_grid_res=(2, 2, 2), device="cpu", encoding="home")
         fake_fluid_domain = SimpleNamespace(model=model)
         with self.assertRaises(NotImplementedError):
             GridLbmRigidCoupling(fake_fluid_domain, SimpleNamespace())
@@ -83,8 +81,10 @@ class TestLbmStateEncoding(unittest.TestCase):
     def test_home_nocm_does_not_allocate_population_scratch(self) -> None:
         domain = LbmDomain(
             LbmModel(
-                fluid_grid_res=(2, 2, 2), device="cpu",
-                encoding="home", collision="home_nocm",
+                fluid_grid_res=(2, 2, 2),
+                device="cpu",
+                encoding="home",
+                collision="home_nocm",
             )
         )
         self.assertIsNone(domain.solver._f_star)

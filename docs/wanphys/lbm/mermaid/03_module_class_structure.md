@@ -96,7 +96,7 @@ classDiagram
     LbmSolver --> HomeNocmMrtCollision
 
     note for FullFLbmState "LbmState = FullFLbmState\n默认兼容别名"
-    note for LbmSolver "无独立 ExecutionPlan 类\n__init__ 缓存 backend + scratch"
+    note for LbmSolver "无独立 ExecutionPlan 类\nbackend 只是选择元数据\nkernel 启动仍属 Solver"
 ```
 
 ## 模块依赖与职责

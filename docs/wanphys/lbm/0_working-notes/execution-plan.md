@@ -2,7 +2,8 @@
 
 > 状态：已实施（2026-07-16）  
 > 范围：D3Q19 LBM 核心；FullF/HOME 状态编码；SRT/TRT EPC；HOME-NOCM-MRT EMC  
-> 暂不纳入：Raw MRT、FullF NOCM-MRT、HOME+Shan-Chen、HOME 刚体耦合、现有 momentum-exchange 重构
+> 暂不纳入：Raw MRT、FullF NOCM-MRT、HOME+Shan-Chen、HOME 刚体耦合、现有 momentum-exchange 重构  
+> 当前验收入口：`acceptance.md`（本文件保留为历史实施记录）
 
 ## 1. 目标
 
@@ -413,7 +414,10 @@ SRT/TRT 具有相同输入输出形态：
 输出：f_post[Q]
 ```
 
-第一轮不强制引入正式 Python `Protocol`；两个实现只需提供统一的 `input_kind="population"` 和 `collide()` 调用约定。
+第一轮不强制引入正式 Python `Protocol`。实现上，backend 类只提供选择元数据
+（`input_kind` 与松弛率），真正的 Warp kernel 启动仍由 `LbmSolver` 完成。
+这不是遗漏：统一 `backend.collide()` 封装会多包一层却不增加数值能力，
+因此本轮明确不实现。
 
 ### 9.3 TRT regularization
 
@@ -723,6 +727,6 @@ newton/tests/test_lbm_home_nocm.py
 moments；FullF+HOME-NOCM 为 `10N` pre + `10N` post moments。当前环境没有
 CUDA 设备，因此本轮只完成内存结构评估，GPU 吞吐基准需在 CUDA 环境运行。
 
-验证结果：架构、公式、SC 与刚体兼容共 34 项测试通过。另有 14 项既有
-可视化测试引用仓库中已经不存在的示例模块，在导入阶段以
-`ModuleNotFoundError` 失败；这些测试未进入本次 LBM 实现，不属于本轮回归。
+验证结果：架构、公式、定向 streaming、shear-wave、SC 与刚体兼容核心测试
+通过。历史可视化测试在缺失示例时显式 skip。CollisionBackend 第一版只提供
+选择元数据；kernel 启动仍由 Solver 完成。详见 `acceptance.md`。

@@ -1,130 +1,120 @@
-合并到 `main` 前，至少还有下面 6 项必须完成。Raw MRT、HOME+SC、HOME coupling 等明确延期内容不需要现在实现。
+# LBM Phase 0 收尾记录
 
-## 1. 修复已知 fail-fast 漏洞
+> 更新：2026-07-17  
+> 本文件记录 HOME/FullF 核心重构阶段的合并前质量门槛。  
+> 当前验收入口见 `acceptance.md`。  
+> Raw MRT、FullF NOCM、外力、边界、D3QN 等后续能力不再放在本文件追踪。
 
-当前：
+## 状态总览
+
+```text
+[x] 修复 FullF+HOME-NOCM+SC 静默忽略
+[x] backend 文档与代码契约一致
+[x] 非均匀定向 streaming 测试已补
+[x] 多步 shear-wave 物理验收测试已补
+[x] 历史可视化测试缺示例时显式 skip
+[x] CUDA smoke 脚本与记录已补
+[ ] lint / format / type / unit 由本地或 CI 最终确认
+```
+
+## 1. FullF + HOME-NOCM + Shan-Chen fail-fast
+
+原问题：
 
 ```text
 FullF + home_nocm + G != 0
 ```
 
-没有被拒绝，但 SC 力实际上也没有进入 EMC collision。这可能产生“程序正常运行，但物理力被静默忽略”的危险结果。
+会构造成功，但 Shan-Chen 力不会进入 EMC collision，存在静默忽略风险。
 
-必须改成构造时直接抛 `NotImplementedError`，并补测试。
+当前处理：
 
-## 2. 完成 CollisionBackend 契约，或者修改计划声明
+- `LbmModel` 构造时直接抛 `NotImplementedError`；
+- `test_lbm_state_encoding.py` 覆盖该组合；
+- 后续若要支持，应进入“外力注入 / NOCM forcing closure”路线，而不是取消 fail-fast。
 
-目前 backend 类主要保存：
+状态：已完成。
 
-```text
-input_kind
-relaxation_rates
-```
+## 2. CollisionBackend 契约
 
-真正的 kernel 仍由 Solver 直接选择和启动，没有计划中暗示的统一：
+原问题：
+
+计划文字暗示 backend 可能拥有统一：
 
 ```python
 backend.collide(...)
 ```
 
-合并前必须二选一：
+但实现中真正启动 Warp kernel 的仍然是 `LbmSolver`。
 
-- 实现真实的 backend 调用接口，由 Solver 调 backend；
-- 明确修改 execution plan，说明第一版 backend 只是选择元数据，kernel 调度仍属于 Solver。
+当前处理：
 
-不能让文档声称一种架构，而代码实际是另一种。建议实现最小 `launch_collision()`，不需要引入复杂 Protocol。
+- `collisions.py` docstring 明确 backend 是 collision selection metadata；
+- `execution-plan.md` 说明第一版不实现 `backend.collide()`；
+- `acceptance.md` 固化该契约。
 
-## 3. 增加非均匀 streaming 测试
+状态：已完成。
 
-现在六种组合测试使用均匀平衡场。均匀场无法充分检查：
+## 3. 非均匀 directional streaming 测试
 
-- `+x/-x` 方向是否写反；
-- source/target 索引是否颠倒；
-- periodic wrap 是否偏移一格；
-- HOME provider 是否从正确邻居读取；
-- EMC collector 是否在正确格点累积矩。
+原问题：
 
-至少增加一个明确的方向传播测试：
+均匀平衡场不能检查方向、source/target、periodic wrap、HOME reconstruction/provider、EMC collector 是否接错。
 
-```text
-在单个格点设置一个已知方向 population
-执行一次 streaming
-检查它准确移动到 x+c_i
-检查周期边界准确回绕
-```
+当前处理：
 
-需要覆盖：
+- 新增 `test_lbm_directional_streaming.py`；
+- 覆盖：
+  - FullF → populations；
+  - HOME → populations；
+  - FullF → moments；
+  - HOME → moments；
+  - 单方向 packet 移动；
+  - 周期回绕。
 
-- FullF → populations；
-- HOME → populations；
-- FullF → moments；
-- HOME → moments。
+状态：已完成。
 
-这是合并前最重要的新增正确性测试。
+## 4. 多步 shear-wave 物理验收
 
-## 4. 增加一个多步非平衡物理验证
+原问题：
 
-现在主要验证“一步、均匀、公式一致”，还没有证明新时间层经过多步不会漂移。
+一步、均匀、公式一致不足以证明新时间层多步稳定。
 
-最低要求可以是周期域上的 shear-wave decay：
+当前处理：
 
-\[
-u_x(y,0)=u_0\sin(2\pi y/L)
-\]
+- 在 `test_lbm_directional_streaming.py` 中增加 shear-wave decay；
+- FullF SRT/TRT 对理论黏性衰减做误差窗口检查；
+- HOME 相关路径检查有限性、质量守恒和衰减方向。
 
-理论上：
+状态：已完成。
 
-\[
-u_x(t)=u_0 e^{-\nu k^2t}\sin(ky).
-\]
+## 5. 历史可视化测试红项
 
-它可以同时验证：
+原问题：
 
-- streaming/collision 顺序；
-- SRT/TRT 黏性；
-- post-collision 双缓冲；
-- 多步质量与动量；
-- FullF 和 HOME 的宏观趋势。
+若干历史测试引用仓库中已经不存在的 LBM 示例/helper，导致 `ModuleNotFoundError` 红掉。
 
-至少验证 FullF SRT/TRT。HOME-NOCM 如果暂时达不到严格解析误差要求，也应验证有限性、质量守恒和衰减方向。
+当前处理：
 
-## 5. 解决全量测试中的 14 个红项
+- 缺失历史示例/helper 时显式 `SkipTest`；
+- skip 信息说明“恢复示例或删除测试”是独立清理任务；
+- 不在本阶段恢复已删除示例。
 
-目前有 14 个历史测试引用已经不存在的示例模块。虽然不是本次重构造成的，但不能把一个明确红掉的 LBM 测试集合直接合并进 `main`。
+状态：已完成。
 
-必须选择一种处理方式：
+## 6. CUDA smoke 记录
 
-- 恢复对应示例；
-- 删除已经失效的测试；
-- 将其明确标记为 skip，并写明缺少的资产或迁移任务；
-- 更新测试名称，使其指向现存示例。
+当前处理：
 
-最低成本做法是合理地 `skip`，不能继续保留 `ModuleNotFoundError`。
+- 新增 `scripts/lbm_cuda_acceptance.py`；
+- 新增 `cuda-acceptance-record.md`；
+- 记录 2026-07-16 本机 CUDA smoke：RTX 4070 SUPER / Warp 1.12 / CUDA 12.9。
 
-## 6. 在 CUDA 环境完成一次 GPU 验证
-
-当前只在 Warp CPU 后端验证。这个项目的主要运行目标是 GPU，因此合并前至少需要在 CUDA 上完成：
-
-- 六种编码/碰撞组合各一步；
-- HOME reconstruction/NOCM kernel 编译；
-- FullF SC smoke；
-- 检查 NaN/Inf；
-- 检查 HOME-NOCM 没有 population scratch；
-- 一个小规模多步运行。
-
-不要求现在完成正式性能调优，但至少要记录：
-
-```text
-GPU 型号
-Warp/CUDA 版本
-测试网格
-每个组合是否通过
-显存占用
-```
+状态：已完成。
 
 ## 7. 自动化质量检查
 
-最后应运行仓库正式工具，而不只是 `py_compile`：
+仍需由本地或 CI 最终确认：
 
 ```text
 ruff format --check
@@ -133,20 +123,18 @@ basedpyright 或项目指定类型检查
 相关 unittest
 ```
 
-当前环境没有可直接调用的 Ruff，因此这一项尚未完成。若 CI 会自动执行，也应在 PR 上确认全部通过。
+本次收尾不声称这些检查已经重新执行通过。
 
----
+状态：待 CI / 本地验证确认。
 
-最低合并门槛可以总结为：
+## 后续能力不属于本文件
 
-```text
-[ ] 修复 FullF+HOME-NOCM+SC 静默忽略
-[ ] backend 文档与代码契约一致
-[ ] 非均匀定向 streaming 测试
-[ ] 一个多步 shear-wave/等价物理测试
-[ ] 处理 14 个陈旧测试
-[ ] CUDA smoke 通过
-[ ] lint / format / type / unit CI 全绿
-```
+以下内容是下一阶段路线图，不是 Phase 0 收尾项：
 
-GPU性能优化、Raw MRT、FullF NOCM、HOME 外力和新 coupling 都可以留到后续，不属于本次合并阻塞项。
+- FullF Raw MRT；
+- FullF NOCM MRT；
+- HOME/NOCM 外力闭合；
+- Shan-Chen 与 MRT/NOCM 的外力注入；
+- Zou-He / convective / moving-wall 等边界迁移；
+- D3Q27 / D3QN；
+- MEM / LinkImpulse 重构。

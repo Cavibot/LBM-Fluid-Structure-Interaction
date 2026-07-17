@@ -1,7 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Population- and encoded-moment collision backends."""
+"""Population- and encoded-moment collision kernels and backend metadata.
+
+``SrtCollision`` / ``TrtCollision`` / ``HomeNocmMrtCollision`` describe which
+input form and relaxation rates the solver should use.  They are not
+independent collision executors: ``LbmSolver`` still launches the Warp
+kernels below.
+"""
 
 from __future__ import annotations
 

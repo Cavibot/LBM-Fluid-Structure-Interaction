@@ -293,6 +293,12 @@ class LbmModel(FluidGridModelBase):
             )
         if self.encoding == "home" and self.G != 0.0:
             raise NotImplementedError("HOME encoding with Shan-Chen force is not supported")
+        if self.resolved_collision == "home_nocm" and self.G != 0.0:
+            raise NotImplementedError(
+                "HOME-NOCM collision with Shan-Chen force is not implemented; "
+                "SC force would be silently ignored. Use SRT/TRT with FullF, "
+                "or set G=0."
+            )
         if self.use_regularization and self.resolved_collision != "trt":
             raise ValueError("LBM regularization is supported only by TRT collision")
         if self.tau <= 0.5:

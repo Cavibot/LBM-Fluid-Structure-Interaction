@@ -11,7 +11,8 @@ uv run python -m unittest \
   newton.tests.test_lbm_collision_backends \
   newton.tests.test_lbm_home_nocm \
   newton.tests.test_lbm_shan_chen_wall_force \
-  newton.tests.test_lbm_rigid_coupling -v
+  newton.tests.test_lbm_rigid_coupling \
+  newton.tests.test_lbm_directional_streaming -v
 ```
 
 覆盖内容：
@@ -21,14 +22,22 @@ uv run python -m unittest \
 - SRT、TRT 与 HOME-NOCM；
 - HOME reconstruction 与 NumPy 参考公式；
 - periodic/static halfway bounce-back；
+- 定向 streaming 与周期回绕；
+- 多步 shear-wave 衰减；
 - FullF Shan-Chen 回归；
 - 旧 moving-wall/MEM FullF 兼容路径；
 - 未实现组合的 fail-fast 行为。
 
-当前有 14 项历史可视化测试引用已经从仓库移除的示例模块，例如
-`fluid_grid_lbm_dambreak`、`fluid_grid_lbm_dambreak_falling_sphere_visual` 和
-`_lbm_falling_sphere_scene`。它们在模块导入阶段失败，不能作为当前核心 LBM
-回归结果；恢复这些示例或删除陈旧测试应作为独立清理任务。
+历史可视化测试引用已经从仓库移除的示例模块时，会显式 `SkipTest`，
+不再以 `ModuleNotFoundError` 红掉全量 LBM 测试。恢复这些示例或删除
+陈旧测试仍是独立清理任务。当前合并门槛见
+`docs/wanphys/lbm/0_working-notes/acceptance.md`。
+
+CUDA 验收：
+
+```bash
+uv run python scripts/lbm_cuda_acceptance.py
+```
 
 ## 1. 性能测试范围
 
