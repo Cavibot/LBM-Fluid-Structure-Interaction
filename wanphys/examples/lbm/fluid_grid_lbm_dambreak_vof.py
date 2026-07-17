@@ -71,12 +71,14 @@ class VofDamBreak:
         backend: str = BACKEND,
         n: int = N,
         home_faithful: bool = False,
+        bubble_pressure: bool = False,
     ):
         self.viewer = viewer
         viewer._paused = True
         self._backend = "home_fp32" if backend in ("home", "home_fp32") else "dist"
         self._n = int(n)
         self._home_faithful = bool(home_faithful) and self._backend == "home_fp32"
+        self._bubble_pressure = bool(bubble_pressure) and self._backend == "home_fp32"
         # Lattice |g| must scale with column height H~n/2. Fixed gz across N
         # makes Fr∝√(gH) blow up: n=128 @ gz=-0.002 → ρ_max≳1.3, wall foam,
         # and visible mass drain. Keep g·H ≈ const vs n_ref=48.
@@ -135,6 +137,12 @@ class VofDamBreak:
             vof_orphan_reabsorb=True,
             vof_orphan_max_cells=max(96, self._n),
             vof_orphan_height_margin=3,
+            vof_bubble_pressure=self._bubble_pressure,
+            # Disjoint only by default with --bubble-pressure.
+            # Eddy viscosity is very costly (6³ scan/cell) and over-damps the pool.
+            vof_bubble_disjoint=self._bubble_pressure,
+            vof_bubble_small_sigma=False,
+            vof_bubble_eddy=False,
             lambda_trt=LAMBDA_TRT,
             initial_density=RHO_LIQUID,
             gravity_x=0.0,
@@ -151,7 +159,8 @@ class VofDamBreak:
             f"film_drain={self.model.vof_wall_film_drain} "
             f"(edge_only={self.model.vof_wall_film_edge_only}), "
             f"home_faithful={self._home_faithful} "
-            f"(fill_empty={home_fill_empty}, wall_eq={home_wall_eq}, seal={seal_fg})"
+            f"(fill_empty={home_fill_empty}, wall_eq={home_wall_eq}, seal={seal_fg}), "
+            f"bubble_pressure={self._bubble_pressure}"
         )
 
         self.domain = LbmDomain(self.model)
@@ -299,6 +308,15 @@ class VofDamBreak:
                 else 0.0
             )
             rho_max = float(rho_finite.max()) if rho_finite.size else float("nan")
+            bub_note = ""
+            if home is not None and bool(self.model.vof_bubble_pressure):
+                bs = home.last_bubble_stats()
+                bub_note = (
+                    f" bub={bs.get('n_bubbles', 0)}"
+                    f"(trap={bs.get('n_trapped', 0)}"
+                    f",ρmax={float(bs.get('rho_max_bubble', 1.0)):.3f}"
+                    f",ccl={int(bs.get('did_ccl', 0))})"
+                )
             z_top = np.zeros(ctype.shape[:2], dtype=np.int32)
             for k in range(ctype.shape[2]):
                 wet_k = (ctype[:, :, k] > 0) & (phi[:, :, k] > 0.5)
@@ -406,7 +424,7 @@ class VofDamBreak:
             print(
                 f"[t={self.sim_time:.1f}s] L={liquid.sum()} I={interface.sum()} "
                 f"vol={vol:.1f} (Δ={vol-self._vol0:+.1f}) mass={mass_sum:.1f} "
-                f"rho_max={rho_max:.3f} "
+                f"rho_max={rho_max:.3f}{bub_note} "
                 f"v=({vx:+.4f},{vz:+.4f}) |u|={speed:.4f} "
                 f"hA={h_a:.1f} hB={h_b:.1f} corn={corn_max} "
                 f"h_rms={rough.height_rms:.3f} h_p2p={rough.height_p2p:.2f} "
@@ -445,6 +463,14 @@ def main():
             "(mass-gated), wall f^eq, stronger γ, no F–G seal / quiet level / topup."
         ),
     )
+    parser.add_argument(
+        "--bubble-pressure",
+        action="store_true",
+        help=(
+            "Enable §4.2 trapped-gas pressure (host CCL + ρ=V₀/V on G∪I). "
+            "Default off; headspace touching top stays ρ=1."
+        ),
+    )
     pre_args, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0], *remaining]
 
@@ -455,6 +481,7 @@ def main():
             backend=pre_args.backend,
             n=pre_args.n,
             home_faithful=pre_args.home_faithful,
+            bubble_pressure=pre_args.bubble_pressure,
         ),
         args,
     )

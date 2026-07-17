@@ -11,9 +11,12 @@ Increment status
 **H5:** Optional ``LbmModel.lbm_backend='home_fp32'`` via ``bridge.py``.
 **H6 (done):** Warp GPU HOME-FREE VOF (``vof_warp.py``). Quant deferred.
 **H6.1:** Fused stream+mass+FS+collide; massex + IF/IG/GI surface (Home-FSLBM order).
-**H6.2:** PLIC κ → Eq.12 Laplace on home FS (mild γ); bubble CCL still deferred.
+**H6.2:** PLIC κ → Eq.12 Laplace on home FS (mild γ).
+**H7:** bubble pressure — GPU CCL + Δφ volume; optional Home disjoint /
+    small-bubble σ / near-bubble eddy (``vof_bubble_*``).
+**H8 pending:** foam / dissolved-gas (§4.4); quant deferred.
 
-**Next:** bubble CCL / trapped-gas pressure; quant still deferred.
+**Next:** foam / dissolved-gas (§4.4); quant deferred.
 """
 
 from __future__ import annotations
@@ -91,4 +94,4 @@ __all__ = [
     "zou_he_velocity_numpy",
 ]
 
-NEXT_INCREMENT = "H7: bubble CCL / trapped-gas pressure (quant deferred)"
+NEXT_INCREMENT = "H8: foam / dissolved-gas §4.4 (quant deferred)"

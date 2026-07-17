@@ -121,13 +121,24 @@ def home_vof_fused_kernel(
     face_uy: wp.array(dtype=float),
     face_uz: wp.array(dtype=float),
     kappa: wp.array3d(dtype=float),
+    gas_rho: wp.array3d(dtype=float),
+    disjoin_force: wp.array3d(dtype=float),
+    bubble_tag: wp.array3d(dtype=wp.int32),
+    bubble_volume: wp.array(dtype=float),
     gamma: float,
+    enable_disjoint: int,
+    disjoint_factor: float,
+    enable_small_sigma: int,
+    small_bubble_vol: float,
+    small_six_sigma: float,
+    enable_eddy: int,
+    eddy_atm_vol: float,
+    max_bubbles: int,
     num_dirs: int,
     tau: float,
     fx: float,
     fy: float,
     fz: float,
-    rho_g0: float,
     home_fill_empty: int,
     home_wall_eq: int,
     nx: int,
@@ -174,8 +185,24 @@ def home_vof_fused_kernel(
     syz = syz_in[i, j, k]
     vx, vy, vz = _clamp_u(vx, vy, vz)
 
-    # Eq. 12: ρ_g = ρ_atm - 6 γ κ  (Laplace pressure → surface self-smoothing)
-    rho_g = rho_g0 - 6.0 * gamma * kappa[i, j, k]
+    # Eq. 12 + §4.2 + Home disjoint / small-bubble σ:
+    # ρ_g = ρ_bubble − σ₆ κ − f_dis · disjoint.
+    six_sigma = 6.0 * gamma
+    djoin = float(0.0)
+    if enable_disjoint != 0:
+        djoin = disjoin_force[i, j, k]
+    tag_c = int(bubble_tag[i, j, k])
+    if (
+        enable_small_sigma != 0
+        and djoin <= 0.0
+        and six_sigma > 1.0e-3
+        and tag_c > 0
+        and tag_c <= max_bubbles
+    ):
+        vol_b = bubble_volume[tag_c - 1]
+        if vol_b > 0.0 and vol_b < small_bubble_vol:
+            six_sigma = small_six_sigma
+    rho_g = gas_rho[i, j, k] - six_sigma * kappa[i, j, k] - disjoint_factor * djoin
     if rho_g < 0.2:
         rho_g = 0.2
     if rho_g > 1.8:
@@ -401,11 +428,47 @@ def home_vof_fused_kernel(
         return
 
     inv = 1.0 / r
+    ux_s = mx * inv
+    uy_s = my * inv
+    uz_s = mz * inv
+    # Home near-bubble eddy viscosity: raise τ near non-atmosphere bubbles.
+    # Only check INTERFACE cells (Home mainly needs FS damping; full-grid 6³ is too heavy).
+    tau_use = tau
+    if enable_eddy != 0 and ctype == CELL_INTERFACE:
+        found = int(0)
+        for t in range(216):
+            odi = int(t // 36) - 3
+            rem = int(t % 36)
+            odj = int(rem // 6) - 3
+            odk = int(rem % 6) - 3
+            ni = i + odi
+            nj = j + odj
+            nk = k + odk
+            if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+                continue
+            nt = int(bubble_tag[ni, nj, nk])
+            if nt <= 0 or nt > max_bubbles:
+                continue
+            if bubble_volume[nt - 1] < eddy_atm_vol:
+                found = 1
+        if found != 0:
+            xx = axx * inv - cs2
+            yy = ayy * inv - cs2
+            zz = azz * inv - cs2
+            xy = axy * inv
+            xz = axz * inv
+            yz = ayz * inv
+            vis = 4.0 * wp.sqrt(
+                xx * xx + 2.0 * xy * xy + 2.0 * xz * xz
+                + yy * yy + 2.0 * yz * yz + zz * zz
+            )
+            tau_use = (vis + 1.0e-4) * 3.0 + 0.5
+
     rho, ux, uy, uz, sxx_o, syy_o, szz_o, sxy_o, sxz_o, syz_o = home_collide_moments(
-        r, mx * inv, my * inv, mz * inv,
+        r, ux_s, uy_s, uz_s,
         axx * inv, ayy * inv, azz * inv,
         axy * inv, axz * inv, ayz * inv,
-        tau, fx, fy, fz,
+        tau_use, fx, fy, fz,
     )
     ux, uy, uz = _clamp_u(ux, uy, uz)
 
@@ -566,6 +629,10 @@ def home_vof_surface3_kernel(
     mass: wp.array3d(dtype=float),
     massex: wp.array3d(dtype=float),
     phi: wp.array3d(dtype=float),
+    delta_phi: wp.array3d(dtype=float),
+    track_delta_phi: int,
+    split_flag: wp.array(dtype=wp.int32),
+    report_split: int,
     nx: int,
     ny: int,
     nz: int,
@@ -578,6 +645,11 @@ def home_vof_surface3_kernel(
     massexn = float(0.0)
     phin = float(0.0)
     out_t = ctype
+    phi_old = phi[i, j, k]
+
+    # Home: IF→F reports split (topology may disconnect a bubble).
+    if ctype == CELL_IF and report_split != 0:
+        wp.atomic_max(split_flag, 0, 1)
 
     if ctype == CELL_IF or ctype == CELL_LIQUID:
         out_t = CELL_LIQUID
@@ -663,6 +735,9 @@ def home_vof_surface3_kernel(
     mass[i, j, k] = massn
     phi[i, j, k] = phin
     cell_out[i, j, k] = out_t
+    # Home: delta_phi drives bubble.volume -= Δφ (gas volume = Σ(1-φ)).
+    if track_delta_phi != 0:
+        delta_phi[i, j, k] = phin - phi_old
 
 
 @wp.kernel
@@ -671,6 +746,8 @@ def home_vof_seal_fg_kernel(
     rho: wp.array3d(dtype=float),
     mass: wp.array3d(dtype=float),
     phi: wp.array3d(dtype=float),
+    delta_phi: wp.array3d(dtype=float),
+    track_delta_phi: int,
     nx: int,
     ny: int,
     nz: int,
@@ -703,10 +780,15 @@ def home_vof_seal_fg_kernel(
                         mass[i, j, k] = 0.0
                     if mass[i, j, k] > rr:
                         mass[i, j, k] = rr
+                    phi_old = phi[i, j, k]
                     if rr > 1.0e-8:
                         phi[i, j, k] = mass[i, j, k] / rr
                     else:
                         phi[i, j, k] = 1.0
+                    if track_delta_phi != 0:
+                        delta_phi[i, j, k] = delta_phi[i, j, k] + (
+                            phi[i, j, k] - phi_old
+                        )
                     return
 
 
@@ -1487,6 +1569,969 @@ def reabsorb_orphan_liquid(
     return float(moved), int(n_orphans)
 
 
+@wp.kernel
+def bubble_calculate_disjoint_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    phi: wp.array3d(dtype=float),
+    bubble_tag: wp.array3d(dtype=wp.int32),
+    disjoin_force: wp.array3d(dtype=float),
+    nx: int,
+    ny: int,
+    nz: int,
+) -> None:
+    """Home ``calculate_disjoint``: ray along −∇φ, different-tag interface → force."""
+    i, j, k = wp.tid()
+    disjoin_force[i, j, k] = 0.0
+    if int(cell[i, j, k]) != CELL_INTERFACE:
+        return
+    tag = int(bubble_tag[i, j, k])
+    if tag <= 0:
+        return
+
+    # Approximate interface normal from φ (points toward liquid).
+    gx = float(0.0)
+    gy = float(0.0)
+    gz = float(0.0)
+    if i + 1 < nx and i - 1 >= 0:
+        gx = phi[i - 1, j, k] - phi[i + 1, j, k]
+    elif i + 1 < nx:
+        gx = phi[i, j, k] - phi[i + 1, j, k]
+    elif i - 1 >= 0:
+        gx = phi[i - 1, j, k] - phi[i, j, k]
+    if j + 1 < ny and j - 1 >= 0:
+        gy = phi[i, j - 1, k] - phi[i, j + 1, k]
+    elif j + 1 < ny:
+        gy = phi[i, j, k] - phi[i, j + 1, k]
+    elif j - 1 >= 0:
+        gy = phi[i, j - 1, k] - phi[i, j, k]
+    if k + 1 < nz and k - 1 >= 0:
+        gz = phi[i, j, k - 1] - phi[i, j, k + 1]
+    elif k + 1 < nz:
+        gz = phi[i, j, k] - phi[i, j, k + 1]
+    elif k - 1 >= 0:
+        gz = phi[i, j, k - 1] - phi[i, j, k]
+    glen = wp.sqrt(gx * gx + gy * gy + gz * gz)
+    if glen < 1.0e-8:
+        return
+    inv_g = 1.0 / glen
+    nx_h = gx * inv_g
+    ny_h = gy * inv_g
+    nz_h = gz * inv_g
+
+    best = float(0.0)
+    for jk in range(1, 20):
+        t = float(jk) * 0.2
+        # Home: step opposite the normal (toward approaching foreign interface).
+        x12 = int(wp.round(float(i) - t * nx_h))
+        y12 = int(wp.round(float(j) - t * ny_h))
+        z12 = int(wp.round(float(k) - t * nz_h))
+        if x12 < 0 or x12 >= nx or y12 < 0 or y12 >= ny or z12 < 0 or z12 >= nz:
+            continue
+        nt = int(bubble_tag[x12, y12, z12])
+        if nt <= 0 or nt == tag:
+            continue
+        if int(cell[x12, y12, z12]) != CELL_INTERFACE:
+            continue
+        # Simplified gap measure (Home uses PLIC center offset).
+        alpha = phi[x12, y12, z12]
+        d = t - (1.0 - alpha)
+        if d < 0.0:
+            d = 0.0
+        cand = 1.0 - d / 4.0
+        if cand > best:
+            best = cand
+    if best > 0.0:
+        disjoin_force[i, j, k] = best
+
+
+# ---------------------------------------------------------------------------
+# §4.2 bubble pressure — Home-aligned (incremental + CCL on merge/split)
+# ---------------------------------------------------------------------------
+
+MAX_BUBBLES: int = 4096
+
+
+@wp.kernel
+def bubble_clear_liquid_tags_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    bubble_tag: wp.array3d(dtype=wp.int32),
+    bubble_tag_prev: wp.array3d(dtype=wp.int32),
+) -> None:
+    """Liquid cells drop tags (Home previous_tag / tag_matrix clear)."""
+    i, j, k = wp.tid()
+    tag = int(bubble_tag[i, j, k])
+    bubble_tag_prev[i, j, k] = tag
+    if int(cell[i, j, k]) == CELL_LIQUID:
+        bubble_tag[i, j, k] = 0
+
+
+@wp.kernel
+def bubble_propagate_tags_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    bubble_tag: wp.array3d(dtype=wp.int32),
+    merge_flag: wp.array(dtype=wp.int32),
+    nx: int,
+    ny: int,
+    nz: int,
+) -> None:
+    """Inherit neighbor tag on new G/I; conflicting tags → merge (Home get_tag)."""
+    i, j, k = wp.tid()
+    ct = int(cell[i, j, k])
+    if ct != CELL_GAS and ct != CELL_INTERFACE:
+        return
+    if int(bubble_tag[i, j, k]) > 0:
+        return
+    t0 = int(0)
+    conflict = int(0)
+    for s in range(6):
+        di = int(0)
+        dj = int(0)
+        dk = int(0)
+        if s == 0:
+            di = 1
+        elif s == 1:
+            di = -1
+        elif s == 2:
+            dj = 1
+        elif s == 3:
+            dj = -1
+        elif s == 4:
+            dk = 1
+        else:
+            dk = -1
+        ni = i + di
+        nj = j + dj
+        nk = k + dk
+        if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+            continue
+        nt = int(bubble_tag[ni, nj, nk])
+        if nt <= 0:
+            continue
+        if t0 == 0:
+            t0 = nt
+        elif nt != t0:
+            conflict = 1
+    if conflict != 0:
+        wp.atomic_max(merge_flag, 0, 1)
+    elif t0 > 0:
+        bubble_tag[i, j, k] = t0
+    # else: leave tag=0 → gas_rho uses rho_g0 until merge/split CCL (Home).
+
+
+@wp.kernel
+def bubble_volume_zero_kernel(
+    volume: wp.array(dtype=float),
+    touch_top: wp.array(dtype=wp.int32),
+    n: int,
+) -> None:
+    i = wp.tid()
+    if i < n:
+        volume[i] = 0.0
+        touch_top[i] = 0
+
+
+@wp.kernel
+def bubble_touch_top_zero_kernel(
+    touch_top: wp.array(dtype=wp.int32),
+    n: int,
+) -> None:
+    i = wp.tid()
+    if i < n:
+        touch_top[i] = 0
+
+
+@wp.kernel
+def bubble_touch_top_slab_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    bubble_tag: wp.array3d(dtype=wp.int32),
+    touch_top: wp.array(dtype=wp.int32),
+    max_bubbles: int,
+    nx: int,
+    ny: int,
+    nz: int,
+) -> None:
+    """Refresh atmosphere touch flags from the top slab only."""
+    i, j = wp.tid()
+    if i >= nx or j >= ny or nz < 1:
+        return
+    k = nz - 1
+    ct = int(cell[i, j, k])
+    if ct != CELL_GAS and ct != CELL_INTERFACE:
+        return
+    tag = int(bubble_tag[i, j, k])
+    if tag > 0 and tag <= max_bubbles:
+        wp.atomic_max(touch_top, tag - 1, 1)
+
+
+@wp.kernel
+def bubble_volume_from_delta_phi_kernel(
+    delta_phi: wp.array3d(dtype=float),
+    bubble_tag: wp.array3d(dtype=wp.int32),
+    bubble_tag_prev: wp.array3d(dtype=wp.int32),
+    volume: wp.array(dtype=float),
+    max_bubbles: int,
+) -> None:
+    """Home bubble_volume_update: volume[tag] -= Δφ."""
+    i, j, k = wp.tid()
+    dphi = delta_phi[i, j, k]
+    if dphi == 0.0:
+        return
+    tag = int(bubble_tag[i, j, k])
+    if tag <= 0:
+        tag = int(bubble_tag_prev[i, j, k])
+        bubble_tag_prev[i, j, k] = 0
+    if tag > 0 and tag <= max_bubbles:
+        wp.atomic_add(volume, tag - 1, -dphi)
+    delta_phi[i, j, k] = 0.0
+
+
+@wp.kernel
+def bubble_volume_accumulate_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    phi: wp.array3d(dtype=float),
+    bubble_tag: wp.array3d(dtype=wp.int32),
+    volume: wp.array(dtype=float),
+    touch_top: wp.array(dtype=wp.int32),
+    max_bubbles: int,
+    nz: int,
+) -> None:
+    """Full re-sum V = Σ(1-φ) per tag (CCL path / fallback)."""
+    i, j, k = wp.tid()
+    ct = int(cell[i, j, k])
+    if ct != CELL_GAS and ct != CELL_INTERFACE:
+        return
+    tag = int(bubble_tag[i, j, k])
+    if tag <= 0 or tag > max_bubbles:
+        return
+    gas = 1.0 - phi[i, j, k]
+    if gas < 0.0:
+        gas = 0.0
+    wp.atomic_add(volume, tag - 1, gas)
+    if k >= nz - 1:
+        wp.atomic_max(touch_top, tag - 1, 1)
+
+
+@wp.kernel
+def bubble_scatter_gas_rho_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    bubble_tag: wp.array3d(dtype=wp.int32),
+    bubble_rho: wp.array(dtype=float),
+    gas_rho: wp.array3d(dtype=float),
+    rho_g0: float,
+    max_bubbles: int,
+) -> None:
+    i, j, k = wp.tid()
+    ct = int(cell[i, j, k])
+    if ct != CELL_GAS and ct != CELL_INTERFACE:
+        gas_rho[i, j, k] = rho_g0
+        return
+    tag = int(bubble_tag[i, j, k])
+    if tag <= 0 or tag > max_bubbles:
+        gas_rho[i, j, k] = rho_g0
+        return
+    gas_rho[i, j, k] = bubble_rho[tag - 1]
+
+
+# ---- GPU CCL (6-connected union-find; Home tDCCL role) --------------------
+
+@wp.func
+def _ccl_find_readonly(parent: wp.array(dtype=wp.int32), i: int) -> int:
+    r = i
+    for _ in range(64):
+        p = parent[r]
+        if p == r or p < 0:
+            return r
+        r = p
+    return r
+
+
+@wp.kernel
+def bubble_ccl_init_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    parent: wp.array(dtype=wp.int32),
+    nx: int,
+    ny: int,
+    nz: int,
+) -> None:
+    i, j, k = wp.tid()
+    idx = (k * ny + j) * nx + i
+    ct = int(cell[i, j, k])
+    if ct == CELL_GAS or ct == CELL_INTERFACE:
+        parent[idx] = idx
+    else:
+        parent[idx] = -1
+
+
+@wp.kernel
+def bubble_ccl_hook_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    parent: wp.array(dtype=wp.int32),
+    changed: wp.array(dtype=wp.int32),
+    nx: int,
+    ny: int,
+    nz: int,
+) -> None:
+    """Union adjacent G/I cells (atomicMin on roots)."""
+    i, j, k = wp.tid()
+    ct = int(cell[i, j, k])
+    if ct != CELL_GAS and ct != CELL_INTERFACE:
+        return
+    idx = (k * ny + j) * nx + i
+    ra = _ccl_find_readonly(parent, idx)
+    for s in range(6):
+        di = int(0)
+        dj = int(0)
+        dk = int(0)
+        if s == 0:
+            di = 1
+        elif s == 1:
+            di = -1
+        elif s == 2:
+            dj = 1
+        elif s == 3:
+            dj = -1
+        elif s == 4:
+            dk = 1
+        else:
+            dk = -1
+        ni = i + di
+        nj = j + dj
+        nk = k + dk
+        if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+            continue
+        nct = int(cell[ni, nj, nk])
+        if nct != CELL_GAS and nct != CELL_INTERFACE:
+            continue
+        nidx = (nk * ny + nj) * nx + ni
+        rb = _ccl_find_readonly(parent, nidx)
+        if ra == rb:
+            continue
+        lo = ra
+        hi = rb
+        if lo > hi:
+            lo = rb
+            hi = ra
+        old = wp.atomic_min(parent, hi, lo)
+        if old != lo:
+            wp.atomic_max(changed, 0, 1)
+
+
+@wp.kernel
+def bubble_ccl_compress_kernel(
+    parent: wp.array(dtype=wp.int32),
+    changed: wp.array(dtype=wp.int32),
+    n: int,
+) -> None:
+    """Path-halving compression."""
+    i = wp.tid()
+    if i >= n:
+        return
+    p = parent[i]
+    if p < 0:
+        return
+    gp = parent[p]
+    if gp != p and gp >= 0:
+        parent[i] = gp
+        wp.atomic_max(changed, 0, 1)
+
+
+@wp.kernel
+def bubble_ccl_flatten_kernel(
+    parent: wp.array(dtype=wp.int32),
+    n: int,
+) -> None:
+    """Full flatten to root (after UF converged)."""
+    i = wp.tid()
+    if i >= n:
+        return
+    if parent[i] < 0:
+        return
+    r = _ccl_find_readonly(parent, i)
+    parent[i] = r
+
+
+@wp.kernel
+def bubble_ccl_enumerate_roots_kernel(
+    parent: wp.array(dtype=wp.int32),
+    root_dense: wp.array(dtype=wp.int32),
+    counter: wp.array(dtype=wp.int32),
+    n: int,
+    max_bubbles: int,
+) -> None:
+    i = wp.tid()
+    if i >= n:
+        return
+    root_dense[i] = 0
+    if parent[i] != i:
+        return
+    nid = wp.atomic_add(counter, 0, 1)
+    if nid < max_bubbles:
+        root_dense[i] = nid + 1
+
+
+@wp.kernel
+def bubble_ccl_write_tags_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    parent: wp.array(dtype=wp.int32),
+    root_dense: wp.array(dtype=wp.int32),
+    bubble_tag: wp.array3d(dtype=wp.int32),
+    nx: int,
+    ny: int,
+    nz: int,
+) -> None:
+    i, j, k = wp.tid()
+    ct = int(cell[i, j, k])
+    if ct != CELL_GAS and ct != CELL_INTERFACE:
+        bubble_tag[i, j, k] = 0
+        return
+    idx = (k * ny + j) * nx + i
+    r = parent[idx]
+    if r < 0:
+        bubble_tag[i, j, k] = 0
+        return
+    bubble_tag[i, j, k] = root_dense[r]
+
+
+@wp.kernel
+def bubble_reduce_label_kernel(
+    cell: wp.array3d(dtype=wp.int32),
+    phi: wp.array3d(dtype=float),
+    bubble_tag: wp.array3d(dtype=wp.int32),
+    bubble_tag_prev: wp.array3d(dtype=wp.int32),
+    old_rho: wp.array(dtype=float),
+    volume: wp.array(dtype=float),
+    init_volume: wp.array(dtype=float),
+    touch_top: wp.array(dtype=wp.int32),
+    max_bubbles: int,
+    old_count: int,
+    nz: int,
+) -> None:
+    """Home reduce_label_rho: V and V₀ from new labels + old ρ."""
+    i, j, k = wp.tid()
+    ct = int(cell[i, j, k])
+    if ct != CELL_GAS and ct != CELL_INTERFACE:
+        return
+    tag = int(bubble_tag[i, j, k])
+    if tag <= 0 or tag > max_bubbles:
+        return
+    gas = 1.0 - phi[i, j, k]
+    if gas < 0.0:
+        gas = 0.0
+    wp.atomic_add(volume, tag - 1, gas)
+    if k >= nz - 1:
+        wp.atomic_max(touch_top, tag - 1, 1)
+    pt = int(bubble_tag_prev[i, j, k])
+    w = float(1.0)
+    if pt > 0 and pt <= old_count:
+        w = old_rho[pt - 1]
+    wp.atomic_add(init_volume, tag - 1, gas * w)
+
+
+def _ensure_ccl_buffers(buf: "HomeVofGpuBuffers") -> None:
+    nx, ny, nz = buf.shape
+    n = nx * ny * nz
+    device = buf.device
+    parent = getattr(buf, "ccl_parent", None)
+    if parent is not None and int(parent.shape[0]) == n:
+        return
+    buf.ccl_parent = wp.zeros(n, dtype=wp.int32, device=device)
+    buf.ccl_root_dense = wp.zeros(n, dtype=wp.int32, device=device)
+    buf.ccl_changed = wp.zeros(1, dtype=wp.int32, device=device)
+    buf.ccl_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+
+def bubble_ccl_gpu(
+    buf: "HomeVofGpuBuffers",
+    *,
+    max_iters: int = 256,
+    check_every: int = 8,
+) -> int:
+    """6-connected GPU CCL on G∪I → ``bubble_tag`` (1..N). Returns N."""
+    _ensure_ccl_buffers(buf)
+    nx, ny, nz = buf.shape
+    n = nx * ny * nz
+    dim = (nx, ny, nz)
+    device = buf.device
+    parent = buf.ccl_parent
+    root_dense = buf.ccl_root_dense
+    changed = buf.ccl_changed
+    counter = buf.ccl_count
+
+    wp.launch(
+        bubble_ccl_init_kernel,
+        dim=dim,
+        inputs=[buf.cell_type, parent, nx, ny, nz],
+        device=device,
+    )
+    every = max(1, int(check_every))
+    for it in range(max_iters):
+        if it % every == 0:
+            changed.zero_()
+        wp.launch(
+            bubble_ccl_hook_kernel,
+            dim=dim,
+            inputs=[buf.cell_type, parent, changed, nx, ny, nz],
+            device=device,
+        )
+        wp.launch(
+            bubble_ccl_compress_kernel,
+            dim=n,
+            inputs=[parent, changed, n],
+            device=device,
+        )
+        if (it % every) == (every - 1):
+            wp.synchronize_device(device)
+            if int(changed.numpy()[0]) == 0:
+                break
+    wp.launch(
+        bubble_ccl_flatten_kernel,
+        dim=n,
+        inputs=[parent, n],
+        device=device,
+    )
+    for _ in range(8):
+        changed.zero_()
+        wp.launch(
+            bubble_ccl_compress_kernel,
+            dim=n,
+            inputs=[parent, changed, n],
+            device=device,
+        )
+        wp.launch(
+            bubble_ccl_flatten_kernel,
+            dim=n,
+            inputs=[parent, n],
+            device=device,
+        )
+        wp.synchronize_device(device)
+        if int(changed.numpy()[0]) == 0:
+            break
+
+    counter.zero_()
+    wp.launch(
+        bubble_ccl_enumerate_roots_kernel,
+        dim=n,
+        inputs=[parent, root_dense, counter, n, MAX_BUBBLES],
+        device=device,
+    )
+    wp.synchronize_device(device)
+    n_bub = int(counter.numpy()[0])
+    if n_bub > MAX_BUBBLES:
+        n_bub = MAX_BUBBLES
+    wp.launch(
+        bubble_ccl_write_tags_kernel,
+        dim=dim,
+        inputs=[buf.cell_type, parent, root_dense, buf.bubble_tag, nx, ny, nz],
+        device=device,
+    )
+    return n_bub
+
+
+def update_bubble_pressure_ccl_gpu(
+    buf: "HomeVofGpuBuffers",
+    *,
+    rho_g0: float = 1.0,
+    atm_volume: float = 1.0e6,
+) -> dict[str, float | int]:
+    """Full relabel on GPU + Home-style V₀ inherit (replace host CCL)."""
+    nx, ny, nz = buf.shape
+    dim = (nx, ny, nz)
+    device = buf.device
+    max_b = MAX_BUBBLES
+    old_count = int(getattr(buf, "_bubble_count", 0))
+
+    # Snapshot pre-CCL tags + ρ table (Home reduce_label_rho).
+    wp.copy(buf.bubble_tag_prev, buf.bubble_tag)
+    old_rho = buf.bubble_rho_gpu
+
+    n_bub = bubble_ccl_gpu(buf)
+
+    wp.launch(
+        bubble_volume_zero_kernel,
+        dim=max_b,
+        inputs=[buf.bubble_volume_gpu, buf.bubble_touch_top, max_b],
+        device=device,
+    )
+    buf.bubble_init_volume_gpu.zero_()
+    wp.launch(
+        bubble_reduce_label_kernel,
+        dim=dim,
+        inputs=[
+            buf.cell_type, buf.phi, buf.bubble_tag, buf.bubble_tag_prev,
+            old_rho,
+            buf.bubble_volume_gpu, buf.bubble_init_volume_gpu, buf.bubble_touch_top,
+            max_b, old_count, nz,
+        ],
+        device=device,
+    )
+    wp.synchronize_device(device)
+
+    if n_bub <= 0:
+        buf._bubble_count = 0
+        buf._bubble_volume = np.zeros(0, dtype=np.float64)
+        buf._bubble_init_volume = np.zeros(0, dtype=np.float64)
+        buf._bubble_rho = np.zeros(0, dtype=np.float64)
+        buf.gas_rho.fill_(float(rho_g0))
+        return {
+            "n_bubbles": 0,
+            "n_trapped": 0,
+            "rho_max_bubble": float(rho_g0),
+            "did_ccl": 1,
+        }
+
+    volumes = buf.bubble_volume_gpu.numpy()[:n_bub].astype(np.float64)
+    init_volumes = buf.bubble_init_volume_gpu.numpy()[:n_bub].astype(np.float64)
+    touch = buf.bubble_touch_top.numpy()[:n_bub]
+    rhos = np.full(n_bub, float(rho_g0), dtype=np.float64)
+    atm_cut = min(float(atm_volume), 0.25 * float(nx * ny * nz))
+
+    for bi in range(n_bub):
+        vol = float(volumes[bi])
+        if vol <= 1.0e-12:
+            rhos[bi] = float(rho_g0)
+            init_volumes[bi] = vol
+            continue
+        is_atm = bool(touch[bi]) or vol > atm_cut
+        if is_atm:
+            rhos[bi] = float(rho_g0)
+            init_volumes[bi] = vol
+        else:
+            v0 = float(init_volumes[bi])
+            if v0 <= 1.0e-12:
+                v0 = vol
+                init_volumes[bi] = v0
+            rhos[bi] = float(np.clip(v0 / vol, 0.2, 1.8))
+
+    rho_pad = np.full(max_b, float(rho_g0), dtype=np.float32)
+    rho_pad[:n_bub] = rhos.astype(np.float32)
+    init_pad = np.zeros(max_b, dtype=np.float32)
+    init_pad[:n_bub] = init_volumes.astype(np.float32)
+    vol_pad = np.zeros(max_b, dtype=np.float32)
+    vol_pad[:n_bub] = volumes.astype(np.float32)
+    buf.bubble_rho_gpu.assign(wp.array(rho_pad, dtype=float, device=device))
+    buf.bubble_init_volume_gpu.assign(wp.array(init_pad, dtype=float, device=device))
+    buf.bubble_volume_gpu.assign(wp.array(vol_pad, dtype=float, device=device))
+    buf._bubble_count = n_bub
+    buf._bubble_volume = volumes
+    buf._bubble_init_volume = init_volumes
+    buf._bubble_rho = rhos
+
+    wp.launch(
+        bubble_scatter_gas_rho_kernel,
+        dim=dim,
+        inputs=[
+            buf.cell_type, buf.bubble_tag, buf.bubble_rho_gpu, buf.gas_rho,
+            float(rho_g0), max_b,
+        ],
+        device=device,
+    )
+
+    rho_max_b = float(rhos.max()) if n_bub > 0 else float(rho_g0)
+    n_trapped = int(
+        np.sum((touch == 0) & (volumes <= atm_cut) & (volumes > 1.0e-6))
+    )
+    return {
+        "n_bubbles": n_bub,
+        "n_trapped": n_trapped,
+        "rho_max_bubble": rho_max_b,
+        "did_ccl": 1,
+    }
+
+
+def _ccl_label_gas_interface(
+    ctype: np.ndarray,
+    max_bubbles: int,
+) -> tuple[np.ndarray, int]:
+    """6-connected labels on G∪I. Prefer scipy; else host BFS (fallback)."""
+    gas_like = (ctype == CELL_GAS) | (ctype == CELL_INTERFACE)
+    try:
+        from scipy import ndimage
+
+        struct = ndimage.generate_binary_structure(3, 1)
+        labels, n_bub = ndimage.label(gas_like.astype(np.uint8), structure=struct)
+        labels = labels.astype(np.int32)
+        if n_bub > max_bubbles:
+            labels[labels > max_bubbles] = 0
+            n_bub = max_bubbles
+        return labels, int(n_bub)
+    except Exception:
+        pass
+
+    nx, ny, nz = ctype.shape
+    labels = np.zeros((nx, ny, nz), dtype=np.int32)
+    neighbors = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+    n_bub = 0
+    gas_idx = np.argwhere(gas_like)
+    for si, sj, sk in gas_idx:
+        si, sj, sk = int(si), int(sj), int(sk)
+        if labels[si, sj, sk] != 0:
+            continue
+        if n_bub >= max_bubbles:
+            break
+        n_bub += 1
+        stack = [(si, sj, sk)]
+        labels[si, sj, sk] = n_bub
+        while stack:
+            i, j, k = stack.pop()
+            for di, dj, dk in neighbors:
+                ni, nj, nk = i + di, j + dj, k + dk
+                if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+                    continue
+                if labels[ni, nj, nk] != 0 or not gas_like[ni, nj, nk]:
+                    continue
+                labels[ni, nj, nk] = n_bub
+                stack.append((ni, nj, nk))
+    return labels, int(n_bub)
+
+
+def update_bubble_pressure_host(
+    buf: "HomeVofGpuBuffers",
+    *,
+    rho_g0: float = 1.0,
+    atm_volume: float = 1.0e6,
+    max_bubbles: int = MAX_BUBBLES,
+) -> dict[str, float | int]:
+    """Full CCL relabel (Home handle_merge_split). Prefer rare use only."""
+    ctype = buf.cell_type.numpy()
+    phi = buf.phi.numpy()
+    prev = buf.bubble_tag_prev.numpy()
+    nx, ny, nz = buf.shape
+
+    labels, n_bub = _ccl_label_gas_interface(ctype, max_bubbles)
+    volumes = np.zeros(n_bub, dtype=np.float64)
+    init_volumes = np.zeros(n_bub, dtype=np.float64)
+    rhos = np.zeros(n_bub, dtype=np.float64)
+    touches_top = np.zeros(n_bub, dtype=bool)
+
+    old_init = getattr(buf, "_bubble_init_volume", None)
+    old_count = int(getattr(buf, "_bubble_count", 0))
+    atm_cut = min(float(atm_volume), 0.25 * float(nx * ny * nz))
+
+    if n_bub > 0:
+        gas_frac = np.maximum(0.0, 1.0 - phi.astype(np.float64))
+        for bi in range(n_bub):
+            mask = labels == (bi + 1)
+            vol = float(gas_frac[mask].sum())
+            volumes[bi] = vol
+            touches_top[bi] = bool(np.any(mask[:, :, nz - 1])) if nz > 0 else False
+            v0 = vol
+            if old_init is not None and old_count > 0:
+                pts = prev[mask].astype(np.int64).ravel()
+                gfs = gas_frac[mask].ravel()
+                valid = pts > 0
+                if np.any(valid):
+                    pts_v = np.clip(pts[valid], 1, old_count)
+                    weights = np.bincount(
+                        pts_v, weights=gfs[valid], minlength=old_count + 1
+                    )
+                    best = int(np.argmax(weights[1:])) + 1
+                    v0 = float(old_init[best - 1])
+                    if v0 <= 1.0e-12:
+                        v0 = vol
+            init_volumes[bi] = v0
+
+        for bi in range(n_bub):
+            vol = float(volumes[bi])
+            if vol <= 1.0e-12:
+                rhos[bi] = float(rho_g0)
+                init_volumes[bi] = vol
+                continue
+            is_atm = bool(touches_top[bi]) or vol > atm_cut
+            if is_atm:
+                rhos[bi] = float(rho_g0)
+                init_volumes[bi] = vol
+            else:
+                rhos[bi] = float(np.clip(float(init_volumes[bi]) / vol, 0.2, 1.8))
+
+    gas_rho = np.full((nx, ny, nz), float(rho_g0), dtype=np.float32)
+    if n_bub > 0:
+        for bi in range(n_bub):
+            gas_rho[labels == (bi + 1)] = float(rhos[bi])
+
+    device = buf.device
+    buf.bubble_tag.assign(wp.array(labels, dtype=wp.int32, device=device))
+    buf.bubble_tag_prev.assign(wp.array(labels.copy(), dtype=wp.int32, device=device))
+    buf.gas_rho.assign(wp.array(gas_rho, dtype=float, device=device))
+
+    # Pad GPU tables to MAX_BUBBLES for incremental path.
+    vol_pad = np.zeros(max_bubbles, dtype=np.float32)
+    init_pad = np.zeros(max_bubbles, dtype=np.float32)
+    rho_pad = np.full(max_bubbles, float(rho_g0), dtype=np.float32)
+    if n_bub > 0:
+        vol_pad[:n_bub] = volumes.astype(np.float32)
+        init_pad[:n_bub] = init_volumes.astype(np.float32)
+        rho_pad[:n_bub] = rhos.astype(np.float32)
+    buf.bubble_volume_gpu.assign(wp.array(vol_pad, dtype=float, device=device))
+    buf.bubble_init_volume_gpu.assign(wp.array(init_pad, dtype=float, device=device))
+    buf.bubble_rho_gpu.assign(wp.array(rho_pad, dtype=float, device=device))
+
+    buf._bubble_count = n_bub
+    buf._bubble_volume = volumes
+    buf._bubble_init_volume = init_volumes
+    buf._bubble_rho = rhos if n_bub > 0 else np.zeros(0, dtype=np.float64)
+
+    rho_max_b = float(rhos.max()) if n_bub > 0 else float(rho_g0)
+    n_trapped = int(
+        np.sum((~touches_top) & (volumes <= atm_cut) & (volumes > 1.0e-6))
+    ) if n_bub > 0 else 0
+    return {
+        "n_bubbles": n_bub,
+        "n_trapped": n_trapped,
+        "rho_max_bubble": rho_max_b,
+        "did_ccl": 1,
+    }
+
+
+def update_bubble_pressure(
+    buf: "HomeVofGpuBuffers",
+    *,
+    rho_g0: float = 1.0,
+    atm_volume: float = 1.0e6,
+    force_ccl: bool = False,
+    step_i: int = 0,
+    split_ccl_every: int = 1,
+) -> dict[str, float | int]:
+    """Home ``update_bubble``: tag propagate + V/ρ; GPU CCL on merge/split/init.
+
+    Everyday path: Δφ atomics into bubble.volume (Home). Topology changes run
+    Warp union-find CCL then full label reduce.
+    """
+    del step_i, split_ccl_every
+    nx, ny, nz = buf.shape
+    dim = (nx, ny, nz)
+    device = buf.device
+    max_b = MAX_BUBBLES
+
+    split_flag = int(buf.bubble_split_flag.numpy()[0])
+    n_old = int(getattr(buf, "_bubble_count", 0))
+
+    # Clear liquid tags, then inherit / detect merge (Home get_tag + recheck).
+    wp.launch(
+        bubble_clear_liquid_tags_kernel,
+        dim=dim,
+        inputs=[buf.cell_type, buf.bubble_tag, buf.bubble_tag_prev],
+        device=device,
+    )
+    buf.bubble_merge_flag.zero_()
+    wp.launch(
+        bubble_propagate_tags_kernel,
+        dim=dim,
+        inputs=[
+            buf.cell_type, buf.bubble_tag,
+            buf.bubble_merge_flag,
+            nx, ny, nz,
+        ],
+        device=device,
+    )
+    wp.synchronize_device(device)
+
+    merge_flag = int(buf.bubble_merge_flag.numpy()[0])
+    do_ccl = bool(force_ccl) or n_old <= 0 or merge_flag > 0 or split_flag > 0
+
+    # Home order: apply Δφ volume update first, then CCL on topology change.
+    if n_old > 0:
+        wp.launch(
+            bubble_volume_from_delta_phi_kernel,
+            dim=dim,
+            inputs=[
+                buf.delta_phi, buf.bubble_tag, buf.bubble_tag_prev,
+                buf.bubble_volume_gpu, max_b,
+            ],
+            device=device,
+        )
+    else:
+        buf.delta_phi.zero_()
+
+    if do_ccl:
+        stats = update_bubble_pressure_ccl_gpu(
+            buf, rho_g0=rho_g0, atm_volume=atm_volume,
+        )
+        buf.delta_phi.zero_()
+        buf.bubble_merge_flag.zero_()
+        buf.bubble_split_flag.zero_()
+        return stats
+
+    # Incremental: top-touch refresh + ρ = V₀/V (volumes already += -Δφ).
+    n_bub = n_old
+    wp.launch(
+        bubble_touch_top_zero_kernel,
+        dim=max_b,
+        inputs=[buf.bubble_touch_top, max_b],
+        device=device,
+    )
+    wp.launch(
+        bubble_touch_top_slab_kernel,
+        dim=(nx, ny),
+        inputs=[
+            buf.cell_type, buf.bubble_tag, buf.bubble_touch_top,
+            max_b, nx, ny, nz,
+        ],
+        device=device,
+    )
+    wp.synchronize_device(device)
+
+    volumes = buf.bubble_volume_gpu.numpy()[:n_bub].astype(np.float64)
+    touch = buf.bubble_touch_top.numpy()[:n_bub]
+    init_volumes = np.array(buf._bubble_init_volume, dtype=np.float64, copy=True)
+    if init_volumes.shape[0] < n_bub:
+        init_volumes = np.resize(init_volumes, n_bub)
+    rhos = np.full(n_bub, float(rho_g0), dtype=np.float64)
+    atm_cut = min(float(atm_volume), 0.25 * float(nx * ny * nz))
+
+    for bi in range(n_bub):
+        vol = float(volumes[bi])
+        if vol <= 1.0e-12:
+            rhos[bi] = float(rho_g0)
+            init_volumes[bi] = vol
+            continue
+        is_atm = bool(touch[bi]) or vol > atm_cut
+        if is_atm:
+            rhos[bi] = float(rho_g0)
+            init_volumes[bi] = vol
+        else:
+            v0 = float(init_volumes[bi])
+            if v0 <= 1.0e-12:
+                v0 = vol
+                init_volumes[bi] = v0
+            rhos[bi] = float(np.clip(v0 / vol, 0.2, 1.8))
+
+    rho_pad = np.full(max_b, float(rho_g0), dtype=np.float32)
+    rho_pad[:n_bub] = rhos.astype(np.float32)
+    init_pad = np.zeros(max_b, dtype=np.float32)
+    init_pad[:n_bub] = init_volumes.astype(np.float32)
+    vol_pad = np.zeros(max_b, dtype=np.float32)
+    vol_pad[:n_bub] = volumes.astype(np.float32)
+    buf.bubble_rho_gpu.assign(wp.array(rho_pad, dtype=float, device=device))
+    buf.bubble_init_volume_gpu.assign(wp.array(init_pad, dtype=float, device=device))
+    buf.bubble_volume_gpu.assign(wp.array(vol_pad, dtype=float, device=device))
+    buf._bubble_volume = volumes
+    buf._bubble_init_volume = init_volumes
+    buf._bubble_rho = rhos
+
+    wp.launch(
+        bubble_scatter_gas_rho_kernel,
+        dim=dim,
+        inputs=[
+            buf.cell_type, buf.bubble_tag, buf.bubble_rho_gpu, buf.gas_rho,
+            float(rho_g0), max_b,
+        ],
+        device=device,
+    )
+    buf.bubble_merge_flag.zero_()
+    buf.bubble_split_flag.zero_()
+
+    rho_max_b = float(rhos.max()) if n_bub > 0 else float(rho_g0)
+    n_trapped = int(
+        np.sum((touch == 0) & (volumes <= atm_cut) & (volumes > 1.0e-6))
+    )
+    return {
+        "n_bubbles": n_bub,
+        "n_trapped": n_trapped,
+        "rho_max_bubble": rho_max_b,
+        "did_ccl": 0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Device buffers + driver
 # ---------------------------------------------------------------------------
@@ -1533,6 +2578,18 @@ class HomeVofGpuBuffers:
     kappa: wp.array
     kappa_tmp: wp.array
     solid_phi: wp.array
+    bubble_tag: wp.array
+    bubble_tag_prev: wp.array
+    gas_rho: wp.array
+    delta_phi: wp.array
+    disjoin_force: wp.array
+    bubble_volume_gpu: wp.array
+    bubble_init_volume_gpu: wp.array
+    bubble_rho_gpu: wp.array
+    bubble_touch_top: wp.array
+    bubble_merge_flag: wp.array
+    bubble_split_flag: wp.array
+    bubble_need_ccl: wp.array
     shape: tuple
     device: str
     num_dirs: int
@@ -1584,16 +2641,20 @@ def alloc_home_vof_gpu(
     def zf():
         return wp.zeros((nx, ny, nz), dtype=float, device=device)
 
+    def zi():
+        return wp.zeros((nx, ny, nz), dtype=wp.int32, device=device)
+
     fk, fux, fuy, fuz = _face_arrays_from_bc(bc, device)
-    return HomeVofGpuBuffers(
+    gas_rho = zf()
+    gas_rho.fill_(1.0)
+    mb = MAX_BUBBLES
+    buf = HomeVofGpuBuffers(
         rho=zf(), ux=zf(), uy=zf(), uz=zf(),
         sxx=zf(), syy=zf(), szz=zf(), sxy=zf(), sxz=zf(), syz=zf(),
         rho_b=zf(), ux_b=zf(), uy_b=zf(), uz_b=zf(),
         sxx_b=zf(), syy_b=zf(), szz_b=zf(), sxy_b=zf(), sxz_b=zf(), syz_b=zf(),
         mass=zf(), mass_b=zf(), massex=zf(), phi=zf(),
-        cell_type=wp.zeros((nx, ny, nz), dtype=wp.int32, device=device),
-        cell_tmp=wp.zeros((nx, ny, nz), dtype=wp.int32, device=device),
-        cell_tmp2=wp.zeros((nx, ny, nz), dtype=wp.int32, device=device),
+        cell_type=zi(), cell_tmp=zi(), cell_tmp2=zi(),
         cx=wp.array(np.asarray(spec.cx, dtype=np.int32), dtype=wp.int32, device=device),
         cy=wp.array(np.asarray(spec.cy, dtype=np.int32), dtype=wp.int32, device=device),
         cz=wp.array(np.asarray(spec.cz, dtype=np.int32), dtype=wp.int32, device=device),
@@ -1601,8 +2662,30 @@ def alloc_home_vof_gpu(
         opp=wp.array(np.asarray(spec.opposite, dtype=np.int32), dtype=wp.int32, device=device),
         face_kind=fk, face_ux=fux, face_uy=fuy, face_uz=fuz,
         kappa=zf(), kappa_tmp=zf(), solid_phi=zf(),
+        bubble_tag=zi(), bubble_tag_prev=zi(), gas_rho=gas_rho,
+        delta_phi=zf(), disjoin_force=zf(),
+        bubble_volume_gpu=wp.zeros(mb, dtype=float, device=device),
+        bubble_init_volume_gpu=wp.zeros(mb, dtype=float, device=device),
+        bubble_rho_gpu=wp.zeros(mb, dtype=float, device=device),
+        bubble_touch_top=wp.zeros(mb, dtype=wp.int32, device=device),
+        bubble_merge_flag=wp.zeros(1, dtype=wp.int32, device=device),
+        bubble_split_flag=wp.zeros(1, dtype=wp.int32, device=device),
+        bubble_need_ccl=wp.zeros(1, dtype=wp.int32, device=device),
         shape=shape, device=device, num_dirs=int(spec.num_dirs),
     )
+    buf.bubble_rho_gpu.fill_(1.0)
+    buf._bubble_count = 0
+    buf._bubble_volume = np.zeros(0, dtype=np.float64)
+    buf._bubble_init_volume = np.zeros(0, dtype=np.float64)
+    buf._bubble_rho = np.zeros(0, dtype=np.float64)
+    buf._bubble_step = 0
+    buf._last_bubble_stats = {
+        "n_bubbles": 0,
+        "n_trapped": 0,
+        "rho_max_bubble": 1.0,
+        "did_ccl": 0,
+    }
+    return buf
 
 
 def upload_home_vof_state(buf: HomeVofGpuBuffers, state: HomeVofState) -> None:
@@ -1666,14 +2749,44 @@ def step_home_vof_gpu(
     home_fill_empty: bool = False,
     home_wall_eq: bool = False,
     seal_fg: bool = True,
+    bubble_pressure: bool = False,
+    bubble_atm_volume: float = 1.0e6,
+    bubble_update_every: int = 1,
+    bubble_disjoint: bool = False,
+    bubble_disjoint_factor: float = 0.032,
+    bubble_small_sigma: bool = False,
+    bubble_small_vol: float = 64.0,
+    bubble_small_six_sigma: float = 2.0e-4,
+    bubble_eddy: bool = False,
+    bubble_eddy_atm_vol: float = 5.0e6,
 ) -> None:
-    """One HOME-FREE VOF step (fused + surface_1/2/3 + optional film)."""
+    """One HOME-FREE VOF step (fused + surface_1/2/3 + optional film / bubbles)."""
     del eps_phi, rho_liquid
     from wanphys._src.fluid.fluid_grid.lbm.phases import vof_plic
 
     nx, ny, nz = buf.shape
     dim = (nx, ny, nz)
     g = float(gamma)
+
+    if not bubble_pressure:
+        buf.gas_rho.fill_(float(rho_g0))
+
+    use_disjoint = bool(bubble_disjoint) and bool(bubble_pressure)
+    use_small = bool(bubble_small_sigma) and bool(bubble_pressure)
+    use_eddy = bool(bubble_eddy) and bool(bubble_pressure)
+
+    if use_disjoint:
+        wp.launch(
+            bubble_calculate_disjoint_kernel,
+            dim=dim,
+            inputs=[
+                buf.cell_type, buf.phi, buf.bubble_tag, buf.disjoin_force,
+                nx, ny, nz,
+            ],
+            device=buf.device,
+        )
+    else:
+        buf.disjoin_force.zero_()
 
     if g != 0.0:
         wp.launch(
@@ -1720,9 +2833,18 @@ def step_home_vof_gpu(
             buf.mass_b, buf.cell_tmp,
             buf.cx, buf.cy, buf.cz, buf.w, buf.opp,
             buf.face_kind, buf.face_ux, buf.face_uy, buf.face_uz,
-            buf.kappa, g,
+            buf.kappa, buf.gas_rho,
+            buf.disjoin_force, buf.bubble_tag, buf.bubble_volume_gpu,
+            g,
+            1 if use_disjoint else 0,
+            float(bubble_disjoint_factor),
+            1 if use_small else 0,
+            float(bubble_small_vol),
+            float(bubble_small_six_sigma),
+            1 if use_eddy else 0,
+            float(bubble_eddy_atm_vol),
+            MAX_BUBBLES,
             buf.num_dirs, float(tau), float(fx), float(fy), float(fz),
-            float(rho_g0),
             1 if home_fill_empty else 0,
             1 if home_wall_eq else 0,
             nx, ny, nz,
@@ -1751,12 +2873,19 @@ def step_home_vof_gpu(
         device=buf.device,
     )
     buf.massex.zero_()
+    # Split flag cleared each step; surface3 may set it (Home report_split).
+    if bubble_pressure:
+        buf.bubble_split_flag.zero_()
     wp.launch(
         home_vof_surface3_kernel,
         dim=dim,
         inputs=[
             buf.cell_tmp2, buf.cell_type,
             buf.rho, buf.mass, buf.massex, buf.phi,
+            buf.delta_phi,
+            1 if bubble_pressure else 0,
+            buf.bubble_split_flag,
+            1 if bubble_pressure else 0,
             nx, ny, nz,
         ],
         device=buf.device,
@@ -1765,7 +2894,11 @@ def step_home_vof_gpu(
         wp.launch(
             home_vof_seal_fg_kernel,
             dim=dim,
-            inputs=[buf.cell_type, buf.rho, buf.mass, buf.phi, nx, ny, nz],
+            inputs=[
+                buf.cell_type, buf.rho, buf.mass, buf.phi,
+                buf.delta_phi, 1 if bubble_pressure else 0,
+                nx, ny, nz,
+            ],
             device=buf.device,
         )
     # Optional rim-film drain via massex (surface3 inventory path) + salvage.
@@ -1788,3 +2921,16 @@ def step_home_vof_gpu(
             inputs=[buf.cell_type, buf.rho, buf.mass, buf.phi],
             device=buf.device,
         )
+
+    if bubble_pressure:
+        every = max(1, int(bubble_update_every))
+        step_i = int(getattr(buf, "_bubble_step", 0))
+        if step_i % every == 0:
+            stats = update_bubble_pressure(
+                buf,
+                rho_g0=float(rho_g0),
+                atm_volume=float(bubble_atm_volume),
+                step_i=step_i,
+            )
+            buf._last_bubble_stats = stats
+        buf._bubble_step = step_i + 1

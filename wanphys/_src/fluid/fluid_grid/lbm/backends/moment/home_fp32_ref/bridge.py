@@ -213,6 +213,16 @@ class HomeFp32VofBridge:
             home_fill_empty=bool(self.model.vof_home_fill_empty),
             home_wall_eq=bool(self.model.vof_home_wall_eq),
             seal_fg=bool(self.model.vof_seal_fg),
+            bubble_pressure=bool(self.model.vof_bubble_pressure),
+            bubble_atm_volume=float(self.model.vof_bubble_atm_volume),
+            bubble_update_every=int(self.model.vof_bubble_update_every),
+            bubble_disjoint=bool(self.model.vof_bubble_disjoint),
+            bubble_disjoint_factor=float(self.model.vof_bubble_disjoint_factor),
+            bubble_small_sigma=bool(self.model.vof_bubble_small_sigma),
+            bubble_small_vol=float(self.model.vof_bubble_small_vol),
+            bubble_small_six_sigma=float(self.model.vof_bubble_small_six_sigma),
+            bubble_eddy=bool(self.model.vof_bubble_eddy),
+            bubble_eddy_atm_vol=float(self.model.vof_bubble_eddy_atm_vol),
         )
         self.sync_to_state(state_out)
         state_out.f.zero_()
@@ -262,6 +272,12 @@ class HomeFp32VofBridge:
         if state_out is not None:
             self.sync_to_state(state_out)
         return float(moved), int(n_orphans)
+
+    def last_bubble_stats(self) -> dict[str, float | int]:
+        """Diagnostics from the last host bubble CCL update (empty if disabled)."""
+        if self._gpu is None:
+            return {"n_bubbles": 0, "n_trapped": 0, "rho_max_bubble": 1.0}
+        return dict(getattr(self._gpu, "_last_bubble_stats", {}))
 
     def copy_kappa_to(self, kappa_dst: wp.array) -> None:
         """Copy PLIC κ onto solver visual/metrics buffer (may be zero if γ=0)."""

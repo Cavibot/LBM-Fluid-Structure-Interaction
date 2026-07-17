@@ -133,6 +133,26 @@ class LbmModel(FluidGridModelBase):
     """Orphan components with ≤ this many wet cells are folded into the pool."""
     vof_orphan_height_margin: int = 3
     """Also fold components whose min_z exceeds main-pool median + this margin."""
+    vof_bubble_pressure: bool = False
+    """§4.2 trapped-gas pressure: host CCL + ideal-gas ρ=V₀/V on G∪I."""
+    vof_bubble_atm_volume: float = 1.0e6
+    """Components larger than this (or touching top) are treated as atmosphere."""
+    vof_bubble_update_every: int = 1
+    """Run host bubble CCL every N lattice steps (FS still uses last gas_rho)."""
+    vof_bubble_disjoint: bool = False
+    """Home disjoining pressure between approaching different-tag interfaces."""
+    vof_bubble_disjoint_factor: float = 0.032
+    """Scale for disjoint force subtracted from FS gas density."""
+    vof_bubble_small_sigma: bool = False
+    """Weaken Laplace σ on small bubbles (Home volume < 64 → 6σ = 2e-4)."""
+    vof_bubble_small_vol: float = 64.0
+    """Volume threshold (lattice units) for small-bubble σ."""
+    vof_bubble_small_six_sigma: float = 2.0e-4
+    """Replacement 6σ for small bubbles (Home ``def_6_sigma_k``)."""
+    vof_bubble_eddy: bool = False
+    """Near-bubble eddy viscosity (Home stress-invariant Ω boost)."""
+    vof_bubble_eddy_atm_vol: float = 5.0e6
+    """Ignore atmosphere-sized bubbles for eddy trigger (Home < 5e6)."""
 
     # ---- Solver backend -------------------------------------------------
     lbm_backend: str = "dist"
