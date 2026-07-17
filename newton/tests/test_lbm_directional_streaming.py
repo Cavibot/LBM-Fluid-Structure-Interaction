@@ -212,7 +212,7 @@ class TestLbmDirectionalStreaming(unittest.TestCase):
             fluid_grid_res=(self.nx, self.ny, self.nz),
             device=self.device,
             encoding="fullf",
-            collision="home_nocm",
+            collision="nocm_mrt",
             bc_periodic=(True, True, True),
         )
         state = FullFLbmState(model)
@@ -276,7 +276,7 @@ class TestLbmDirectionalStreaming(unittest.TestCase):
             fluid_grid_res=(self.nx, self.ny, self.nz),
             device=self.device,
             encoding="home",
-            collision="home_nocm",
+            collision="nocm_mrt",
             bc_periodic=(True, True, True),
         )
         state = HomeLbmState(model)
@@ -398,9 +398,9 @@ class TestLbmShearWaveDecay(unittest.TestCase):
         tau = 0.8
         steps = 30
         for encoding_name, collision in (
-            ("home", "home_nocm"),
+            ("home", "nocm_mrt"),
             ("home", "srt"),
-            ("fullf", "home_nocm"),
+            ("fullf", "nocm_mrt"),
         ):
             with self.subTest(encoding=encoding_name, collision=collision):
                 model = LbmModel(

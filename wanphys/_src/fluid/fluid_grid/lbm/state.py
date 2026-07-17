@@ -47,6 +47,7 @@ class LbmStateBase(DomainState):
         self.force_x = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
         self.force_y = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
         self.force_z = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
+        # Unified physical force density F = rho*g + F_sc + future providers.
 
     def clear_forces(self) -> None:
         """LBM has no accumulated force buffer in the DomainState sense."""

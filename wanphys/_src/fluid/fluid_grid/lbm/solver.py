@@ -6,13 +6,18 @@
 from __future__ import annotations
 
 from typing import Any
+import warnings
 
+import numpy as np
 import warp as wp
 
 from ..base import FluidGridSolverBase
-from . import collisions, encoding, kernels, streaming
+from . import collisions, encoding, forcing, kernels, moments, streaming
+from .boundaries import normalize_boundary_type, resolve_boundary_faces
+from .constants import BC_OUTFLOW
+from .contracts import CollisionContext, CollisionSpace, ForceModel, collision_contract
 from .model import LbmModel
-from .state import FullFLbmState, HomeLbmState, LbmState, LbmStateBase
+from .state import FullFLbmState, HomeLbmState, LbmStateBase
 
 
 class LbmSolver(FluidGridSolverBase):
@@ -20,7 +25,7 @@ class LbmSolver(FluidGridSolverBase):
 
     The solver owns temporary arrays for macroscopic moments that are
     reused across steps.  Distribution functions and visualisation fields
-    live on :class:`LbmState`.
+    live on :class:`LbmStateBase`.
 
     Parameters
     ----------
@@ -48,76 +53,112 @@ class LbmSolver(FluidGridSolverBase):
         self._bc_vel_x = wp.zeros(6, dtype=float, device=self.device)
         self._bc_vel_y = wp.zeros(6, dtype=float, device=self.device)
         self._bc_vel_z = wp.zeros(6, dtype=float, device=self.device)
+        self._bc_density = wp.zeros(6, dtype=float, device=self.device)
+        self._bc_convective_speed = wp.zeros(6, dtype=float, device=self.device)
         self._sync_bc_from_model()
+        self._boundary_resolution = resolve_boundary_faces(
+            tuple(int(value) for value in model.bc_types),
+            (self.nx, self.ny, self.nz),
+        )
+        if self._boundary_resolution.conflict is not None:
+            warnings.warn(
+                self._boundary_resolution.conflict.warning_message,
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        self._boundary_history = None
+        if any(value == BC_OUTFLOW for value in model.bc_types):
+            self._boundary_history = wp.zeros(
+                19 * self._stride, dtype=float, device=self.device
+            )
+        self._boundary_history_ready = False
 
         # ---- Solver-owned temporary macroscopic fields --------------------
-        self._rho: wp.array3d = wp.zeros(
-            (self.nx, self.ny, self.nz), dtype=float, device=self.device
+        shape = (self.nx, self.ny, self.nz)
+        self._moments: tuple[wp.array3d, ...] = tuple(
+            wp.zeros(shape, dtype=float, device=self.device) for _ in range(10)
         )
+        self._rho, self._jx, self._jy, self._jz = self._moments[:4]
         self._ux: wp.array3d = wp.zeros(
-            (self.nx, self.ny, self.nz), dtype=float, device=self.device
+            shape, dtype=float, device=self.device
         )
         self._uy: wp.array3d = wp.zeros(
-            (self.nx, self.ny, self.nz), dtype=float, device=self.device
+            shape, dtype=float, device=self.device
         )
         self._uz: wp.array3d = wp.zeros(
-            (self.nx, self.ny, self.nz), dtype=float, device=self.device
+            shape, dtype=float, device=self.device
         )
 
         # ---- Solver-owned temporary force arrays (Shan-Chen interaction) ---
         self._fx: wp.array3d = wp.zeros(
-            (self.nx, self.ny, self.nz), dtype=float, device=self.device
+            shape, dtype=float, device=self.device
         )
         self._fy: wp.array3d = wp.zeros(
-            (self.nx, self.ny, self.nz), dtype=float, device=self.device
+            shape, dtype=float, device=self.device
         )
         self._fz: wp.array3d = wp.zeros(
-            (self.nx, self.ny, self.nz), dtype=float, device=self.device
+            shape, dtype=float, device=self.device
         )
+        self._sc_fx = wp.zeros(shape, dtype=float, device=self.device)
+        self._sc_fy = wp.zeros(shape, dtype=float, device=self.device)
+        self._sc_fz = wp.zeros(shape, dtype=float, device=self.device)
+        self._force_provider = forcing.ForceProvider(ForceModel(model.force_model))
 
         self._collision_name = model.resolved_collision
-        backend_types = {
-            "srt": collisions.SrtCollision,
-            "trt": collisions.TrtCollision,
-            "home_nocm": collisions.HomeNocmMrtCollision,
-        }
-        self._collision_backend = backend_types[self._collision_name]()
-        self._collision_kind = self._collision_backend.input_kind
+        self._collision_contract = collision_contract(model.encoding, self._collision_name)
+        self._collision_space = self._collision_contract.space
+        if self._collision_name == "srt":
+            self._collision_backend = collisions.SrtCollision()
+        elif self._collision_name == "trt":
+            self._collision_backend = collisions.TrtCollision()
+        elif self._collision_name == "raw_mrt":
+            self._collision_backend = collisions.RawMrtCollision()
+        elif model.encoding == "home":
+            self._collision_backend = collisions.HomeNocmMrtCollision()
+        else:
+            self._collision_backend = collisions.FullNocmMrtCollision()
 
-        # ---- Explicit-population scratch ---------------------------------
-        self._f_star = None
+        # Boundary completion is population-based for every collision path.
+        self._f_star = wp.zeros(19 * self._stride, dtype=float, device=self.device)
+        self._collision_context = CollisionContext(
+            populations=self._f_star,
+            moments=self._moments,
+            rho=self._rho,
+            momentum=(self._jx, self._jy, self._jz),
+            velocity=(self._ux, self._uy, self._uz),
+            force=(self._fx, self._fy, self._fz),
+        )
         self._f_post = None
-        if self._collision_kind == "population":
-            self._f_star = wp.zeros(19 * self._stride, dtype=float, device=self.device)
-            if model.encoding == "home":
-                self._f_post = wp.zeros(19 * self._stride, dtype=float, device=self.device)
+        if model.encoding == "home" and self._collision_name in ("srt", "trt"):
+            self._f_post = wp.zeros(19 * self._stride, dtype=float, device=self.device)
 
-        # ---- Encoded-moment scratch (rho, rho*u, rho*S) -------------------
-        shape = (self.nx, self.ny, self.nz)
-        self._moments: tuple[wp.array3d, ...] = ()
-        self._post_moments: tuple[wp.array3d, ...] = ()
-        if self._collision_kind == "moments":
-            self._moments = tuple(
-                wp.zeros(shape, dtype=float, device=self.device) for _ in range(10)
+        self._raw_moments = None
+        self._raw_source_moments = None
+        self._post_raw_moments = None
+        self._post_central_moments = None
+        self._inverse_moment_transform = None
+        self._mrt_rates = None
+        if self._collision_space in (CollisionSpace.RAW_MOMENT, CollisionSpace.NOCM_MOMENT):
+            self._raw_moments = wp.zeros(19 * self._stride, dtype=float, device=self.device)
+            self._raw_source_moments = wp.zeros(
+                19 * self._stride, dtype=float, device=self.device
             )
-            if model.encoding == "fullf":
-                self._post_moments = tuple(
-                    wp.zeros(shape, dtype=float, device=self.device) for _ in range(10)
+            self._post_raw_moments = wp.zeros(19 * self._stride, dtype=float, device=self.device)
+            if self._collision_space is CollisionSpace.NOCM_MOMENT:
+                self._post_central_moments = wp.zeros(
+                    19 * self._stride, dtype=float, device=self.device
                 )
-        if self._collision_name == "home_nocm" and any(
-            g != 0.0 for g in (model.gravity_x, model.gravity_y, model.gravity_z)
-        ):
-            raise NotImplementedError("HOME-NOCM forcing is not implemented in this iteration")
-        if model.encoding == "home" and any(
-            g != 0.0 for g in (model.gravity_x, model.gravity_y, model.gravity_z)
-        ):
-            raise NotImplementedError("HOME encoding with prescribed force is not implemented")
-        unsupported_bc = [t for t in model.bc_types if t not in (0, 3)]
-        if unsupported_bc and not model.has_moving_walls:
-            raise NotImplementedError(
-                "The post-collision pipeline currently supports only periodic "
-                "and static halfway bounce-back boundaries"
+            _, inverse = moments.host_moment_matrices()
+            rates = moments.host_relaxation_rates(
+                float(model.omega),
+                float(model.mrt_third_omega),
+                float(model.mrt_fourth_omega),
             )
+            self._inverse_moment_transform = wp.array(
+                inverse.reshape(-1), dtype=float, device=self.device
+            )
+            self._mrt_rates = wp.array(rates, dtype=float, device=self.device)
+
 
     def create_state(self, requires_grad: bool = False) -> LbmStateBase:
         """Create the concrete persistent state selected by the model."""
@@ -131,8 +172,6 @@ class LbmSolver(FluidGridSolverBase):
 
     def _sync_bc_from_model(self) -> None:
         """Copy BC parameters from the model to device arrays."""
-        import numpy as np
-
         wp.copy(
             self._bc_types,
             wp.array(np.array(self.model.bc_types, dtype=np.int32), dtype=wp.int32, device=self.device),
@@ -149,12 +188,30 @@ class LbmSolver(FluidGridSolverBase):
             self._bc_vel_z,
             wp.array(np.array([v[2] for v in self.model.bc_velocity], dtype=np.float32), dtype=float, device=self.device),
         )
+        wp.copy(
+            self._bc_density,
+            wp.array(
+                np.array(self.model.bc_density, dtype=np.float32),
+                dtype=float,
+                device=self.device,
+            ),
+        )
+        wp.copy(
+            self._bc_convective_speed,
+            wp.array(
+                np.array(self.model.bc_convective_speed, dtype=np.float32),
+                dtype=float,
+                device=self.device,
+            ),
+        )
 
     def set_boundary_condition(
         self,
         face: int,
-        bc_type: int,
+        bc_type: int | str,
         velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        convective_speed: float | None = None,
+        density: float | None = None,
     ) -> None:
         """Set the boundary condition on one face of the domain.
 
@@ -163,22 +220,72 @@ class LbmSolver(FluidGridSolverBase):
         face:
             Face index: 0=xmin, 1=xmax, 2=ymin, 3=ymax, 4=zmin, 5=zmax.
         bc_type:
-            0 = bounce-back, 1 = Zou-He velocity inlet, 2 = convective outflow.
+            Integer compatibility code or a public boundary name such as
+            ``"zou_he"``, ``"pressure"`` or ``"convective"``.
         velocity:
             Prescribed velocity ``(ux, uy, uz)`` in lattice units.  Only
             used when *bc_type* == 1 (Zou-He).
+        convective_speed:
+            First-order outlet Courant speed in ``[0, 1]``.
+        density:
+            Prescribed density for a pressure boundary.
         """
-        if bc_type not in (0, 3) and not self.model.has_moving_walls:
-            raise NotImplementedError(
-                "The post-collision pipeline currently supports only periodic "
-                "and static halfway bounce-back boundaries"
+        if face < 0 or face >= 6:
+            raise ValueError(f"LBM boundary face must be in [0, 5], got {face}")
+        resolved_bc_type, boundary_model = normalize_boundary_type(bc_type)
+        bc_type = resolved_bc_type
+        if boundary_model.value == "moving_wall":
+            self.model.has_moving_walls = True
+        elif boundary_model.value == "cut_link":
+            self.model.use_cut_link = True
+        axis = face // 2
+        if self.model.bc_periodic[axis] and bc_type in (1, 2, 4):
+            raise ValueError("An open boundary cannot be placed on a periodic axis")
+        if convective_speed is not None and not (0.0 <= convective_speed <= 1.0):
+            raise ValueError(
+                f"convective_speed must be in [0, 1], got {convective_speed}"
             )
+        if density is not None and density <= 0.0:
+            raise ValueError(f"boundary density must be > 0, got {density}")
         types = list(self.model.bc_types)
+        boundary_models = list(self.model.boundary_models or ())
         vels = list(self.model.bc_velocity)
+        densities = list(self.model.bc_density)
+        speeds = list(self.model.bc_convective_speed)
         types[face] = bc_type
+        boundary_models[face] = boundary_model.value
+        if bc_type == 3:
+            types[face ^ 1] = 3
+            boundary_models[face ^ 1] = "periodic"
+        elif types[face ^ 1] == 3:
+            raise ValueError(
+                "Clear or replace both faces of a periodic axis together"
+            )
         vels[face] = tuple(velocity)
+        if convective_speed is not None:
+            speeds[face] = float(convective_speed)
+        if density is not None:
+            densities[face] = float(density)
         self.model.bc_types = tuple(types)  # type: ignore[assignment]
+        self.model.boundary_models = tuple(boundary_models)  # type: ignore[assignment]
         self.model.bc_velocity = tuple(vels)  # type: ignore[assignment]
+        self.model.bc_density = tuple(densities)  # type: ignore[assignment]
+        self.model.bc_convective_speed = tuple(speeds)  # type: ignore[assignment]
+        self._boundary_resolution = resolve_boundary_faces(
+            tuple(int(value) for value in self.model.bc_types),
+            (self.nx, self.ny, self.nz),
+        )
+        if self._boundary_resolution.conflict is not None:
+            warnings.warn(
+                self._boundary_resolution.conflict.warning_message,
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        self._boundary_history_ready = False
+        if any(value == BC_OUTFLOW for value in self.model.bc_types) and self._boundary_history is None:
+            self._boundary_history = wp.zeros(
+                19 * self._stride, dtype=float, device=self.device
+            )
         self._sync_bc_from_model()
 
     # ------------------------------------------------------------------
@@ -194,91 +301,192 @@ class LbmSolver(FluidGridSolverBase):
         control: Any | None = None,
     ) -> None:
         """Advance ``post-collision -> stream -> collide -> post-collision``."""
-        if self.model.has_moving_walls:
-            if not isinstance(state_in, FullFLbmState) or not isinstance(state_out, FullFLbmState):
-                raise NotImplementedError("HOME encoding does not support rigid/moving-wall coupling")
-            self._step_legacy(state_in, state_out, dt, contacts, control)
-            return
-
         del contacts, control, dt
         self._copy_boundary_fields(state_in, state_out)
         px, py, pz = self.model._periodic_ints
 
-        # 1. transport: encoding selects provider, collision selects collector
-        if self._collision_kind == "population":
-            assert self._f_star is not None
-            self._stream_to_populations(state_in, px, py, pz)
-            # 2. physics: local moments, then force/hydrodynamic closure
+        # 1. StateProvider + StreamingEngine always form logical populations.
+        self._stream_to_populations(state_in, px, py, pz)
+        if self.model.use_cut_link:
+            if isinstance(state_in, FullFLbmState):
+                cut_link_kernel = streaming.apply_fullf_cut_link_transport_kernel
+                cut_link_inputs = [
+                    state_in.f_post,
+                    state_in.solid_phi,
+                    self._f_star,
+                    self._bc_types,
+                    px,
+                    py,
+                    pz,
+                    self.nx,
+                    self.ny,
+                    self.nz,
+                    self._stride,
+                ]
+            else:
+                assert isinstance(state_in, HomeLbmState)
+                cut_link_kernel = streaming.apply_home_cut_link_transport_kernel
+                cut_link_inputs = [
+                    *state_in.kinetic_fields,
+                    state_in.solid_phi,
+                    self._f_star,
+                    self._bc_types,
+                    px,
+                    py,
+                    pz,
+                    self.nx,
+                    self.ny,
+                    self.nz,
+                    self._stride,
+                ]
             wp.launch(
-                kernels.compute_moments_kernel,
+                cut_link_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=cut_link_inputs,
+                device=self.device,
+            )
+        if self.model.has_moving_walls:
+            wp.launch(
+                kernels.apply_moving_wall_transport_kernel,
                 dim=(self.nx, self.ny, self.nz),
                 inputs=[
-                    self._f_star, self._stride, self.nx, self.ny, self.nz,
-                    self._rho, self._ux, self._uy, self._uz,
+                    self._f_star,
+                    state_in.density,
+                    state_in.solid_phi,
+                    state_in.vel_solid_u,
+                    state_in.vel_solid_v,
+                    state_in.vel_solid_w,
+                    self._bc_types,
+                    int(self.model.use_cut_link),
+                    px,
+                    py,
+                    pz,
+                    self.nx,
+                    self.ny,
+                    self.nz,
+                    self._stride,
                 ],
                 device=self.device,
             )
-            self._prepare_population_physics(state_out)
-            if self.model.use_regularization and self.model.omega_reg > 0.0:
-                wp.launch(
-                    kernels.reg_trt_kernel,
-                    dim=(self.nx, self.ny, self.nz),
-                    inputs=[
-                        self._f_star, self._rho, self._ux, self._uy, self._uz,
-                        float(self.model.omega_reg), px, py, pz,
-                        self.nx, self.ny, self.nz, self._stride,
-                    ],
-                    device=self.device,
-                )
-            # 3. EPC collision
-            if isinstance(state_out, FullFLbmState):
-                output_f = state_out.f_post
-            else:
-                assert self._f_post is not None
-                output_f = self._f_post
+
+        # 2. Part 3 completes all open-boundary populations before collection.
+        self._complete_open_boundaries(self._f_star)
+
+        # 3. The collector inventories the same completed f*[Q] for all paths.
+        wp.launch(
+            encoding.populations_to_home_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                self._f_star,
+                *self._moments,
+                self.ny,
+                self.nz,
+                self._stride,
+            ],
+            device=self.device,
+        )
+
+        # 4. Part 2 computes one physical force density and one hydro closure.
+        self._compute_force_density(state_out)
+        wp.launch(
+            forcing.hydro_closure_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                self._rho,
+                self._jx,
+                self._jy,
+                self._jz,
+                self._fx,
+                self._fy,
+                self._fz,
+                self._ux,
+                self._uy,
+                self._uz,
+            ],
+            device=self.device,
+        )
+
+        if self.model.use_regularization and self.model.omega_reg > 0.0:
+            wp.launch(
+                kernels.reg_trt_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    self._f_star,
+                    self._rho,
+                    self._ux,
+                    self._uy,
+                    self._uz,
+                    float(self.model.omega_reg),
+                    px,
+                    py,
+                    pz,
+                    self.nx,
+                    self.ny,
+                    self.nz,
+                    self._stride,
+                ],
+                device=self.device,
+            )
+
+        # 5. Part 1 dispatches by collision space; each path translates F.
+        if isinstance(state_out, FullFLbmState):
+            output_f = state_out.f_post
+        else:
+            output_f = self._f_post
+
+        if self._collision_space in (
+            CollisionSpace.POPULATION,
+            CollisionSpace.EVEN_ODD_POPULATION,
+        ):
+            assert output_f is not None
             omega_even, omega_odd = self._collision_backend.relaxation_rates(self.model)
             wp.launch(
-                collisions.epc_collision_kernel,
+                collisions.epc_forced_collision_kernel,
                 dim=(self.nx, self.ny, self.nz),
                 inputs=[
-                    self._f_star, self._rho, self._ux, self._uy, self._uz,
-                    output_f, omega_even, omega_odd,
-                    self.ny, self.nz, self._stride,
+                    self._f_star,
+                    self._rho,
+                    self._ux,
+                    self._uy,
+                    self._uz,
+                    self._fx,
+                    self._fy,
+                    self._fz,
+                    output_f,
+                    omega_even,
+                    omega_odd,
+                    self.ny,
+                    self.nz,
+                    self._stride,
                 ],
                 device=self.device,
             )
-            self._apply_population_force(output_f)
-            # 4. encode
             if isinstance(state_out, HomeLbmState):
                 self._encode_populations_to_home(output_f, state_out)
+        elif self._collision_space is CollisionSpace.RAW_MOMENT:
+            assert isinstance(state_out, FullFLbmState)
+            self._collide_raw_mrt(state_out.f_post)
+        elif self._collision_space is CollisionSpace.NOCM_MOMENT:
+            assert isinstance(state_out, FullFLbmState)
+            self._collide_fullf_nocm(state_out.f_post)
         else:
-            self._stream_to_moments(state_in, px, py, pz)
-            m = self._moments
-            if isinstance(state_out, HomeLbmState):
-                collision_target_moments = state_out.kinetic_fields
-            else:
-                collision_target_moments = self._post_moments
+            assert isinstance(state_out, HomeLbmState)
             wp.launch(
-                streaming.moment_velocity_kernel,
+                collisions.home_nocm_mrt_collision_kernel,
                 dim=(self.nx, self.ny, self.nz),
-                inputs=[m[0], m[1], m[2], m[3], self._ux, self._uy, self._uz],
+                inputs=[
+                    *self._moments,
+                    self._ux,
+                    self._uy,
+                    self._uz,
+                    self._fx,
+                    self._fy,
+                    self._fz,
+                    *state_out.kinetic_fields,
+                    float(self.model.omega),
+                ],
                 device=self.device,
             )
-            wp.launch(
-                collisions.home_nocm_collision_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[*m, *collision_target_moments, float(self.model.omega)],
-                device=self.device,
-            )
-            if isinstance(state_out, FullFLbmState):
-                pm = self._post_moments
-                wp.launch(
-                    encoding.home_to_populations_kernel,
-                    dim=(self.nx, self.ny, self.nz),
-                    inputs=[*pm, state_out.f_post, self.ny, self.nz, self._stride],
-                    device=self.device,
-                )
-            wp.copy(self._rho, m[0])
 
         self._write_observables(state_out)
 
@@ -302,71 +510,227 @@ class LbmSolver(FluidGridSolverBase):
             raise TypeError(f"Unsupported LBM state type: {type(state).__name__}")
         wp.launch(kernel, dim=(self.nx, self.ny, self.nz), inputs=inputs, device=self.device)
 
-    def _stream_to_moments(self, state: LbmStateBase, px: int, py: int, pz: int) -> None:
-        tail = [state.solid_phi, *self._moments, px, py, pz, self.nx, self.ny, self.nz]
-        if isinstance(state, FullFLbmState):
-            kernel = streaming.stream_fullf_to_moments_kernel
-            inputs = [state.f_post, *tail, self._stride]
-        elif isinstance(state, HomeLbmState):
-            kernel = streaming.stream_home_to_moments_kernel
-            inputs = [*self._home_inputs(state), *tail]
-        else:
-            raise TypeError(f"Unsupported LBM state type: {type(state).__name__}")
-        wp.launch(kernel, dim=(self.nx, self.ny, self.nz), inputs=inputs, device=self.device)
-
-    def _prepare_population_physics(self, state_out: LbmStateBase) -> None:
-        G_sc = float(self.model.G)
-        if G_sc == 0.0:
+    def _complete_open_boundaries(self, populations: wp.array) -> None:
+        if not self._boundary_resolution.has_open_boundaries:
             return
-        self._step_count += 1
-        if self._step_count % self._sc_stride == 1:
-            px, py, pz = self.model._periodic_ints
-            wp.launch(
-                kernels.compute_shan_chen_force_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    self._rho, state_out.solid_phi, self._fx, self._fy, self._fz,
-                    G_sc, int(self.model.psi_type), float(self.model.psi_ref),
-                    float(self.model.sc_solid_psi_scale), float(self.model.sc_boundary_psi),
-                    float(self.model.cs_a), float(self.model.cs_b), float(self.model.cs_T),
-                    int(self.model.sc_homogeneous_early_out),
-                    float(self.model.sc_homogeneous_rel_tol), px, py, pz,
-                    self.nx, self.ny, self.nz,
-                ],
-                device=self.device,
+        has_convective = any(value == BC_OUTFLOW for value in self.model.bc_types)
+        if has_convective and self._boundary_history is None:
+            self._boundary_history = wp.zeros(
+                19 * self._stride, dtype=float, device=self.device
             )
+        if has_convective and not self._boundary_history_ready:
+            assert self._boundary_history is not None
+            wp.copy(self._boundary_history, populations)
+            self._boundary_history_ready = True
         wp.launch(
-            kernels.apply_velocity_shift_kernel,
+            kernels.apply_boundary_conditions_kernel,
             dim=(self.nx, self.ny, self.nz),
             inputs=[
-                self._ux, self._uy, self._uz, self._rho,
-                self._fx, self._fy, self._fz,
-                float(self.model.gravity_x), float(self.model.gravity_y), float(self.model.gravity_z),
-                float(self.model.tau), self.nx, self.ny, self.nz,
+                populations,
+                self._boundary_history if self._boundary_history is not None else populations,
+                self._bc_types,
+                self._bc_vel_x,
+                self._bc_vel_y,
+                self._bc_vel_z,
+                self._bc_density,
+                self._bc_convective_speed,
+                self.nx,
+                self.ny,
+                self.nz,
+                self._stride,
+            ],
+            device=self.device,
+        )
+        if has_convective:
+            assert self._boundary_history is not None
+            wp.copy(self._boundary_history, populations)
+
+    def _compute_force_density(self, state_out: LbmStateBase) -> None:
+        if self._force_provider.includes_shan_chen:
+            self._step_count += 1
+            if (self._step_count - 1) % self._sc_stride == 0:
+                px, py, pz = self.model._periodic_ints
+                wp.launch(
+                    kernels.compute_shan_chen_force_kernel,
+                    dim=(self.nx, self.ny, self.nz),
+                    inputs=[
+                        self._rho,
+                        state_out.solid_phi,
+                        self._sc_fx,
+                        self._sc_fy,
+                        self._sc_fz,
+                        float(self.model.G),
+                        int(self.model.psi_type),
+                        float(self.model.psi_ref),
+                        float(self.model.sc_solid_psi_scale),
+                        float(self.model.sc_boundary_psi),
+                        float(self.model.cs_a),
+                        float(self.model.cs_b),
+                        float(self.model.cs_T),
+                        int(self.model.sc_homogeneous_early_out),
+                        float(self.model.sc_homogeneous_rel_tol),
+                        px,
+                        py,
+                        pz,
+                        self.nx,
+                        self.ny,
+                        self.nz,
+                    ],
+                    device=self.device,
+                )
+        gx = float(self.model.gravity_x) if self._force_provider.includes_gravity else 0.0
+        gy = float(self.model.gravity_y) if self._force_provider.includes_gravity else 0.0
+        gz = float(self.model.gravity_z) if self._force_provider.includes_gravity else 0.0
+        wp.launch(
+            forcing.compose_force_density_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                self._rho,
+                self._sc_fx,
+                self._sc_fy,
+                self._sc_fz,
+                self._fx,
+                self._fy,
+                self._fz,
+                gx,
+                gy,
+                gz,
+                int(self._force_provider.includes_shan_chen),
             ],
             device=self.device,
         )
 
-    def _apply_population_force(self, f_post: wp.array) -> None:
-        gx, gy, gz = float(self.model.gravity_x), float(self.model.gravity_y), float(self.model.gravity_z)
-        if self.model.G == 0.0 and (gx != 0.0 or gy != 0.0 or gz != 0.0):
-            wp.launch(
-                kernels.apply_guo_force_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[f_post, gx, gy, gz, float(self.model.omega), self.nx, self.ny, self.nz, self._stride],
-                device=self.device,
-            )
-        if self.model.G != 0.0:
-            wp.launch(
-                kernels.restore_physical_velocity_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    self._ux, self._uy, self._uz, self._rho,
-                    self._fx, self._fy, self._fz, gx, gy, gz,
-                    float(self.model.tau), self.nx, self.ny, self.nz,
-                ],
-                device=self.device,
-            )
+    def _collide_raw_mrt(self, output_f: wp.array) -> None:
+        assert self._raw_moments is not None
+        assert self._raw_source_moments is not None
+        assert self._post_raw_moments is not None
+        assert self._inverse_moment_transform is not None
+        assert self._mrt_rates is not None
+        wp.launch(
+            moments.populations_to_raw_moments_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[self._f_star, self._raw_moments, self.ny, self.nz, self._stride],
+            device=self.device,
+        )
+        self._translate_force_to_raw_moments()
+        wp.launch(
+            moments.raw_mrt_collision_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                self._raw_moments,
+                self._raw_source_moments,
+                self._post_raw_moments,
+                self._rho,
+                self._ux,
+                self._uy,
+                self._uz,
+                self._fx,
+                self._fy,
+                self._fz,
+                self._mrt_rates,
+                self.ny,
+                self.nz,
+                self._stride,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            moments.raw_moments_to_populations_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                self._post_raw_moments,
+                self._inverse_moment_transform,
+                output_f,
+                self.ny,
+                self.nz,
+                self._stride,
+            ],
+            device=self.device,
+        )
+
+    def _collide_fullf_nocm(self, output_f: wp.array) -> None:
+        assert self._raw_moments is not None
+        assert self._raw_source_moments is not None
+        assert self._post_raw_moments is not None
+        assert self._post_central_moments is not None
+        assert self._inverse_moment_transform is not None
+        assert self._mrt_rates is not None
+        wp.launch(
+            moments.populations_to_raw_moments_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[self._f_star, self._raw_moments, self.ny, self.nz, self._stride],
+            device=self.device,
+        )
+        self._translate_force_to_raw_moments()
+        wp.launch(
+            moments.nocm_collision_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                self._raw_moments,
+                self._raw_source_moments,
+                self._post_central_moments,
+                self._rho,
+                self._ux,
+                self._uy,
+                self._uz,
+                self._fx,
+                self._fy,
+                self._fz,
+                self._mrt_rates,
+                self.ny,
+                self.nz,
+                self._stride,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            moments.central_to_raw_moments_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                self._post_central_moments,
+                self._post_raw_moments,
+                self._ux,
+                self._uy,
+                self._uz,
+                self.ny,
+                self.nz,
+                self._stride,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            moments.raw_moments_to_populations_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                self._post_raw_moments,
+                self._inverse_moment_transform,
+                output_f,
+                self.ny,
+                self.nz,
+                self._stride,
+            ],
+            device=self.device,
+        )
+
+    def _translate_force_to_raw_moments(self) -> None:
+        assert self._raw_source_moments is not None
+        wp.launch(
+            moments.guo_source_to_raw_moments_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                self._ux,
+                self._uy,
+                self._uz,
+                self._fx,
+                self._fy,
+                self._fz,
+                self._raw_source_moments,
+                self.ny,
+                self.nz,
+                self._stride,
+            ],
+            device=self.device,
+        )
 
     def _encode_populations_to_home(self, f_post: wp.array, state: HomeLbmState) -> None:
         wp.launch(
@@ -381,254 +745,13 @@ class LbmSolver(FluidGridSolverBase):
         wp.copy(state_out.velocity_x, self._ux)
         wp.copy(state_out.velocity_y, self._uy)
         wp.copy(state_out.velocity_z, self._uz)
-        if self.model.G != 0.0:
-            wp.copy(state_out.force_x, self._fx)
-            wp.copy(state_out.force_y, self._fy)
-            wp.copy(state_out.force_z, self._fz)
-        else:
-            state_out.force_x.zero_()
-            state_out.force_y.zero_()
-            state_out.force_z.zero_()
+        wp.copy(state_out.force_x, self._fx)
+        wp.copy(state_out.force_y, self._fy)
+        wp.copy(state_out.force_z, self._fz)
         wp.launch(kernels.moments_to_mac_u_kernel, dim=(self.nx + 1, self.ny, self.nz), inputs=[self._ux, state_out.vel_u, self.nx], device=self.device)
         wp.launch(kernels.moments_to_mac_v_kernel, dim=(self.nx, self.ny + 1, self.nz), inputs=[self._uy, state_out.vel_v, self.ny], device=self.device)
         wp.launch(kernels.moments_to_mac_w_kernel, dim=(self.nx, self.ny, self.nz + 1), inputs=[self._uz, state_out.vel_w, self.nz], device=self.device)
 
-    # Temporary compatibility path for moving-wall/momentum-exchange coupling.
-    def _step_legacy(
-        self,
-        state_in: LbmState,
-        state_out: LbmState,
-        dt: float,
-        contacts: Any | None = None,
-        control: Any | None = None,
-    ) -> None:
-        """Advance the LBM simulation by one lattice timestep.
-
-        The physical *dt* is accepted for API compatibility but ignored
-        internally – the LBM always uses ``dt = 1`` in lattice units.
-        """
-        del contacts, control, dt  # LBM dt = 1 lattice unit
-
-        # ---- 0. Copy persistent fields (skipped when walls are static) ---
-        if self.model.has_moving_walls:
-            wp.copy(state_out.solid_phi, state_in.solid_phi)
-            wp.copy(state_out.solid_body_id, state_in.solid_body_id)
-            wp.copy(state_out.vel_solid_u, state_in.vel_solid_u)
-            wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
-            wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
-
-        # ---- 1. Compute macroscopic moments (rho, u) from f ----------------
-        wp.launch(
-            kernels.compute_moments_kernel,
-            dim=(self.nx, self.ny, self.nz),
-            inputs=[
-                state_in.f,
-                self._stride,
-                self.nx,
-                self.ny,
-                self.nz,
-                self._rho,
-                self._ux,
-                self._uy,
-                self._uz,
-            ],
-        )
-
-        # ---- 2. Body-force correction (gravity + optional Shan-Chen) ----
-        gx: float = float(self.model.gravity_x)
-        gy: float = float(self.model.gravity_y)
-        gz: float = float(self.model.gravity_z)
-        G_sc: float = float(self.model.G)
-        px: int = int(self.model._periodic_ints[0])
-        py: int = int(self.model._periodic_ints[1])
-        pz: int = int(self.model._periodic_ints[2])
-
-        if G_sc != 0.0:
-            # --- 2a. Compute Shan-Chen interaction force (strided) ----------
-            self._step_count += 1
-            if self._step_count % self._sc_stride == 1:
-                wp.launch(
-                    kernels.compute_shan_chen_force_kernel,
-                    dim=(self.nx, self.ny, self.nz),
-                    inputs=[
-                        self._rho,
-                        state_out.solid_phi,
-                        self._fx,
-                        self._fy,
-                        self._fz,
-                        G_sc,
-                        int(self.model.psi_type),
-                        float(self.model.psi_ref),
-                        float(self.model.sc_solid_psi_scale),
-                        float(self.model.sc_boundary_psi),
-                        float(self.model.cs_a),
-                        float(self.model.cs_b),
-                        float(self.model.cs_T),
-                        int(self.model.sc_homogeneous_early_out),
-                        float(self.model.sc_homogeneous_rel_tol),
-                        px, py, pz,
-                        self.nx,
-                        self.ny,
-                        self.nz,
-                    ],
-                )
-            # --- 2b. Velocity shift (SC + gravity): u_eq = u + τ₋·(F/ρ + g) --
-            # The velocity shift uses the shear relaxation time τ (not τ₊)
-            # because the SC interaction force acts on momentum (odd modes),
-            # whose relaxation is controlled by ω = 1/τ.  Using τ₊ would
-            # amplify the shift when τ₊ > τ (i.e. whenever TRT is active),
-            # pushing u_eq beyond the low-Mach limit at sharp interfaces.
-            # TRT ghost-mode damping in collision is unaffected by this choice.
-            wp.launch(
-                kernels.apply_velocity_shift_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    self._ux,
-                    self._uy,
-                    self._uz,
-                    self._rho,
-                    self._fx,
-                    self._fy,
-                    self._fz,
-                    gx,
-                    gy,
-                    gz,
-                    self.model.tau,
-                    self.nx,
-                    self.ny,
-                    self.nz,
-                ],
-            )
-        # (gravity-only Guo force was here pre-collision — moved to step 5a below)
-
-        # ---- 3. Regularization filter (pre-collision) ------------------------
-        if self.model.use_regularization and self.model.omega_reg > 0.0:
-            wp.launch(
-                kernels.reg_trt_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    state_in.f,
-                    self._rho, self._ux, self._uy, self._uz,
-                    float(self.model.omega_reg),
-                    px, py, pz,
-                    self.nx, self.ny, self.nz, self._stride,
-                ],
-            )
-        # ---- 4. BGK/TRT collide + stream (applies relaxation ONCE) ----------
-        wp.launch(
-            kernels.collide_stream_bounceback_kernel,
-            dim=(self.nx, self.ny, self.nz),
-            inputs=[
-                state_in.f, self._rho, self._ux, self._uy, self._uz,
-                state_out.solid_phi,
-                state_out.vel_solid_u, state_out.vel_solid_v, state_out.vel_solid_w,
-                state_out.f,
-                self.model.omega_plus, self.model.omega_minus,
-                int(self.model.has_moving_walls),
-                px, py, pz,
-                self.nx, self.ny, self.nz, self._stride,
-            ],
-        )
-
-        # ---- 5. Apply non-bounce-back boundary conditions -----------------
-        # Skip entirely when all 6 faces are bounce-back (the common case).
-        if any(t != 0 for t in self.model.bc_types):
-            wp.launch(
-                kernels.apply_boundary_conditions_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    state_out.f,
-                    self._rho,
-                    self._ux,
-                    self._uy,
-                    self._uz,
-                    self._bc_types,
-                    self._bc_vel_x,
-                    self._bc_vel_y,
-                    self._bc_vel_z,
-                    self.nx,
-                    self.ny,
-                    self.nz,
-                    self._stride,
-                ],
-            )
-
-        # ---- 5a. Guo body force (post-collision, gravity-only path) -------
-        # Guo forcing with coefficient (1-ω/2) is designed for post-collision
-        # application.  Applied here after collision-stream and boundary
-        # conditions, only when no Shan-Chen interaction is active (G==0).
-        if G_sc == 0.0 and (gx != 0.0 or gy != 0.0 or gz != 0.0):
-            wp.launch(
-                kernels.apply_guo_force_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    state_out.f,
-                    gx,
-                    gy,
-                    gz,
-                    self.model.omega,
-                    self.nx,
-                    self.ny,
-                    self.nz,
-                    self._stride,
-                ],
-            )
-
-        # ---- 5b. Restore physical velocity (reverse SC velocity shift) ----
-        # apply_velocity_shift_kernel overwrote self._ux/_uy/_uz with the
-        # equilibrium velocity u_eq = u + τ₋·(F/ρ + g).  The collision
-        # and boundary-condition kernels have consumed u_eq; now reverse
-        # the shift so that state_out.velocity_* and MAC-face velocities
-        # report the true physical velocity.
-        # Uses the same τ to exactly undo the forward shift.
-        if G_sc != 0.0:
-            wp.launch(
-                kernels.restore_physical_velocity_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    self._ux,
-                    self._uy,
-                    self._uz,
-                    self._rho,
-                    self._fx,
-                    self._fy,
-                    self._fz,
-                    gx,
-                    gy,
-                    gz,
-                    self.model.tau,
-                    self.nx,
-                    self.ny,
-                    self.nz,
-                ],
-            )
-
-        # ---- 6. Copy macroscopic fields to state_out ----------------------
-        wp.copy(state_out.density, self._rho)
-        wp.copy(state_out.velocity_x, self._ux)
-        wp.copy(state_out.velocity_y, self._uy)
-        wp.copy(state_out.velocity_z, self._uz)
-        if G_sc != 0.0:
-            wp.copy(state_out.force_x, self._fx)
-            wp.copy(state_out.force_y, self._fy)
-            wp.copy(state_out.force_z, self._fz)
-
-        # ---- 7. Populate MAC-face velocities (visualisation / coupling) ---
-        wp.launch(
-            kernels.moments_to_mac_u_kernel,
-            dim=(self.nx + 1, self.ny, self.nz),
-            inputs=[self._ux, state_out.vel_u, self.nx],
-        )
-        wp.launch(
-            kernels.moments_to_mac_v_kernel,
-            dim=(self.nx, self.ny + 1, self.nz),
-            inputs=[self._uy, state_out.vel_v, self.ny],
-        )
-        wp.launch(
-            kernels.moments_to_mac_w_kernel,
-            dim=(self.nx, self.ny, self.nz + 1),
-            inputs=[self._uz, state_out.vel_w, self.nz],
-        )
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -656,6 +779,13 @@ class LbmSolver(FluidGridSolverBase):
             Uniform initial velocity ``(ux, uy, uz)`` in lattice units.
         """
         u0x, u0y, u0z = u0
+        self._boundary_history_ready = False
+        if self._boundary_history is not None:
+            self._boundary_history.zero_()
+        self._step_count = 0
+        self._sc_fx.zero_()
+        self._sc_fy.zero_()
+        self._sc_fz.zero_()
 
         if isinstance(state, FullFLbmState):
             wp.launch(

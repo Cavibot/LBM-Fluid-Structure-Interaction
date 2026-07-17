@@ -36,7 +36,7 @@ class TestLbmStateEncoding(unittest.TestCase):
         self.assertIsInstance(domain._state_in, HomeLbmState)
         self.assertIsInstance(domain._state_out, HomeLbmState)
 
-    def test_collision_resolution_and_reserved_backends(self) -> None:
+    def test_collision_resolution_and_mrt_backends(self) -> None:
         self.assertEqual(
             LbmModel(fluid_grid_res=(2, 2, 2), device="cpu").resolved_collision,
             "srt",
@@ -46,8 +46,12 @@ class TestLbmStateEncoding(unittest.TestCase):
             "trt",
         )
         for name in ("raw_mrt", "nocm_mrt"):
-            with self.assertRaises(NotImplementedError):
-                LbmModel(fluid_grid_res=(2, 2, 2), device="cpu", collision=name)
+            self.assertEqual(
+                LbmModel(
+                    fluid_grid_res=(2, 2, 2), device="cpu", collision=name
+                ).resolved_collision,
+                name,
+            )
 
     def test_invalid_combinations_fail_fast(self) -> None:
         with self.assertRaises(ValueError):
@@ -55,14 +59,11 @@ class TestLbmStateEncoding(unittest.TestCase):
         with self.assertRaises(ValueError):
             LbmModel(fluid_grid_res=(2, 2, 2), device="cpu", collision="unknown")
         with self.assertRaises(NotImplementedError):
-            LbmModel(fluid_grid_res=(2, 2, 2), device="cpu", encoding="home", G=-1.0)
-        with self.assertRaises(NotImplementedError):
             LbmModel(
                 fluid_grid_res=(2, 2, 2),
                 device="cpu",
-                encoding="fullf",
-                collision="home_nocm",
-                G=-1.0,
+                encoding="home",
+                collision="raw_mrt",
             )
         with self.assertRaises(ValueError):
             LbmModel(
@@ -78,22 +79,22 @@ class TestLbmStateEncoding(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             GridLbmRigidCoupling(fake_fluid_domain, SimpleNamespace())
 
-    def test_home_nocm_does_not_allocate_population_scratch(self) -> None:
+    def test_home_nocm_uses_population_boundary_completion_scratch(self) -> None:
         domain = LbmDomain(
             LbmModel(
                 fluid_grid_res=(2, 2, 2),
                 device="cpu",
                 encoding="home",
-                collision="home_nocm",
+                collision="nocm_mrt",
             )
         )
-        self.assertIsNone(domain.solver._f_star)
+        self.assertIsNotNone(domain.solver._f_star)
         self.assertIsNone(domain.solver._f_post)
 
-    def test_runtime_boundary_update_rejects_unmigrated_types(self) -> None:
+    def test_runtime_boundary_update_accepts_open_completion_types(self) -> None:
         domain = LbmDomain(LbmModel(fluid_grid_res=(2, 2, 2), device="cpu"))
-        with self.assertRaises(NotImplementedError):
-            domain.solver.set_boundary_condition(0, 1)
+        domain.solver.set_boundary_condition(0, 1, velocity=(0.01, 0.0, 0.0))
+        self.assertEqual(domain.model.bc_types[0], 1)
 
 
 if __name__ == "__main__":

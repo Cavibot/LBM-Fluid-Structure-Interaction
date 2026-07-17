@@ -11,24 +11,27 @@ fields (*rho*, *ux*, *uy*, *uz*, *solid_phi*) use standard
 
 Kernel summary
 --------------
-* :func:`compute_moments_kernel` -- rho, u from the 19 distributions.
-* :func:`collide_stream_bounceback_kernel` -- fused BGK collide, pull-stream,
-  and halfway bounce-back in a single launch.
-* :func:`apply_guo_force_kernel` -- Guo body-force correction (uniform, optional).
+* :func:`apply_moving_wall_transport_kernel` -- moving-wall link correction
+  between streaming and open-boundary completion.
+* :func:`apply_boundary_conditions_kernel` -- Zou-He, pressure and
+  history-based convective population completion.
 * :func:`_psi` -- Shan-Chen pseudopotential (effective mass).
 * :func:`compute_shan_chen_force_kernel` -- Shan-Chen interaction force from
   pseudopotential gradients.
-* :func:`apply_velocity_shift_kernel` -- velocity-shift forcing for the
-  Shan-Chen interaction (standard SC approach).
 * :func:`moments_to_mac_u_kernel` / ``_v_`` / ``_w_`` -- cell-centred ->
   MAC-face velocity interpolation.
 * :func:`initialize_equilibrium_kernel` -- set *f* to equilibrium for given
   (rho0, u0).
+
+The older fused collide-stream and velocity-shift kernels remain below only as
+private migration references; :class:`LbmSolver` no longer dispatches them.
 """
 
 from __future__ import annotations
 
 import warp as wp
+
+from .encoding import direction_weight, direction_x, direction_y, direction_z
 
 # Lattice speed of sound squared = 1/3, so inv = 3.
 _INV_CS2 = 3.0
@@ -425,6 +428,120 @@ def _moving_wall_correction(
         nz,
     )
     return 2.0 * w * rho_w * _INV_CS2 * wall_dot
+
+
+@wp.kernel
+def apply_moving_wall_transport_kernel(
+    f_star: wp.array(dtype=float),
+    rho_hint: wp.array3d(dtype=float),
+    solid_phi: wp.array3d(dtype=float),
+    vel_solid_u: wp.array3d(dtype=float),
+    vel_solid_v: wp.array3d(dtype=float),
+    vel_solid_w: wp.array3d(dtype=float),
+    bc_types: wp.array(dtype=wp.int32),
+    use_cut_link: int,
+    px: int,
+    py: int,
+    pz: int,
+    nx: int,
+    ny: int,
+    nz: int,
+    stride: int,
+) -> None:
+    """Add moving-wall correction to links already bounced by streaming."""
+
+    i, j, k = wp.tid()
+    idx = i * ny * nz + j * nz + k
+    face_count = 0
+    touches_open = False
+    if i == 0:
+        face_count += 1
+        touches_open = touches_open or bc_types[0] == 1 or bc_types[0] == 2 or bc_types[0] == 4
+    if i == nx - 1:
+        face_count += 1
+        touches_open = touches_open or bc_types[1] == 1 or bc_types[1] == 2 or bc_types[1] == 4
+    if j == 0:
+        face_count += 1
+        touches_open = touches_open or bc_types[2] == 1 or bc_types[2] == 2 or bc_types[2] == 4
+    if j == ny - 1:
+        face_count += 1
+        touches_open = touches_open or bc_types[3] == 1 or bc_types[3] == 2 or bc_types[3] == 4
+    if k == 0:
+        face_count += 1
+        touches_open = touches_open or bc_types[4] == 1 or bc_types[4] == 2 or bc_types[4] == 4
+    if k == nz - 1:
+        face_count += 1
+        touches_open = touches_open or bc_types[5] == 1 or bc_types[5] == 2 or bc_types[5] == 4
+    if face_count > 1 and touches_open:
+        return
+    # Accumulate unconditionally and select afterwards.  In Warp 1.12 a
+    # loop nested in this data-dependent branch produces malformed CPU C++.
+    # The unconditional sum is cheap (D3Q19) and is equivalent here.
+    r_hint = rho_hint[i, j, k]
+    r_sum = float(0.0)
+    for q_sum in range(19):
+        r_sum += f_star[q_sum * stride + idx]
+    r = wp.where(r_hint <= 1.0e-12, wp.max(r_sum, 1.0e-12), r_hint)
+
+    for q in range(1, 19):
+        cx, cy, cz = direction_x(q), direction_y(q), direction_z(q)
+        si, sj, sk = i - cx, j - cy, k - cz
+        outside = False
+        if si < 0 or si >= nx:
+            if px != 0:
+                if si < 0:
+                    si += nx
+                else:
+                    si -= nx
+            else:
+                outside = True
+        if sj < 0 or sj >= ny:
+            if py != 0:
+                if sj < 0:
+                    sj += ny
+                else:
+                    sj -= ny
+            else:
+                outside = True
+        if sk < 0 or sk >= nz:
+            if pz != 0:
+                if sk < 0:
+                    sk += nz
+                else:
+                    sk -= nz
+            else:
+                outside = True
+
+        bounced = outside
+        if not outside:
+            bounced = solid_phi[si, sj, sk] < 0.0
+        if bounced:
+            correction_scale = 1.0
+            if use_cut_link != 0 and not outside:
+                phi_fluid = solid_phi[i, j, k]
+                phi_solid = solid_phi[si, sj, sk]
+                denominator = phi_fluid - phi_solid
+                if denominator > 1.0e-12:
+                    link_fraction = wp.clamp(phi_fluid / denominator, 1.0e-6, 1.0)
+                    if link_fraction >= 0.5:
+                        correction_scale = 1.0 / (2.0 * link_fraction)
+            f_star[q * stride + idx] += correction_scale * _moving_wall_correction(
+                1,
+                vel_solid_u,
+                vel_solid_v,
+                vel_solid_w,
+                i,
+                j,
+                k,
+                cx,
+                cy,
+                cz,
+                direction_weight(q),
+                r,
+                nx,
+                ny,
+                nz,
+            )
 
 
 @wp.kernel
@@ -1687,24 +1804,23 @@ def initialize_equilibrium_kernel(
 @wp.kernel
 def apply_boundary_conditions_kernel(
     f: wp.array(dtype=float),
-    rho: wp.array3d(dtype=float),
-    ux: wp.array3d(dtype=float),
-    uy: wp.array3d(dtype=float),
-    uz: wp.array3d(dtype=float),
+    boundary_history: wp.array(dtype=float),
     bc_types: wp.array(dtype=wp.int32),
     bc_vel_x: wp.array(dtype=float),
     bc_vel_y: wp.array(dtype=float),
     bc_vel_z: wp.array(dtype=float),
+    bc_density: wp.array(dtype=float),
+    bc_convective_speed: wp.array(dtype=float),
     nx: int,
     ny: int,
     nz: int,
     stride: int,
 ) -> None:
-    """Apply Zou-He velocity inlet or convective outflow on boundary faces.
+    """Complete Zou-He or history-based convective boundary populations.
 
     Launched over the entire grid.  Interior cells are early-return no-ops.
-    Bounce-back faces (bc_type == 0) are also no-ops — already handled
-    by the collision-stream kernel.
+    Bounce-back faces (bc_type == 0) are no-ops because StreamingEngine and
+    its transport link laws have already supplied their incoming values.
     """
     i, j, k = wp.tid()
 
@@ -1719,7 +1835,8 @@ def apply_boundary_conditions_kernel(
     if not (on_xmin or on_xmax or on_ymin or on_ymax or on_zmin or on_zmax):
         return
 
-    # Corner/edge cells: skip (default bounce-back from collision-stream).
+    # Corner/edge cells: skip; BoundaryResolver reports them and transport
+    # has already supplied the required static bounce-back fallback.
     face_count = 0
     if on_xmin:
         face_count += 1
@@ -1744,7 +1861,7 @@ def apply_boundary_conditions_kernel(
     if on_xmin:
         bc = bc_types[0]
         # --- Zou-He velocity inlet --------------------------------
-        if bc == 1:
+        if bc == 1 or bc == 4:
             vx = bc_vel_x[0]
             vy = bc_vel_y[0]
             vz = bc_vel_z[0]
@@ -1753,17 +1870,21 @@ def apply_boundary_conditions_kernel(
                 return
             # Known distribution sum for rho calculation
             known = (
-                f[0 * stride + idx] + f[2 * stride + idx]
+                f[0 * stride + idx]
+                + f[3 * stride + idx] + f[4 * stride + idx]
+                + f[5 * stride + idx] + f[6 * stride + idx]
+                + f[15 * stride + idx] + f[16 * stride + idx]
+                + f[17 * stride + idx] + f[18 * stride + idx]
                 + 2.0 * (
-                    f[3 * stride + idx] + f[4 * stride + idx]
-                    + f[5 * stride + idx] + f[6 * stride + idx]
-                    + f[15 * stride + idx] + f[16 * stride + idx]
-                    + f[17 * stride + idx] + f[18 * stride + idx]
+                    f[2 * stride + idx] + f[8 * stride + idx]
+                    + f[10 * stride + idx] + f[12 * stride + idx]
+                    + f[14 * stride + idx]
                 )
-                + f[8 * stride + idx] + f[10 * stride + idx]
-                + f[12 * stride + idx] + f[14 * stride + idx]
             )
             rho_w = known / denom
+            if bc == 4:
+                rho_w = bc_density[0]
+                vx = 1.0 - known / rho_w
 
             # Incoming: f1 (+x), f7 (+x+y), f9 (+x-y), f11 (+x+z), f13 (+x-z)
             # Bounce-back of non-equilibrium from opposite directions
@@ -1790,15 +1911,18 @@ def apply_boundary_conditions_kernel(
         # --- Convective outflow ---------------------------------
         elif bc == 2:
             src_idx = 1 * ny * nz + j * nz + k  # i=1
+            courant = bc_convective_speed[0]
             for d in range(19):
-                f[d * stride + idx] = f[d * stride + src_idx]
+                previous = boundary_history[d * stride + idx]
+                interior = f[d * stride + src_idx]
+                f[d * stride + idx] = previous + courant * (interior - previous)
 
     # ===================================================================
     # Face 1: x-max  (i == nx - 1)
     # ===================================================================
     if on_xmax:
         bc = bc_types[1]
-        if bc == 1:
+        if bc == 1 or bc == 4:
             vx = bc_vel_x[1]
             vy = bc_vel_y[1]
             vz = bc_vel_z[1]
@@ -1806,17 +1930,21 @@ def apply_boundary_conditions_kernel(
             if denom <= 0.0:
                 return
             known = (
-                f[0 * stride + idx] + f[1 * stride + idx]
+                f[0 * stride + idx]
+                + f[3 * stride + idx] + f[4 * stride + idx]
+                + f[5 * stride + idx] + f[6 * stride + idx]
+                + f[15 * stride + idx] + f[16 * stride + idx]
+                + f[17 * stride + idx] + f[18 * stride + idx]
                 + 2.0 * (
-                    f[3 * stride + idx] + f[4 * stride + idx]
-                    + f[5 * stride + idx] + f[6 * stride + idx]
-                    + f[15 * stride + idx] + f[16 * stride + idx]
-                    + f[17 * stride + idx] + f[18 * stride + idx]
+                    f[1 * stride + idx] + f[7 * stride + idx]
+                    + f[9 * stride + idx] + f[11 * stride + idx]
+                    + f[13 * stride + idx]
                 )
-                + f[7 * stride + idx] + f[9 * stride + idx]
-                + f[11 * stride + idx] + f[13 * stride + idx]
             )
             rho_w = known / denom
+            if bc == 4:
+                rho_w = bc_density[1]
+                vx = known / rho_w - 1.0
             # Incoming: f2 (-x), f8 (-x+y), f10 (-x-y), f12 (-x+z), f14 (-x-z)
             f[2 * stride + idx] = (
                 _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, -1, 0, 0)
@@ -1840,15 +1968,18 @@ def apply_boundary_conditions_kernel(
             )
         elif bc == 2:
             src_idx = (nx - 2) * ny * nz + j * nz + k
+            courant = bc_convective_speed[1]
             for d in range(19):
-                f[d * stride + idx] = f[d * stride + src_idx]
+                previous = boundary_history[d * stride + idx]
+                interior = f[d * stride + src_idx]
+                f[d * stride + idx] = previous + courant * (interior - previous)
 
     # ===================================================================
     # Face 2: y-min  (j == 0)
     # ===================================================================
     if on_ymin:
         bc = bc_types[2]
-        if bc == 1:
+        if bc == 1 or bc == 4:
             vx = bc_vel_x[2]
             vy = bc_vel_y[2]
             vz = bc_vel_z[2]
@@ -1856,17 +1987,21 @@ def apply_boundary_conditions_kernel(
             if denom <= 0.0:
                 return
             known = (
-                f[0 * stride + idx] + f[4 * stride + idx]
+                f[0 * stride + idx]
+                + f[1 * stride + idx] + f[2 * stride + idx]
+                + f[5 * stride + idx] + f[6 * stride + idx]
+                + f[11 * stride + idx] + f[12 * stride + idx]
+                + f[13 * stride + idx] + f[14 * stride + idx]
                 + 2.0 * (
-                    f[1 * stride + idx] + f[2 * stride + idx]
-                    + f[5 * stride + idx] + f[6 * stride + idx]
-                    + f[11 * stride + idx] + f[12 * stride + idx]
-                    + f[13 * stride + idx] + f[14 * stride + idx]
+                    f[4 * stride + idx] + f[9 * stride + idx]
+                    + f[10 * stride + idx] + f[16 * stride + idx]
+                    + f[18 * stride + idx]
                 )
-                + f[9 * stride + idx] + f[10 * stride + idx]
-                + f[16 * stride + idx] + f[18 * stride + idx]
             )
             rho_w = known / denom
+            if bc == 4:
+                rho_w = bc_density[2]
+                vy = 1.0 - known / rho_w
             # Incoming: f3 (+y), f7 (+x+y), f8 (-x+y), f15 (+y+z), f17 (+y-z)
             f[3 * stride + idx] = (
                 _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, 0, 1, 0)
@@ -1890,15 +2025,18 @@ def apply_boundary_conditions_kernel(
             )
         elif bc == 2:
             src_idx = i * ny * nz + 1 * nz + k
+            courant = bc_convective_speed[2]
             for d in range(19):
-                f[d * stride + idx] = f[d * stride + src_idx]
+                previous = boundary_history[d * stride + idx]
+                interior = f[d * stride + src_idx]
+                f[d * stride + idx] = previous + courant * (interior - previous)
 
     # ===================================================================
     # Face 3: y-max  (j == ny - 1)
     # ===================================================================
     if on_ymax:
         bc = bc_types[3]
-        if bc == 1:
+        if bc == 1 or bc == 4:
             vx = bc_vel_x[3]
             vy = bc_vel_y[3]
             vz = bc_vel_z[3]
@@ -1906,17 +2044,21 @@ def apply_boundary_conditions_kernel(
             if denom <= 0.0:
                 return
             known = (
-                f[0 * stride + idx] + f[3 * stride + idx]
+                f[0 * stride + idx]
+                + f[1 * stride + idx] + f[2 * stride + idx]
+                + f[5 * stride + idx] + f[6 * stride + idx]
+                + f[11 * stride + idx] + f[12 * stride + idx]
+                + f[13 * stride + idx] + f[14 * stride + idx]
                 + 2.0 * (
-                    f[1 * stride + idx] + f[2 * stride + idx]
-                    + f[5 * stride + idx] + f[6 * stride + idx]
-                    + f[11 * stride + idx] + f[12 * stride + idx]
-                    + f[13 * stride + idx] + f[14 * stride + idx]
+                    f[3 * stride + idx] + f[7 * stride + idx]
+                    + f[8 * stride + idx] + f[15 * stride + idx]
+                    + f[17 * stride + idx]
                 )
-                + f[7 * stride + idx] + f[8 * stride + idx]
-                + f[15 * stride + idx] + f[17 * stride + idx]
             )
             rho_w = known / denom
+            if bc == 4:
+                rho_w = bc_density[3]
+                vy = known / rho_w - 1.0
             # Incoming: f4 (-y), f9 (+x-y), f10 (-x-y), f16 (-y+z), f18 (-y-z)
             f[4 * stride + idx] = (
                 _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, 0, -1, 0)
@@ -1940,15 +2082,18 @@ def apply_boundary_conditions_kernel(
             )
         elif bc == 2:
             src_idx = i * ny * nz + (ny - 2) * nz + k
+            courant = bc_convective_speed[3]
             for d in range(19):
-                f[d * stride + idx] = f[d * stride + src_idx]
+                previous = boundary_history[d * stride + idx]
+                interior = f[d * stride + src_idx]
+                f[d * stride + idx] = previous + courant * (interior - previous)
 
     # ===================================================================
     # Face 4: z-min  (k == 0)
     # ===================================================================
     if on_zmin:
         bc = bc_types[4]
-        if bc == 1:
+        if bc == 1 or bc == 4:
             vx = bc_vel_x[4]
             vy = bc_vel_y[4]
             vz = bc_vel_z[4]
@@ -1956,17 +2101,21 @@ def apply_boundary_conditions_kernel(
             if denom <= 0.0:
                 return
             known = (
-                f[0 * stride + idx] + f[6 * stride + idx]
+                f[0 * stride + idx]
+                + f[1 * stride + idx] + f[2 * stride + idx]
+                + f[3 * stride + idx] + f[4 * stride + idx]
+                + f[7 * stride + idx] + f[8 * stride + idx]
+                + f[9 * stride + idx] + f[10 * stride + idx]
                 + 2.0 * (
-                    f[1 * stride + idx] + f[2 * stride + idx]
-                    + f[3 * stride + idx] + f[4 * stride + idx]
-                    + f[7 * stride + idx] + f[8 * stride + idx]
-                    + f[9 * stride + idx] + f[10 * stride + idx]
+                    f[6 * stride + idx] + f[13 * stride + idx]
+                    + f[14 * stride + idx] + f[17 * stride + idx]
+                    + f[18 * stride + idx]
                 )
-                + f[13 * stride + idx] + f[14 * stride + idx]
-                + f[17 * stride + idx] + f[18 * stride + idx]
             )
             rho_w = known / denom
+            if bc == 4:
+                rho_w = bc_density[4]
+                vz = 1.0 - known / rho_w
             # Incoming: f5 (+z), f11 (+x+z), f12 (-x+z), f15 (+y+z), f16 (-y+z)
             f[5 * stride + idx] = (
                 _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, 0, 0, 1)
@@ -1990,15 +2139,18 @@ def apply_boundary_conditions_kernel(
             )
         elif bc == 2:
             src_idx = i * ny * nz + j * nz + 1
+            courant = bc_convective_speed[4]
             for d in range(19):
-                f[d * stride + idx] = f[d * stride + src_idx]
+                previous = boundary_history[d * stride + idx]
+                interior = f[d * stride + src_idx]
+                f[d * stride + idx] = previous + courant * (interior - previous)
 
     # ===================================================================
     # Face 5: z-max  (k == nz - 1)
     # ===================================================================
     if on_zmax:
         bc = bc_types[5]
-        if bc == 1:
+        if bc == 1 or bc == 4:
             vx = bc_vel_x[5]
             vy = bc_vel_y[5]
             vz = bc_vel_z[5]
@@ -2006,17 +2158,21 @@ def apply_boundary_conditions_kernel(
             if denom <= 0.0:
                 return
             known = (
-                f[0 * stride + idx] + f[5 * stride + idx]
+                f[0 * stride + idx]
+                + f[1 * stride + idx] + f[2 * stride + idx]
+                + f[3 * stride + idx] + f[4 * stride + idx]
+                + f[7 * stride + idx] + f[8 * stride + idx]
+                + f[9 * stride + idx] + f[10 * stride + idx]
                 + 2.0 * (
-                    f[1 * stride + idx] + f[2 * stride + idx]
-                    + f[3 * stride + idx] + f[4 * stride + idx]
-                    + f[7 * stride + idx] + f[8 * stride + idx]
-                    + f[9 * stride + idx] + f[10 * stride + idx]
+                    f[5 * stride + idx] + f[11 * stride + idx]
+                    + f[12 * stride + idx] + f[15 * stride + idx]
+                    + f[16 * stride + idx]
                 )
-                + f[11 * stride + idx] + f[12 * stride + idx]
-                + f[15 * stride + idx] + f[16 * stride + idx]
             )
             rho_w = known / denom
+            if bc == 4:
+                rho_w = bc_density[5]
+                vz = known / rho_w - 1.0
             # Incoming: f6 (-z), f13 (+x-z), f14 (-x-z), f17 (+y-z), f18 (-y-z)
             f[6 * stride + idx] = (
                 _f_eq(1.0 / 18.0, rho_w, vx, vy, vz, 0, 0, -1)
@@ -2040,8 +2196,11 @@ def apply_boundary_conditions_kernel(
             )
         elif bc == 2:
             src_idx = i * ny * nz + j * nz + (nz - 2)
+            courant = bc_convective_speed[5]
             for d in range(19):
-                f[d * stride + idx] = f[d * stride + src_idx]
+                previous = boundary_history[d * stride + idx]
+                interior = f[d * stride + src_idx]
+                f[d * stride + idx] = previous + courant * (interior - previous)
 
 
 # ---------------------------------------------------------------------------
@@ -2343,4 +2502,3 @@ def reg_trt_kernel(
     _inc = omega_reg * (nr16 + 0.5 * (feq16 + feq17 - f[16 * stride + idx] - f[17 * stride + idx]))
     f[16 * stride + idx] = f[16 * stride + idx] + _inc
     f[17 * stride + idx] = f[17 * stride + idx] + _inc
-

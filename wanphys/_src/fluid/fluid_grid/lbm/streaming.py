@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pull-streaming specializations for FullF/HOME and EPC/EMC."""
+"""FullF/HOME population providers and transport link laws.
+
+All production paths first form logical ``f*[Q]``.  Direct stream-to-moment
+kernels remain as reference utilities, not as a boundary-bypassing solver path.
+"""
 
 from __future__ import annotations
 
@@ -180,6 +184,228 @@ def stream_home_to_populations_kernel(
             q, i, j, k, rho, jx, jy, jz, sxx, syy, szz, sxy, sxz, syz,
             solid_phi, px, py, pz, nx, ny, nz,
         )
+
+
+@wp.func
+def _cut_link_fraction(phi_fluid: float, phi_solid: float) -> float:
+    denominator = phi_fluid - phi_solid
+    value = 0.5
+    if denominator > 1.0e-12:
+        value = wp.clamp(phi_fluid / denominator, 1.0e-6, 1.0)
+    return value
+
+
+@wp.func
+def _is_open_corner(
+    i: int,
+    j: int,
+    k: int,
+    bc_types: wp.array(dtype=wp.int32),
+    nx: int,
+    ny: int,
+    nz: int,
+) -> bool:
+    face_count = 0
+    touches_open = False
+    if i == 0:
+        face_count += 1
+        touches_open = touches_open or bc_types[0] == 1 or bc_types[0] == 2 or bc_types[0] == 4
+    if i == nx - 1:
+        face_count += 1
+        touches_open = touches_open or bc_types[1] == 1 or bc_types[1] == 2 or bc_types[1] == 4
+    if j == 0:
+        face_count += 1
+        touches_open = touches_open or bc_types[2] == 1 or bc_types[2] == 2 or bc_types[2] == 4
+    if j == ny - 1:
+        face_count += 1
+        touches_open = touches_open or bc_types[3] == 1 or bc_types[3] == 2 or bc_types[3] == 4
+    if k == 0:
+        face_count += 1
+        touches_open = touches_open or bc_types[4] == 1 or bc_types[4] == 2 or bc_types[4] == 4
+    if k == nz - 1:
+        face_count += 1
+        touches_open = touches_open or bc_types[5] == 1 or bc_types[5] == 2 or bc_types[5] == 4
+    return face_count > 1 and touches_open
+
+
+@wp.kernel
+def apply_fullf_cut_link_transport_kernel(
+    f_post: wp.array(dtype=float),
+    solid_phi: wp.array3d(dtype=float),
+    f_star: wp.array(dtype=float),
+    bc_types: wp.array(dtype=wp.int32),
+    px: int,
+    py: int,
+    pz: int,
+    nx: int,
+    ny: int,
+    nz: int,
+    stride: int,
+) -> None:
+    """Replace halfway bounce-back by Bouzidi cut-link interpolation."""
+
+    i, j, k = wp.tid()
+    if _is_open_corner(i, j, k, bc_types, nx, ny, nz):
+        return
+    idx = i * ny * nz + j * nz + k
+    phi_fluid = solid_phi[i, j, k]
+    if phi_fluid < 0.0:
+        return
+    for q in range(1, 19):
+        cx, cy, cz = direction_x(q), direction_y(q), direction_z(q)
+        si, sj, sk = i - cx, j - cy, k - cz
+        if si < 0 or si >= nx or sj < 0 or sj >= ny or sk < 0 or sk >= nz:
+            continue
+        phi_solid = solid_phi[si, sj, sk]
+        if phi_solid >= 0.0:
+            continue
+
+        fraction = _cut_link_fraction(phi_fluid, phi_solid)
+        opposite = opposite_direction(q)
+        reflected = f_post[opposite * stride + idx]
+        if fraction < 0.5:
+            ai, aj, ak = i + cx, j + cy, k + cz
+            if ai < 0:
+                if px != 0:
+                    ai = _wrapped(ai, nx)
+            elif ai >= nx:
+                if px != 0:
+                    ai = _wrapped(ai, nx)
+            if aj < 0:
+                if py != 0:
+                    aj = _wrapped(aj, ny)
+            elif aj >= ny:
+                if py != 0:
+                    aj = _wrapped(aj, ny)
+            if ak < 0:
+                if pz != 0:
+                    ak = _wrapped(ak, nz)
+            elif ak >= nz:
+                if pz != 0:
+                    ak = _wrapped(ak, nz)
+            if (
+                ai >= 0 and ai < nx
+                and aj >= 0 and aj < ny
+                and ak >= 0 and ak < nz
+                and solid_phi[ai, aj, ak] >= 0.0
+            ):
+                away_idx = ai * ny * nz + aj * nz + ak
+                away_reflected = f_post[opposite * stride + away_idx]
+                reflected = (
+                    2.0 * fraction * reflected
+                    + (1.0 - 2.0 * fraction) * away_reflected
+                )
+        else:
+            reflected = (
+                reflected / (2.0 * fraction)
+                + (2.0 * fraction - 1.0)
+                * f_post[q * stride + idx]
+                / (2.0 * fraction)
+            )
+        f_star[q * stride + idx] = reflected
+
+
+@wp.kernel
+def apply_home_cut_link_transport_kernel(
+    rho: wp.array3d(dtype=float),
+    jx: wp.array3d(dtype=float),
+    jy: wp.array3d(dtype=float),
+    jz: wp.array3d(dtype=float),
+    sxx: wp.array3d(dtype=float),
+    syy: wp.array3d(dtype=float),
+    szz: wp.array3d(dtype=float),
+    sxy: wp.array3d(dtype=float),
+    sxz: wp.array3d(dtype=float),
+    syz: wp.array3d(dtype=float),
+    solid_phi: wp.array3d(dtype=float),
+    f_star: wp.array(dtype=float),
+    bc_types: wp.array(dtype=wp.int32),
+    px: int,
+    py: int,
+    pz: int,
+    nx: int,
+    ny: int,
+    nz: int,
+    stride: int,
+) -> None:
+    """HOME-provider variant of cut-link interpolation."""
+
+    i, j, k = wp.tid()
+    if _is_open_corner(i, j, k, bc_types, nx, ny, nz):
+        return
+    idx = i * ny * nz + j * nz + k
+    phi_fluid = solid_phi[i, j, k]
+    if phi_fluid < 0.0:
+        return
+    for q in range(1, 19):
+        cx, cy, cz = direction_x(q), direction_y(q), direction_z(q)
+        si, sj, sk = i - cx, j - cy, k - cz
+        if si < 0 or si >= nx or sj < 0 or sj >= ny or sk < 0 or sk >= nz:
+            continue
+        phi_solid = solid_phi[si, sj, sk]
+        if phi_solid >= 0.0:
+            continue
+
+        fraction = _cut_link_fraction(phi_fluid, phi_solid)
+        opposite = opposite_direction(q)
+        reflected = _home_at(
+            opposite, i, j, k, rho, jx, jy, jz, sxx, syy, szz, sxy, sxz, syz
+        )
+        if fraction < 0.5:
+            ai, aj, ak = i + cx, j + cy, k + cz
+            if ai < 0:
+                if px != 0:
+                    ai = _wrapped(ai, nx)
+            elif ai >= nx:
+                if px != 0:
+                    ai = _wrapped(ai, nx)
+            if aj < 0:
+                if py != 0:
+                    aj = _wrapped(aj, ny)
+            elif aj >= ny:
+                if py != 0:
+                    aj = _wrapped(aj, ny)
+            if ak < 0:
+                if pz != 0:
+                    ak = _wrapped(ak, nz)
+            elif ak >= nz:
+                if pz != 0:
+                    ak = _wrapped(ak, nz)
+            if (
+                ai >= 0 and ai < nx
+                and aj >= 0 and aj < ny
+                and ak >= 0 and ak < nz
+                and solid_phi[ai, aj, ak] >= 0.0
+            ):
+                away_reflected = _home_at(
+                    opposite,
+                    ai,
+                    aj,
+                    ak,
+                    rho,
+                    jx,
+                    jy,
+                    jz,
+                    sxx,
+                    syy,
+                    szz,
+                    sxy,
+                    sxz,
+                    syz,
+                )
+                reflected = (
+                    2.0 * fraction * reflected
+                    + (1.0 - 2.0 * fraction) * away_reflected
+                )
+        else:
+            local_forward = _home_at(
+                q, i, j, k, rho, jx, jy, jz, sxx, syy, szz, sxy, sxz, syz
+            )
+            reflected = (
+                reflected / (2.0 * fraction)
+                + (2.0 * fraction - 1.0) * local_forward / (2.0 * fraction)
+            )
+        f_star[q * stride + idx] = reflected
 
 
 @wp.func

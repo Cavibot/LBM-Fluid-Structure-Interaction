@@ -1,10 +1,12 @@
 # 基于 Newton 引擎的 LBM 网格流体模拟模块
 
-> 实现状态说明（2026-07-16）：本文主体记录的是原 FullF 融合
-> collide-stream 与刚体耦合实现。当前核心求解器已经重整为 post-collision
-> 持久状态上的 `stream -> physics -> collide -> encode` 流水线，并加入
-> FullF/HOME 编码以及 SRT/TRT/HOME-NOCM backend。moving-wall/MEM 暂时保留
-> 原 FullF 兼容路径。准确的当前范围以 `execution-plan.md` 为准。
+> 实现状态说明（2026-07-17）：本文主体仍记录原 FullF 融合实现的研究背景。
+> 当前核心求解器已经重整为
+> `provider -> streaming -> boundary completion -> collector -> force/hydro -> collision -> encoder`，
+> 并加入 SRT、TRT、FullF Raw MRT、FullF NOCM MRT 与 HOME NOCM MRT。
+> moving-wall/cut-link 已迁到 transport 阶段；Zou-He、pressure、convective
+> 在 Collector 前补齐 population。当前结构以 `mermaid/01_pipeline_overview.md`
+> 和 `0_working-notes/unfinished-part.md` 为准；本文后续旧实现描述仅作历史参考。
 
 
 **摘要**  

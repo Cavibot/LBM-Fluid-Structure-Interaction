@@ -2,7 +2,14 @@
 
 ## 0. 架构与数值正确性测试
 
-FullF/HOME 编码与碰撞后端的核心回归命令：
+Part 0～3 新架构测试单独保存在 `newton/tests/lbm_part123/`。定向命令：
+
+```bash
+uv run python -m unittest discover \
+  -s newton/tests/lbm_part123 -p "test_*.py" -v
+```
+
+历史 FullF/HOME 回归命令：
 
 ```bash
 uv run python -m unittest \
@@ -18,15 +25,17 @@ uv run python -m unittest \
 覆盖内容：
 
 - FullF/HOME 两种持久 State；
-- FullF/HOME provider × EPC/EMC collector；
-- SRT、TRT 与 HOME-NOCM；
+- FullF/HOME provider → population completion → 统一 collector；
+- SRT、TRT、FullF Raw MRT、FullF NOCM MRT 与 HOME NOCM MRT；
+- 统一力密度、半步物理速度闭合与各碰撞空间注入；
 - HOME reconstruction 与 NumPy 参考公式；
-- periodic/static halfway bounce-back；
+- periodic/static halfway bounce-back、Zou-He、pressure、convective；
+- moving-wall 与 cut-link transport；
+- edge/corner 冲突警告和 static-wall fallback；
 - 定向 streaming 与周期回绕；
 - 多步 shear-wave 衰减；
-- FullF Shan-Chen 回归；
-- 旧 moving-wall/MEM FullF 兼容路径；
-- 未实现组合的 fail-fast 行为。
+- Shan-Chen 与 wall virtual-density 回归；
+- SurfaceCompletion 和非法能力组合的 fail-fast 行为。
 
 历史可视化测试引用已经从仓库移除的示例模块时，会显式 `SkipTest`，
 不再以 `ModuleNotFoundError` 红掉全量 LBM 测试。恢复这些示例或删除

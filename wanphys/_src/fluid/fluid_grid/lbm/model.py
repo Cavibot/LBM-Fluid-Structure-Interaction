@@ -6,7 +6,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import warnings
+
 from ..base import FluidGridModelBase
+from .boundaries import normalize_boundary_type
+from .contracts import (
+    BoundaryModel,
+    normalize_collision,
+    normalize_encoding,
+    resolve_force_model,
+    validate_capability,
+)
 
 
 @dataclass
@@ -36,8 +46,16 @@ class LbmModel(FluidGridModelBase):
     """Collision backend.
 
     ``None`` preserves the legacy selection rule: ``lambda_trt == 0`` uses
-    SRT and ``lambda_trt > 0`` uses TRT.  ``raw_mrt`` and ``nocm_mrt`` are
-    reserved names and intentionally fail fast until implemented.
+    SRT and ``lambda_trt > 0`` uses TRT.  The canonical values are ``srt``,
+    ``trt``, ``raw_mrt`` and ``nocm_mrt``.
+    """
+
+    force_model: str | None = None
+    """Force computation model.
+
+    ``None`` infers the value from the legacy gravity and Shan-Chen fields.
+    Explicit values are ``none``, ``gravity``, ``shan_chen`` and
+    ``gravity+shan_chen``.
     """
 
     # ---- BGK collision ---------------------------------------------------
@@ -125,6 +143,12 @@ class LbmModel(FluidGridModelBase):
     blend: ``f_out = omega_reg * f_reg + (1 - omega_reg) * f_in``.
     """
 
+    mrt_third_omega: float = 1.0
+    """Raw/NOCM MRT relaxation rate for third-order modes."""
+
+    mrt_fourth_omega: float = 1.0
+    """Raw/NOCM MRT relaxation rate for fourth-order modes."""
+
     # ---- Carnahan-Starling EOS parameters (psi_type = PSI_CS = 2) ---------
     cs_a: float = 0.5
     """CS EOS attraction parameter *a*.  Controls the depth of the potential
@@ -159,8 +183,7 @@ class LbmModel(FluidGridModelBase):
             τ₊ = τ.
 
         This controls even-mode TRT relaxation in the collision operator.
-        The current Shan-Chen velocity-shift path intentionally uses τ₋
-        (``tau``) as a stability choice for strong-interface flows.
+        External force is translated separately in the even/odd source basis.
         """
         if self.lambda_trt <= 0.0:
             return self.tau
@@ -218,14 +241,18 @@ class LbmModel(FluidGridModelBase):
     # ---- Boundary conditions (per face) -----------------------------------
     # bc_types[FACE] and bc_velocity[FACE] — set after construction.
     # Default: all faces are bounce-back.
-    bc_types: tuple[int, int, int, int, int, int] = (
+    bc_types: tuple[int | str, int | str, int | str, int | str, int | str, int | str] = (
         0, 0, 0, 0, 0, 0,
     )
     """Boundary condition type for each face.
     Indices: 0=xmin, 1=xmax, 2=ymin, 3=ymax, 4=zmin, 5=zmax.
     0 = bounce-back, 1 = Zou-He velocity, 2 = convective outflow,
-    3 = periodic (must be paired on both faces of an axis).
+    3 = periodic (must be paired on both faces of an axis),
+    4 = Zou-He density/pressure.
     """
+
+    boundary_models: tuple[str, str, str, str, str, str] | None = None
+    """Canonical per-face boundary names; ``bc_types`` is the integer compatibility view."""
 
     bc_velocity: tuple[
         tuple[float, float, float],
@@ -243,6 +270,16 @@ class LbmModel(FluidGridModelBase):
         (0.0, 0.0, 0.0),
     )
     """Prescribed velocity (ux, uy, uz) for Zou-He faces [lattice units]."""
+
+    bc_density: tuple[float, float, float, float, float, float] = (
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+    )
+    """Prescribed density for pressure boundaries."""
+
+    bc_convective_speed: tuple[float, float, float, float, float, float] = (
+        0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+    )
+    """Per-face convective outlet Courant speed in ``[0, 1]``."""
 
     bc_periodic: tuple[bool, bool, bool] = (False, False, False)
     """Per-axis periodicity flags ``(x, y, z)``.
@@ -270,34 +307,50 @@ class LbmModel(FluidGridModelBase):
     because the fields are static after initialisation.
     """
 
+    use_cut_link: bool = False
+    """Use interpolated cut-link bounce-back at signed-distance solid links."""
+
+    surface_completion: bool = False
+    """Reserved selector.  Surface population completion is not implemented."""
+
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.encoding = str(self.encoding).lower()
-        if self.encoding not in ("fullf", "home"):
-            raise ValueError(
-                f"LBM encoding must be 'fullf' or 'home', got {self.encoding!r}"
-            )
+        if self.boundary_models is not None and self.bc_types != (0, 0, 0, 0, 0, 0):
+            raise ValueError("Specify boundary_models or bc_types, not both")
+        boundary_source = self.boundary_models if self.boundary_models is not None else self.bc_types
+        normalized_bc_types: list[int] = []
+        normalized_boundary_models: list[str] = []
+        for value in boundary_source:
+            normalized, boundary_model = normalize_boundary_type(value)
+            normalized_bc_types.append(normalized)
+            normalized_boundary_models.append(boundary_model.value)
+            if boundary_model is BoundaryModel.MOVING_WALL:
+                self.has_moving_walls = True
+            elif boundary_model is BoundaryModel.CUT_LINK:
+                self.use_cut_link = True
+        self.bc_types = tuple(normalized_bc_types)  # type: ignore[assignment]
+        self.boundary_models = tuple(normalized_boundary_models)  # type: ignore[assignment]
+        self.encoding = normalize_encoding(self.encoding).value
         if self.collision is not None:
-            self.collision = str(self.collision).lower()
-        declared_collisions = {
-            "srt", "trt", "home_nocm", "raw_mrt", "nocm_mrt"
-        }
-        if self.collision is not None and self.collision not in declared_collisions:
-            raise ValueError(
-                f"Unknown LBM collision {self.collision!r}; expected one of "
-                f"{sorted(declared_collisions)}"
-            )
-        if self.collision in ("raw_mrt", "nocm_mrt"):
+            canonical_collision, used_alias = normalize_collision(self.collision)
+            if used_alias:
+                warnings.warn(
+                    "collision='home_nocm' is deprecated; use "
+                    "collision='nocm_mrt' with an explicit encoding",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            self.collision = canonical_collision.value
+        resolved_force = resolve_force_model(
+            self.force_model,
+            (float(self.gravity_x), float(self.gravity_y), float(self.gravity_z)),
+            float(self.G),
+        )
+        self.force_model = resolved_force.value
+        validate_capability(self.encoding, self.resolved_collision, resolved_force)
+        if self.surface_completion:
             raise NotImplementedError(
-                f"LBM collision {self.collision!r} is reserved but not implemented"
-            )
-        if self.encoding == "home" and self.G != 0.0:
-            raise NotImplementedError("HOME encoding with Shan-Chen force is not supported")
-        if self.resolved_collision == "home_nocm" and self.G != 0.0:
-            raise NotImplementedError(
-                "HOME-NOCM collision with Shan-Chen force is not implemented; "
-                "SC force would be silently ignored. Use SRT/TRT with FullF, "
-                "or set G=0."
+                "SurfaceCompletion is interface-only and has no implementation"
             )
         if self.use_regularization and self.resolved_collision != "trt":
             raise ValueError("LBM regularization is supported only by TRT collision")
@@ -310,6 +363,15 @@ class LbmModel(FluidGridModelBase):
             raise ValueError(
                 f"TRT magic parameter lambda_trt must be >= 0, "
                 f"got lambda_trt = {self.lambda_trt}"
+            )
+        if (
+            self.collision is not None
+            and self.resolved_collision != "trt"
+            and self.lambda_trt > 0.0
+        ):
+            raise ValueError(
+                f"lambda_trt applies only to collision='trt', not "
+                f"{self.resolved_collision!r}"
             )
         if self.lambda_trt > 0.0:
             tau_plus = self.lambda_trt / (self.tau - 0.5) + 0.5
@@ -324,6 +386,12 @@ class LbmModel(FluidGridModelBase):
                 f"Regularization blend factor omega_reg must be in [0, 1], "
                 f"got omega_reg = {self.omega_reg}"
             )
+        for name, value in (
+            ("mrt_third_omega", self.mrt_third_omega),
+            ("mrt_fourth_omega", self.mrt_fourth_omega),
+        ):
+            if not (0.0 < value <= 2.0):
+                raise ValueError(f"{name} must be in (0, 2], got {value}")
         if self.psi_type not in (0, 1, 2):
             raise ValueError(
                 f"Shan-Chen psi_type must be 0 (PSI_RHO), 1 (PSI_EXP), "
@@ -365,6 +433,32 @@ class LbmModel(FluidGridModelBase):
                 f"bc_periodic must be a tuple of 3 bools (x, y, z), "
                 f"got {self.bc_periodic!r}"
             )
+        if len(self.bc_types) != 6:
+            raise ValueError(f"bc_types must contain six face entries, got {self.bc_types!r}")
+        unknown_bc_types = tuple(value for value in self.bc_types if value not in (0, 1, 2, 3, 4))
+        if unknown_bc_types:
+            raise ValueError(f"Unknown LBM boundary type(s): {unknown_bc_types!r}")
+        if len(self.bc_velocity) != 6:
+            raise ValueError(
+                f"bc_velocity must contain six face entries, got {self.bc_velocity!r}"
+            )
+        if len(self.bc_density) != 6:
+            raise ValueError(
+                f"bc_density must contain six face entries, got {self.bc_density!r}"
+            )
+        for face, density in enumerate(self.bc_density):
+            if float(density) <= 0.0:
+                raise ValueError(f"bc_density[{face}] must be > 0, got {density}")
+        if len(self.bc_convective_speed) != 6:
+            raise ValueError(
+                "bc_convective_speed must contain six face entries, got "
+                f"{self.bc_convective_speed!r}"
+            )
+        for face, speed in enumerate(self.bc_convective_speed):
+            if not (0.0 <= float(speed) <= 1.0):
+                raise ValueError(
+                    f"bc_convective_speed[{face}] must be in [0, 1], got {speed}"
+                )
         # Check that bc_types consistent with bc_periodic: if a face is
         # BC_PERIODIC (3), its paired face must also be BC_PERIODIC.
         axis_pairs: tuple[tuple[int, int], ...] = ((0, 1), (2, 3), (4, 5))
@@ -381,8 +475,8 @@ class LbmModel(FluidGridModelBase):
                     f"{axis_names[axis_idx]}-axis: face {f_min} is type "
                     f"{bc_min} but face {f_max} is type {bc_max}."
                 )
-            if is_periodic and (bc_min == 1 or bc_max == 1):
+            if is_periodic and (bc_min in (1, 2, 4) or bc_max in (1, 2, 4)):
                 raise ValueError(
                     f"Periodic {axis_names[axis_idx]}-axis cannot coexist "
-                    f"with Zou-He velocity inlet on the same axis."
+                    f"with an open boundary on the same axis."
                 )

@@ -82,8 +82,9 @@ CS2: wp.constant = wp.constant(1.0 / 3.0)
 # ---------------------------------------------------------------------------
 BC_BOUNCE_BACK: int = 0     # default: halfway bounce-back (handled in collide-stream)
 BC_VELOCITY_INLET: int = 1  # Zou-He velocity boundary
-BC_OUTFLOW: int = 2         # convective outflow (zero-gradient copy)
+BC_OUTFLOW: int = 2         # history-based first-order convective outflow
 BC_PERIODIC: int = 3        # periodic boundary (neighbour wraps to opposite face)
+BC_PRESSURE: int = 4        # Zou-He density/pressure boundary
 
 # ---------------------------------------------------------------------------
 # Shan-Chen pseudopotential types

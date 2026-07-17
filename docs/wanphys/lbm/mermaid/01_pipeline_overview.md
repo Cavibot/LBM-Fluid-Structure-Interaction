@@ -1,98 +1,108 @@
-# 01 · LBM 核心一步流水线（post-collision 时间语义）
+# 01 · LBM 统一一步流水线（post-collision 时间语义）
 
-> 对应代码：`LbmSolver.step()`、`streaming.py`、`collisions.py`、`encoding.py`  
-> 目的：说明重整后「持久状态 → stream → physics → collide → encode」的时间语义与数据流。
+> 对应代码：`LbmSolver.step()`、`streaming.py`、`boundaries.py`、
+> `forcing.py`、`moments.py`、`collisions.py`、`encoding.py`。
 
-## 图含义
-
-旧实现把 collision 与 streaming 融合成单一 kernel，活动缓冲语义接近 *pre-collision*。  
-新架构统一持久化 **post-collision** 状态，把一步拆成四个可组合阶段。
+## 数据流
 
 ```mermaid
 flowchart TB
-    subgraph Persist["持久状态（双缓冲）"]
-        SI["state_in<br/>post-collision EncodedStateⁿ"]
-        SO["state_out<br/>post-collision EncodedStateⁿ⁺¹"]
+    SI["EncodedStateⁿ<br/>post-collision"]
+
+    subgraph PROVIDER["StateProvider"]
+        PF["FullF：直接读取 fPostᵢ"]
+        PH["HOME：Hermite 重构 fPostᵢ"]
     end
 
-    SI --> COPY["复制边界场<br/>solid_phi / solid_body_id / vel_solid_*"]
-    COPY --> STREAM
-
-    subgraph STAGE1["① Streaming"]
-        STREAM["pull-stream + 半程反弹回<br/>provider 读上游 post 分布"]
-        STREAM --> KIND{collision.input_kind?}
-        KIND -->|"population (EPC)"| FSTAR["scratch: f_star[Q·N]"]
-        KIND -->|"moments (EMC)"| MSTAR["scratch: ρ*, j*, ρS*<br/>（边读边累计，不建全域 f）"]
+    subgraph BOUNDARY["Part 3：迁移与边界补全"]
+        ST["Pull Streaming"]
+        TL["TransportLinkLaw<br/>periodic / bounce-back / moving-wall / cut-link"]
+        OC["OpenBoundaryCompletion<br/>Zou-He / pressure / convective"]
+        FS["完整 f*[Q]"]
+        SURF["SurfaceCompletion<br/>仅接口；选择时 fail-fast"]
     end
 
-    FSTAR --> PHYS
-    MSTAR --> EMC
-
-    subgraph STAGE2["② Physics（仅 EPC 路径完整执行）"]
-        PHYS["compute_moments → ρ, u"]
-        PHYS --> SC{"G ≠ 0 ?"}
-        SC -->|是| FORCE["Shan-Chen 力<br/>+ velocity shift"]
-        SC -->|否| HYDRO["hydro velocity 就绪"]
-        FORCE --> HYDRO
-        HYDRO --> REG{"TRT + regularization?"}
-        REG -->|是| REGF["reg_trt_kernel"]
-        REG -->|否| COLL
-        REGF --> COLL
+    subgraph COLLECT["统一 Collector"]
+        PC["PopulationCollector"]
+        MA["MomentAccumulator<br/>ρ* / j* / stress / required moments"]
     end
 
-    subgraph STAGE3["③ Collision"]
-        COLL["EPC: SRT / TRT<br/>f_star → f_post"]
-        COLL --> FORCE2["可选 Guo 体力 / 恢复物理速度"]
-        EMC["EMC: HOME-NOCM-MRT<br/>moments* → moments_post"]
+    subgraph FORCE["Part 2：统一外力"]
+        FP["ForceProvider<br/>F = ρg + Fsc"]
+        HC["HydroClosure<br/>u = (j* + F/2) / ρ*"]
     end
 
-    FORCE2 --> ENC1
-    EMC --> ENC2
-
-    subgraph STAGE4["④ Encode（由 model.encoding 决定）"]
-        ENC1{"encoding?"}
-        ENC1 -->|fullf| OUTF["直接写入 state_out.f_post"]
-        ENC1 -->|home| OUTH1["populations_to_home<br/>→ 10 个 HOME 矩"]
-        ENC2{"encoding?"}
-        ENC2 -->|home| OUTH2["直接写入 state_out.kinetic_fields"]
-        ENC2 -->|fullf| OUTF2["home_to_populations<br/>Hermite 重构 → f_post"]
+    subgraph COLLIDE["Part 1：碰撞算子"]
+        CTX["CollisionContext<br/>f* / moments / ρ / j / u / F"]
+        EPC["SRT / TRT<br/>population or even/odd source"]
+        RAW["Raw MRT<br/>raw-moment source"]
+        NOCM["FullF NOCM MRT<br/>19D central-moment source"]
+        HOME["HOME NOCM MRT<br/>retained-moment closure source"]
     end
 
-    OUTF --> OBS
-    OUTH1 --> OBS
-    OUTH2 --> OBS
-    OUTF2 --> OBS
+    EN["Encoder<br/>FullF 或 HOME"]
+    SO["EncodedStateⁿ⁺¹<br/>post-collision"]
 
-    subgraph OBSERVE["观测量写出"]
-        OBS["density / velocity_* / force_* / MAC 面速度"]
-    end
+    SI --> PF
+    SI --> PH
+    PF --> ST
+    PH --> ST
+    TL --> ST
+    ST --> OC
+    OC --> FS
+    SURF -. "不进入当前执行流" .-> OC
 
-    OBS --> SO
-    SO -.->|"Domain.step 交换缓冲"| SI
+    FS --> PC
+    FS --> MA
+    PC --> FP
+    MA --> FP
+    MA --> HC
+    FP --> HC
 
-    style SI fill:#1a3a5c,color:#fff
-    style SO fill:#1a3a5c,color:#fff
-    style STREAM fill:#2d5a3d,color:#fff
-    style COLL fill:#5c3a1a,color:#fff
-    style EMC fill:#5c3a1a,color:#fff
-    style OBS fill:#4a3a5c,color:#fff
+    FS --> CTX
+    PC --> CTX
+    MA --> CTX
+    FP --> CTX
+    HC --> CTX
+
+    CTX --> EPC
+    CTX --> RAW
+    CTX --> NOCM
+    CTX --> HOME
+    EPC --> EN
+    RAW --> EN
+    NOCM --> EN
+    HOME --> EN
+    EN --> SO
+    SO -. "Domain.step 交换双缓冲" .-> SI
 ```
 
-## 阅读要点
-
-| 阶段 | 负责 | 不负责 |
-|------|------|--------|
-| Streaming | 上游寻址、周期回绕、bounce-back、population 获取 | 碰撞、SC 力、编码 |
-| Physics | 矩、力、水动力学速度、可选正则化 | 刚体栅格化 |
-| Collision | EPC 输出 `f_post`；EMC 输出 HOME 矩 | 持久编码选择 |
-| Encode | 把碰撞结果写成 `model.encoding` 指定的持久格式 | 观测量以外的副作用 |
-
-时间语义对照：
+## 强制时序
 
 ```text
-旧:  fⁿ (≈ pre-collision)  --[collide+stream]-->  fⁿ⁺¹
-新:  EncodedStateⁿ (post-collision)
-       --stream--> f* / moments*
-       --collide--> collision_output
-       --encode--> EncodedStateⁿ⁺¹ (post-collision)
+post-collision state n
+→ streaming / transport link law
+→ open-boundary population completion
+→ 完整 f*[Q]
+→ population / moment collection
+→ force computation
+→ hydro closure
+→ collision-space force injection + collision
+→ encode post-collision state n+1
 ```
+
+因此边界只负责补齐 population；它不查询 CollisionSpace。Zou-He、pressure、
+convective 的结果先进入 Collector，随后才计算宏观量、外力和碰撞。
+
+## 模块职责
+
+| 模块 | 负责 | 不负责 |
+|---|---|---|
+| StateProvider | FullF 读取或 HOME 重构 | 边界与碰撞 |
+| TransportLinkLaw | 周期、反弹、移动壁面、cut-link | 开口宏观条件 |
+| OpenBoundaryCompletion | 补齐未知 incoming population | 碰撞基底 |
+| Collector | 由完整 `f*[Q]` 统计状态 | 修改边界 |
+| ForceProvider | 计算统一力密度 `F` | 决定注入基底 |
+| HydroClosure | 计算半步物理速度 | 重复施加外力 |
+| CollisionOperator | 把 `F` 翻译到自身基底并碰撞 | 选择持久编码 |
+| Encoder | 保存为 FullF 或 HOME | 重新解释碰撞公式 |

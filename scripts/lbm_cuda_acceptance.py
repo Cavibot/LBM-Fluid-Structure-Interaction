@@ -73,12 +73,9 @@ def _combo_step(device: str, encoding: str, collision: str, g: float = 0.0) -> s
     domain.step(1.0)
     if not _is_finite_state(domain):
         raise RuntimeError(f"{encoding}+{collision} produced non-finite state")
-    scratch = "none"
-    if collision == "home_nocm":
-        if domain.solver._f_star is not None or domain.solver._f_post is not None:
-            raise RuntimeError("HOME-NOCM allocated population scratch unexpectedly")
-        scratch = "no_population_scratch"
-    return f"ok finite; scratch={scratch}"
+    if domain.solver._f_star is None:
+        raise RuntimeError("unified boundary pipeline did not allocate f*[Q]")
+    return "ok finite; unified_population_boundary_scratch=yes"
 
 
 def main() -> int:
@@ -98,10 +95,11 @@ def main() -> int:
     combos = (
         ("fullf", "srt"),
         ("fullf", "trt"),
-        ("fullf", "home_nocm"),
+        ("fullf", "raw_mrt"),
+        ("fullf", "nocm_mrt"),
         ("home", "srt"),
         ("home", "trt"),
-        ("home", "home_nocm"),
+        ("home", "nocm_mrt"),
     )
     all_ok = True
     for encoding, collision in combos:
@@ -116,19 +114,18 @@ def main() -> int:
             print(f"[FAIL] {name}: {exc}")
             traceback.print_exc()
 
-    # Fail-fast: HOME-NOCM + SC must reject at construction.
+    # Fail-fast: HOME + Raw MRT is not a declared execution path.
     try:
         LbmModel(
             fluid_grid_res=(4, 4, 4),
             device=device,
-            encoding="fullf",
-            collision="home_nocm",
-            G=-1.0,
+            encoding="home",
+            collision="raw_mrt",
         )
         all_ok = False
-        print("[FAIL] home_nocm+SC should raise NotImplementedError")
+        print("[FAIL] HOME+Raw MRT should raise NotImplementedError")
     except NotImplementedError:
-        print("[PASS] home_nocm+SC fail-fast")
+        print("[PASS] HOME+Raw MRT fail-fast")
 
     # FullF Shan-Chen smoke
     try:

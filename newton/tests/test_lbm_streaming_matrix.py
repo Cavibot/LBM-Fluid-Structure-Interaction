@@ -8,9 +8,9 @@ from wanphys._src.fluid.fluid_grid.lbm import LbmDomain, LbmModel
 
 
 class TestLbmStreamingMatrix(unittest.TestCase):
-    def test_all_six_concrete_combinations_keep_uniform_equilibrium(self) -> None:
+    def test_all_seven_concrete_combinations_keep_uniform_equilibrium(self) -> None:
         for encoding in ("fullf", "home"):
-            for collision in ("srt", "trt", "home_nocm"):
+            for collision in ("srt", "trt", "nocm_mrt"):
                 with self.subTest(encoding=encoding, collision=collision):
                     model = LbmModel(
                         fluid_grid_res=(3, 3, 3),

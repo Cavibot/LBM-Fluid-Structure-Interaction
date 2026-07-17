@@ -60,7 +60,7 @@ class TestLbmHomeNocm(unittest.TestCase):
     def setUp(self) -> None:
         self.model = LbmModel(
             fluid_grid_res=(1, 1, 1), device="cpu", encoding="home",
-            collision="home_nocm", bc_periodic=(True, True, True), tau=0.8,
+            collision="nocm_mrt", bc_periodic=(True, True, True), tau=0.8,
         )
 
     def test_home_reconstruction_matches_numpy_reference_and_closes(self) -> None:
