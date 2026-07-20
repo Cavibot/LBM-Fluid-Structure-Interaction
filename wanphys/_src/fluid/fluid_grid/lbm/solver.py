@@ -555,7 +555,7 @@ class LbmSolver(FluidGridSolverBase):
 
         t0 = time.perf_counter() if collect_stats else 0.0
         self._home_fp32.ensure_from_state(state_in)
-        self._home_fp32.step(state_out)
+        self._home_fp32.step(state_out, state_in=state_in)
         self._home_fp32.copy_kappa_to(self._vof_sharp._kappa)
         if stats is not None:
             stats.ms_collision = (time.perf_counter() - t0) * 1000.0

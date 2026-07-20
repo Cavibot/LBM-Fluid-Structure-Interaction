@@ -489,29 +489,65 @@ class GridLbmRigidCoupling(CompositeSimulation):
             pre_feedback_wrench: np.ndarray = np.asarray(rigid_state.body_f.numpy(), dtype=np.float64).copy()
 
             if self._feedback_mode == "momentum_exchange":
-                # Strict momentum-exchange: use f_post (after step) and f_pre (before step)
-                f_post_stream: wp.array = fluid_state_after.f  # _state_in.f after swap
-                f_pre_stream: wp.array = self._fluid_domain._state_out.f  # _state_out.f after swap
-                stride: int = nx * ny * nz
-                wp.launch(
-                    ck.accumulate_lbm_momentum_exchange_all_bodies,
-                    dim=(nx, ny, nz),
-                    inputs=[
-                        f_post_stream,
-                        f_pre_stream,
-                        fluid_state_after.solid_phi,
-                        fluid_state_after.solid_body_id,
-                        dh,
-                        nx,
-                        ny,
-                        nz,
-                        stride,
-                        rigid_state.body_q,
-                        rigid_backend.body_com,
-                        rigid_state.body_f,
-                        self._feedback_force_scale,
-                    ],
-                )
+                # HOME-FREE moment path zeros ``f``; fall back to macro feedback.
+                use_me = str(getattr(model, "lbm_backend", "dist")).lower() != "home_fp32"
+                if use_me:
+                    # Strict momentum-exchange: use f_post (after step) and f_pre (before step)
+                    f_post_stream: wp.array = fluid_state_after.f  # _state_in.f after swap
+                    f_pre_stream: wp.array = self._fluid_domain._state_out.f  # _state_out.f after swap
+                    stride: int = nx * ny * nz
+                    wp.launch(
+                        ck.accumulate_lbm_momentum_exchange_all_bodies,
+                        dim=(nx, ny, nz),
+                        inputs=[
+                            f_post_stream,
+                            f_pre_stream,
+                            fluid_state_after.solid_phi,
+                            fluid_state_after.solid_body_id,
+                            dh,
+                            nx,
+                            ny,
+                            nz,
+                            stride,
+                            rigid_state.body_q,
+                            rigid_backend.body_com,
+                            rigid_state.body_f,
+                            self._feedback_force_scale,
+                        ],
+                    )
+                else:
+                    if not getattr(self, "_home_fp32_feedback_fallback_warned", False):
+                        warnings.warn(
+                            "home_fp32 has no distribution ``f``; "
+                            "using approx macro-velocity LBM→rigid feedback "
+                            "instead of momentum_exchange.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                        self._home_fp32_feedback_fallback_warned = True
+                    wp.launch(
+                        ck.accumulate_lbm_boundary_feedback_all_bodies,
+                        dim=(nx, ny, nz),
+                        inputs=[
+                            fluid_state_after.density,
+                            fluid_state_after.velocity_x,
+                            fluid_state_after.velocity_y,
+                            fluid_state_after.velocity_z,
+                            fluid_state_after.solid_phi,
+                            fluid_state_after.solid_body_id,
+                            fluid_state_after.vel_solid_u,
+                            fluid_state_after.vel_solid_v,
+                            fluid_state_after.vel_solid_w,
+                            dh,
+                            nx,
+                            ny,
+                            nz,
+                            rigid_state.body_q,
+                            rigid_backend.body_com,
+                            rigid_state.body_f,
+                            self._feedback_force_scale,
+                        ],
+                    )
             else:
                 # Legacy macro-velocity approximation
                 wp.launch(

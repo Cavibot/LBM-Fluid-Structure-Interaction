@@ -14,6 +14,11 @@ Increment status
 **H6.2:** PLIC κ → Eq.12 Laplace on home FS (mild γ).
 **H7:** bubble pressure — GPU CCL + Δφ volume; optional Home disjoint /
     small-bubble σ / near-bubble eddy (``vof_bubble_*``).
+**H7.1:** FSI — sync ``LbmState.solid_phi`` / MAC wall vel into HOME-FREE;
+    fused kernel treats solids as moving walls; approx rigid feedback.
+**H7.2:** Late-pool surface policy extracted from examples
+    (``surface_policy.HomeVofLatePoolController``: quiet level / orphan / topup).
+**H7.3:** Opt-in ``vof_height_eq`` — gradual IF-φ leveling on the dominant free-surface plane.
 **H8 pending:** foam / dissolved-gas (§4.4); quant deferred.
 
 **Next:** foam / dissolved-gas (§4.4); quant deferred.
@@ -24,6 +29,11 @@ from __future__ import annotations
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.bridge import (
     HomeFp32VofBridge,
     home_domain_bc_from_model,
+)
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.surface_policy import (
+    HomeVofLatePoolController,
+    LatePoolEvent,
+    LatePoolFrameStats,
 )
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.bc import (
     HomeDomainBC,
@@ -72,7 +82,10 @@ __all__ = [
     "HomeFp32VofBridge",
     "HomeMomentArrays",
     "HomeMoments",
+    "HomeVofLatePoolController",
     "HomeVofState",
+    "LatePoolEvent",
+    "LatePoolFrameStats",
     "NEXT_INCREMENT",
     "collide_moments_numpy",
     "equilibrium_s_from_u",

@@ -20,11 +20,13 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.bc import (
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.vof_warp import (
     HomeVofGpuBuffers,
     alloc_home_vof_gpu,
+    flatten_top_interface_layer,
     level_surface_high_to_low,
     reabsorb_orphan_liquid,
     seed_home_vof_gpu,
     set_face_bc_gpu,
     step_home_vof_gpu,
+    sync_solids_from_lbm_state,
     topup_surface_with_budget,
     upload_home_vof_state,
 )
@@ -80,10 +82,41 @@ class HomeFp32VofBridge:
         self.model = model
         self._gpu: HomeVofGpuBuffers | None = None
         self._domain_bc = home_domain_bc_from_model(model)
+        self._late_pool = None
+        self._height_eq_counter = 0
+        self._last_height_eq_stats: dict[str, float] = {}
 
     @property
     def enabled(self) -> bool:
         return str(self.model.lbm_backend).lower() == "home_fp32"
+
+    @property
+    def late_pool(self):
+        """Lazy late-pool surface controller (quiet level / orphan / topup)."""
+        if self._late_pool is None:
+            from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.surface_policy import (
+                HomeVofLatePoolController,
+            )
+
+            self._late_pool = HomeVofLatePoolController(self)
+        return self._late_pool
+
+    def configure_late_pool(self, *, home_faithful: bool = False, **kwargs):
+        """Create/configure the late-pool controller (call once after construction)."""
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.surface_policy import (
+            HomeVofLatePoolController,
+        )
+
+        self._late_pool = HomeVofLatePoolController(
+            self, home_faithful=home_faithful, **kwargs
+        )
+        return self._late_pool
+
+    def reset(self) -> None:
+        self._gpu = None
+        self._domain_bc = home_domain_bc_from_model(self.model)
+        if self._late_pool is not None:
+            self._late_pool.reset()
 
     @property
     def vof_state(self) -> HomeVofState | None:
@@ -107,10 +140,6 @@ class HomeFp32VofBridge:
             phi=g.phi.numpy().astype(np.float64),
             cell_type=g.cell_type.numpy().astype(np.int32),
         )
-
-    def reset(self) -> None:
-        self._gpu = None
-        self._domain_bc = home_domain_bc_from_model(self.model)
 
     def _ensure_gpu(self) -> HomeVofGpuBuffers:
         if self._gpu is None:
@@ -189,9 +218,15 @@ class HomeFp32VofBridge:
         wp.copy(state.phi, g.phi)
         wp.copy(state.cell_type, g.cell_type)
 
-    def step(self, state_out: LbmState) -> None:
-        """Advance one lattice step on GPU; write macros into ``state_out``."""
+    def step(self, state_out: LbmState, state_in: LbmState | None = None) -> None:
+        """Advance one lattice step on GPU; write macros into ``state_out``.
+
+        When ``state_in`` is provided, rigid ``solid_phi`` / wall velocities are
+        synced from the LBM state before the HOME-FREE step (FSI path).
+        """
         buf = self._ensure_gpu()
+        if state_in is not None:
+            sync_solids_from_lbm_state(buf, state_in)
         self._domain_bc = home_domain_bc_from_model(self.model)
         set_face_bc_gpu(buf, self._domain_bc)
         step_home_vof_gpu(
@@ -224,8 +259,40 @@ class HomeFp32VofBridge:
             bubble_eddy=bool(self.model.vof_bubble_eddy),
             bubble_eddy_atm_vol=float(self.model.vof_bubble_eddy_atm_vol),
         )
+        # Opt-in free-surface leveling (IF-only, gradual). Runs in the solver.
+        if bool(getattr(self.model, "vof_height_eq", False)):
+            every = max(1, int(getattr(self.model, "vof_height_eq_every", 8)))
+            self._height_eq_counter += 1
+            if self._height_eq_counter % every == 0:
+                self._last_height_eq_stats = self.apply_height_equation(state_out=None)
         self.sync_to_state(state_out)
         state_out.f.zero_()
+        # Keep solid fields on the output buffer for feedback / visualisation.
+        if state_in is not None:
+            wp.copy(state_out.solid_phi, state_in.solid_phi)
+            wp.copy(state_out.solid_body_id, state_in.solid_body_id)
+            wp.copy(state_out.vel_solid_u, state_in.vel_solid_u)
+            wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
+            wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
+
+    def apply_height_equation(self, state_out: LbmState | None = None) -> dict[str, float]:
+        """Gradual free-surface leveling: ``Δh = α(H*−h)`` on top IF only."""
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.height_eq import (
+            apply_vof_height_equation,
+        )
+
+        buf = self._ensure_gpu()
+        stats = apply_vof_height_equation(
+            buf,
+            rate=float(self.model.vof_height_eq_rate),
+            u_max=float(self.model.vof_height_eq_u_max),
+            dh_cap=float(self.model.vof_height_eq_dh_cap),
+            n_sweeps=int(getattr(self.model, "vof_height_eq_sweeps", 1)),
+        )
+        self._last_height_eq_stats = dict(stats)
+        if state_out is not None:
+            self.sync_to_state(state_out)
+        return dict(stats)
 
     def level_high_to_low(self, state_out: LbmState | None = None) -> float:
         """Once-per-frame: move mass from high free-surface tops to lower columns.
@@ -242,6 +309,14 @@ class HomeFp32VofBridge:
         if state_out is not None:
             self.sync_to_state(state_out)
         return float(dmass)
+
+    def flatten_top_interface(self, state_out: LbmState | None = None) -> dict[str, float]:
+        """Sub-cell late-pool pass: one interface layer, shared continuous height."""
+        buf = self._ensure_gpu()
+        stats = flatten_top_interface_layer(buf)
+        if state_out is not None:
+            self.sync_to_state(state_out)
+        return dict(stats)
 
     def topup_with_budget(
         self,

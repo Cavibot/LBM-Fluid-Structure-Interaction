@@ -127,6 +127,22 @@ class LbmModel(FluidGridModelBase):
     """Fraction of donor *top-cell* mass moved per leveling pass."""
     vof_quiet_fill_u_max: float = 0.025
     """Arm leveling only when mean |u| is below this (example gate)."""
+    vof_height_eq: bool = False
+    """Opt-in free-surface φ leveling on existing interface cells only.
+
+    Relaxes ``φ → φ*`` on the dominant pool-surface IF plane (mass-conserving).
+    Does not rewrite bulk liquid or invent mid-air cells.
+    """
+    vof_height_eq_rate: float = 0.08
+    """Mobility α in ``Δφ = α (φ* − φ)`` per call."""
+    vof_height_eq_u_max: float = 0.04
+    """Skip while mean |u| on those IF cells exceeds this."""
+    vof_height_eq_dh_cap: float = 0.08
+    """Max |Δφ| per interface cell per call."""
+    vof_height_eq_sweeps: int = 1
+    """Reserved (plane-shift disabled)."""
+    vof_height_eq_every: int = 12
+    """Run every N lattice steps."""
     vof_orphan_reabsorb: bool = True
     """When quiet-level is armed, reabsorb disconnected airborne liquid blobs."""
     vof_orphan_max_cells: int = 96

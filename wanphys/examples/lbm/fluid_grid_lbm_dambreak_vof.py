@@ -8,6 +8,10 @@ Default: distribution LBM (``lbm_backend=dist``). Optional moment HOME-FREE (GPU
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof \\
         --backend home --n 48
 
+Default home path: pure HOME-FREE VOF (no host ``level ON``).
+Opt-in: ``--height-eq`` (solver free-surface IF leveling; gradual),
+``--late-pool``.
+
 Closer to Home-FSLBM fill/empty + walls (no host leveling/topup):
 
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof \\
@@ -28,7 +32,6 @@ import warp as wp
 from wanphys._src.fluid.fluid_grid.lbm import LbmDomain, LbmModel
 from wanphys._src.fluid.fluid_grid.lbm.benchmark.metrics import (
     collect_interface_roughness,
-    collect_surface_height_map,
 )
 from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRenderer
 
@@ -72,6 +75,9 @@ class VofDamBreak:
         n: int = N,
         home_faithful: bool = False,
         bubble_pressure: bool = False,
+        g_scale: float = 1.0,
+        enable_late_pool: bool = False,
+        enable_height_eq: bool = False,
     ):
         self.viewer = viewer
         viewer._paused = True
@@ -79,12 +85,21 @@ class VofDamBreak:
         self._n = int(n)
         self._home_faithful = bool(home_faithful) and self._backend == "home_fp32"
         self._bubble_pressure = bool(bubble_pressure) and self._backend == "home_fp32"
+        self._g_scale = max(float(g_scale), 1.0e-6)
+        # Late-pool host (level ON / orphan / topup) is opt-in — default is
+        # pure solver (no host wipe).
+        self._disable_late_pool = (not bool(enable_late_pool)) or self._home_faithful
+        self._enable_height_eq = bool(enable_height_eq) and not self._home_faithful
+        self._height_eq_armed = False
+        self._height_eq_arm_after_t = 8.0
+        self._height_eq_calls = 0
+        self._last_height_eq: dict | None = None
         # Lattice |g| must scale with column height H~n/2. Fixed gz across N
         # makes Fr∝√(gH) blow up: n=128 @ gz=-0.002 → ρ_max≳1.3, wall foam,
         # and visible mass drain. Keep g·H ≈ const vs n_ref=48.
         n_ref = 48
         if self._backend == "dist":
-            gravity = GRAVITY
+            gravity = GRAVITY * self._g_scale
             tau = TAU
             gamma = VOF_GAMMA
             self._substeps = SIM_SUBSTEPS
@@ -99,11 +114,12 @@ class VofDamBreak:
             # Baseline late-pool params. Strong wall κ wetting peels liquid off
             # the walls into a frustum (四棱台); keep vof_wall_wetting=0.
             # See docs/wanphys/lbm_home_fslbm_one_cell_limit_zh.md.
-            gravity = -0.0020 * (float(n_ref) / float(self._n))
+            gravity = -0.0020 * (float(n_ref) / float(self._n)) * self._g_scale
             tau = 0.51
             # Home GPU def_6_sigma≈0.024 → γ≈0.004; baseline wanphys uses 1.5e-3.
             gamma = 4.0e-3 if self._home_faithful else 1.5e-3
-            self._substeps = max(SIM_SUBSTEPS, 12)
+            # Stronger g → more violent bore; give a few extra substeps.
+            self._substeps = max(SIM_SUBSTEPS, 12 if self._g_scale <= 1.5 else 16)
             wall_wetting = 0.0
             wall_film = False
             quiet_fill = False  # armed later when |u| is small (unless faithful)
@@ -134,9 +150,14 @@ class VofDamBreak:
             vof_quiet_fill=False,
             vof_quiet_fill_rate=0.35,
             vof_quiet_fill_u_max=0.025,
-            vof_orphan_reabsorb=True,
+            vof_orphan_reabsorb=False,
             vof_orphan_max_cells=max(96, self._n),
             vof_orphan_height_margin=3,
+            vof_height_eq=False,
+            vof_height_eq_rate=0.08,
+            vof_height_eq_u_max=0.04,
+            vof_height_eq_dh_cap=0.08,
+            vof_height_eq_every=12,
             vof_bubble_pressure=self._bubble_pressure,
             # Disjoint only by default with --bubble-pressure.
             # Eddy viscosity is very costly (6³ scan/cell) and over-damps the pool.
@@ -152,7 +173,7 @@ class VofDamBreak:
         print(
             f"VOF Dam-Break: {self._n}^3, lattice={self.model.lattice}, "
             f"backend={self.model.lbm_backend}, tau={self.model.tau}, "
-            f"gz={gravity}, gamma={gamma}, substeps={self._substeps}, "
+            f"gz={gravity} (g_scale={self._g_scale}), gamma={gamma}, substeps={self._substeps}, "
             f"phase_mode=vof_sharp, "
             f"collide={'NOCM-HOME' if self._backend == 'home_fp32' else 'TRT/dist'}, "
             f"wall_wetting={self.model.vof_wall_wetting}, "
@@ -160,11 +181,22 @@ class VofDamBreak:
             f"(edge_only={self.model.vof_wall_film_edge_only}), "
             f"home_faithful={self._home_faithful} "
             f"(fill_empty={home_fill_empty}, wall_eq={home_wall_eq}, seal={seal_fg}), "
-            f"bubble_pressure={self._bubble_pressure}"
+            f"bubble_pressure={self._bubble_pressure}, "
+            f"height_eq={self._enable_height_eq} "
+            f"(arm_t>={self._height_eq_arm_after_t}), "
+            f"late_pool={not self._disable_late_pool}"
         )
 
         self.domain = LbmDomain(self.model)
         self.domain.create_state()
+        self._late_pool = None
+        if self.domain.solver._home_fp32 is not None and not self._disable_late_pool:
+            self._late_pool = self.domain.solver._home_fp32.configure_late_pool(
+                home_faithful=self._home_faithful,
+                arm_after_t=HEIGHT_MAP_START_T,
+                height_every_frames=HEIGHT_MAP_EVERY_FRAMES,
+                level_max_frames=300,
+            )
         self.sim_dt = FRAME_DT / max(self._substeps, 1)
         self.sim_time = 0.0
 
@@ -227,6 +259,8 @@ class VofDamBreak:
         self._vol0 = float(
             np.nansum(np.where(ctype > 0, phi * np.maximum(rho, 0.0), 0.0))
         )
+        if self._late_pool is not None:
+            self._late_pool.vol0 = float(self._vol0)
 
         self.ssfr = ScreenSpaceFluidRenderer(
             viewer=viewer,
@@ -237,47 +271,50 @@ class VofDamBreak:
         viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
         self.frame_count = 0
         self._last_ms = 0.0
-        self._height_map = None  # SurfaceHeightMap after t >= HEIGHT_MAP_START_T
-        self._quiet_fill_armed = False
-        self._topup_done = False
-        self._level_on_frame = -1
-        # ~5s of leveling at 60fps logging / 0.5s steps? frame_count advances
-        # once per FRAME_DT; with FRAME_DT=1/60 and log every 30 → use 300 frames ≈5s.
-        self._level_max_frames = 300
         print("Controls: [Space] unpause  [R] reset  [mouse] orbit")
 
     def step(self):
         t0 = time.perf_counter()
+        home = self.domain.solver._home_fp32
+        # Arm solver free-surface leveling after splash (flag on LbmModel;
+        # operator runs inside HomeFp32VofBridge.step each lattice step).
+        if (
+            self._enable_height_eq
+            and home is not None
+            and self.sim_time >= self._height_eq_arm_after_t
+            and not self._height_eq_armed
+        ):
+            self.model.vof_height_eq = True
+            self._height_eq_armed = True
+            print(
+                f"[height-eq ON] t={self.sim_time:.1f}s "
+                f"solver IF-φ level α={self.model.vof_height_eq_rate} "
+                f"|Δφ|≤{self.model.vof_height_eq_dh_cap} "
+                f"every={self.model.vof_height_eq_every} "
+                f"(interface cells only, no bulk rewrite)",
+                file=sys.stderr,
+                flush=True,
+            )
         for _ in range(self._substeps):
             self.domain.step(self.sim_dt)
-        # High→low leveling + orphan reabsorb after substeps.
-        home = self.domain.solver._home_fp32
-        did_host = False
-        if (
-            home is not None
-            and self._quiet_fill_armed
-            and bool(self.model.vof_orphan_reabsorb)
-            and not self._home_faithful
-        ):
-            moved, n_orph = home.reabsorb_orphans(self.domain.state)
-            did_host = True
-            if n_orph > 0 and self.frame_count % 30 == 0:
-                print(
-                    f"  [orphan] reabsorbed {n_orph} blobs mass={moved:.2f}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-        if (
-            home is not None
-            and self._quiet_fill_armed
-            and bool(self.model.vof_quiet_fill)
-        ):
-            home.level_high_to_low(self.domain.state)
-            did_host = True
-        if did_host:
+        if home is not None and self.model.vof_height_eq:
+            self._last_height_eq = dict(getattr(home, "_last_height_eq_stats", {}) or {})
             self.domain.solver._vof_sharp.update_visual_field(
                 self.domain.state, self._n, self._n, self._n
             )
+        events = []
+        pool_stats = None
+        if self._late_pool is not None:
+            events, pool_stats = self._late_pool.after_frame(
+                self.domain.state,
+                sim_time=self.sim_time + FRAME_DT,
+                frame_count=self.frame_count + 1,
+                update_visual=lambda st: self.domain.solver._vof_sharp.update_visual_field(
+                    st, self._n, self._n, self._n
+                ),
+            )
+            for ev in events:
+                print(ev.message, file=sys.stderr, flush=True)
         wp.synchronize_device(self.model._device)
         self._last_ms = (time.perf_counter() - t0) * 1000.0
         self.sim_time += FRAME_DT
@@ -288,25 +325,35 @@ class VofDamBreak:
             phi = state.phi.numpy()
             ctype = state.cell_type.numpy()
             rho = state.density.numpy()
-            mass_est = np.where(ctype > 0, phi * np.maximum(rho, 0.0), 0.0)
-            vol = float(np.nansum(mass_est))
-            mass_sum = vol
-            if home is not None and home._gpu is not None:
-                mass_sum = float(np.nansum(home._gpu.mass.numpy()))
-            liquid = ctype == 2
-            interface = ctype == 1
+            if pool_stats is not None:
+                vol = pool_stats.vol_display
+                mass_sum = pool_stats.mass_sum
+                speed = pool_stats.mean_speed
+                liquid = pool_stats.liquid_cells
+                interface = pool_stats.interface_cells
+                fill_flag = pool_stats.level_flag
+            else:
+                mass_est = np.where(ctype > 0, phi * np.maximum(rho, 0.0), 0.0)
+                vol = float(np.nansum(mass_est))
+                mass_sum = vol
+                liquid = int((ctype == 2).sum())
+                interface = int((ctype == 1).sum())
+                wet = (ctype > 0) & np.isfinite(rho)
+                vx_f = state.velocity_x.numpy()
+                vy_f = state.velocity_y.numpy()
+                vz_f = state.velocity_z.numpy()
+                speed = (
+                    float(np.sqrt(vx_f[wet] ** 2 + vy_f[wet] ** 2 + vz_f[wet] ** 2).mean())
+                    if wet.any()
+                    else 0.0
+                )
+                fill_flag = "-"
             wet = (ctype > 0) & np.isfinite(rho)
             rho_finite = rho[np.isfinite(rho)]
             vx_f = state.velocity_x.numpy()
-            vy_f = state.velocity_y.numpy()
             vz_f = state.velocity_z.numpy()
             vx = float(vx_f[wet].mean()) if wet.any() else 0.0
             vz = float(vz_f[wet].mean()) if wet.any() else 0.0
-            speed = (
-                float(np.sqrt(vx_f[wet] ** 2 + vy_f[wet] ** 2 + vz_f[wet] ** 2).mean())
-                if wet.any()
-                else 0.0
-            )
             rho_max = float(rho_finite.max()) if rho_finite.size else float("nan")
             bub_note = ""
             if home is not None and bool(self.model.vof_bubble_pressure):
@@ -317,118 +364,61 @@ class VofDamBreak:
                     f",ρmax={float(bs.get('rho_max_bubble', 1.0)):.3f}"
                     f",ccl={int(bs.get('did_ccl', 0))})"
                 )
-            z_top = np.zeros(ctype.shape[:2], dtype=np.int32)
-            for k in range(ctype.shape[2]):
-                wet_k = (ctype[:, :, k] > 0) & (phi[:, :, k] > 0.5)
-                z_top[wet_k] = k
-            h_a = float(z_top[-2, :].mean()) if z_top.size else 0.0
-            h_b = float(z_top[1, :].mean()) if z_top.size else 0.0
-            nxy = z_top.shape[0]
-            corn_max = int(
-                max(
-                    z_top[:2, :2].max(),
-                    z_top[:2, -2:].max(),
-                    z_top[-2:, :2].max(),
-                    z_top[-2:, -2:].max(),
-                )
-            ) if nxy >= 2 else 0
-            # Near-quiescent: arm high→low leveling (peel tops, raise lows).
-            # --home-faithful: no host leveling/topup; watch pure FSLBM only.
-            if (
-                self._backend == "home_fp32"
-                and not self._home_faithful
-                and self.sim_time >= HEIGHT_MAP_START_T
-                and speed < float(self.model.vof_quiet_fill_u_max)
-                and not self._quiet_fill_armed
-            ):
-                self.model.vof_quiet_fill = True
-                self._quiet_fill_armed = True
-                self._level_on_frame = self.frame_count
-                print(
-                    f"  [level ON] t={self.sim_time:.1f}s |u|={speed:.4f} "
-                    f"(pool band high→low; climb peeled separately)",
-                    file=sys.stderr,
-                    flush=True,
-                )
+            # Continuous free-surface height h=k+φ (NOT integer z with φ>0.5).
+            from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.height_eq import (
+                continuous_surface_height,
+            )
+
+            h_cont = continuous_surface_height(phi, ctype)
+            mid = h_cont.shape[0] // 2
+            left = np.isfinite(h_cont) & (np.arange(h_cont.shape[0])[:, None] < mid)
+            right = np.isfinite(h_cont) & (np.arange(h_cont.shape[0])[:, None] >= mid)
+            h_a = float(np.nanmean(h_cont[left])) if left.any() else 0.0
+            h_b = float(np.nanmean(h_cont[right])) if right.any() else 0.0
+            finite = np.isfinite(h_cont)
+            corn_vals = []
+            if finite.any():
+                nxy = h_cont.shape[0]
+                for sl in (
+                    h_cont[:2, :2],
+                    h_cont[:2, -2:],
+                    h_cont[-2:, :2],
+                    h_cont[-2:, -2:],
+                ):
+                    if np.isfinite(sl).any():
+                        corn_vals.append(float(np.nanmax(sl)))
+            corn_max = int(max(corn_vals)) if corn_vals else 0
             kappa = None
             vof = self.domain.solver._vof_sharp
             if float(self.model.vof_gamma) > 0.0:
                 kappa = vof._kappa.numpy()
             rough = collect_interface_roughness(phi, ctype, kappa=kappa)
-            height_note = ""
-            if self.sim_time >= HEIGHT_MAP_START_T:
-                if self.frame_count % HEIGHT_MAP_EVERY_FRAMES == 0:
-                    self._height_map = collect_surface_height_map(phi, ctype)
-                hm = self._height_map
-                if hm is not None:
-                    height_note = (
-                        f" z̄={hm.mean:.2f} z_rms={hm.rms:.3f} "
-                        f"z_p2p={hm.p2p:.2f} z_rob={hm.robust_p2p:.2f}"
-                    )
-                    # Stop on robust p2p (p95−p05), not full max−min — climb
-                    # spikes inflate z_p2p forever on finer grids (n=96).
-                    # Also bail if leveling ran too long without converging.
-                    level_frames = max(0, self.frame_count - self._level_on_frame)
-                    should_stop = (
-                        hm.robust_p2p <= 1.0 + 1e-6
-                        or level_frames >= self._level_max_frames
-                    )
-                    if self._quiet_fill_armed and should_stop:
-                        if self.model.vof_quiet_fill:
-                            self.model.vof_quiet_fill = False
-                            why = (
-                                f"z_rob={hm.robust_p2p:.2f}"
-                                if hm.robust_p2p <= 1.0 + 1e-6
-                                else f"timeout frames={level_frames}"
-                            )
-                            print(
-                                f"  [level OFF] t={self.sim_time:.1f}s "
-                                f"{why} (O(1) leftover / stop gate)",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-                        if home is not None and not self._topup_done:
-                            # Fold leftover airborne spray before |Δ| topup.
-                            if bool(self.model.vof_orphan_reabsorb):
-                                moved, n_orph = home.reabsorb_orphans(
-                                    self.domain.state
-                                )
-                                if n_orph > 0:
-                                    print(
-                                        f"  [orphan] pre-topup {n_orph} blobs "
-                                        f"mass={moved:.2f}",
-                                        file=sys.stderr,
-                                        flush=True,
-                                    )
-                            # Spend at most recovered −Δ: invent ≤ max(0, vol0−mass).
-                            if home._gpu is not None:
-                                mass_sum = float(np.nansum(home._gpu.mass.numpy()))
-                            budget = max(0.0, float(self._vol0) - mass_sum)
-                            invented = home.topup_with_budget(
-                                budget, self.domain.state
-                            )
-                            self.domain.solver._vof_sharp.update_visual_field(
-                                self.domain.state, self._n, self._n, self._n
-                            )
-                            self._topup_done = True
-                            if home._gpu is not None:
-                                mass_sum = float(np.nansum(home._gpu.mass.numpy()))
-                            print(
-                                f"  [topup] invented={invented:.2f} "
-                                f"(budget=|Δ|={budget:.2f}) "
-                                f"mass={mass_sum:.1f} (Δ→{mass_sum-self._vol0:+.1f})",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-            fill_flag = "L" if self.model.vof_quiet_fill else ("T" if self._topup_done else "-")
+            # Continuous height map stats (Σφ thickness already in rough;
+            # z̄ here = mean of k+φ).
+            if finite.any():
+                hc = h_cont[finite]
+                height_note = (
+                    f" h̄={float(hc.mean()):.3f} "
+                    f"h_std={float(hc.std()):.3f} "
+                    f"h_p2p*={float(hc.max() - hc.min()):.2f}"
+                )
+            else:
+                height_note = ""
+            heq_note = ""
+            if self._last_height_eq:
+                heq_note = (
+                    f" H*={self._last_height_eq.get('H_star', 0):.3f}"
+                    f" φ*={self._last_height_eq.get('phi_star', 0):.3f}"
+                    f" Δm_heq={self._last_height_eq.get('mass_delta', 0):+.2f}"
+                )
             print(
-                f"[t={self.sim_time:.1f}s] L={liquid.sum()} I={interface.sum()} "
+                f"[t={self.sim_time:.1f}s] L={liquid} I={interface} "
                 f"vol={vol:.1f} (Δ={vol-self._vol0:+.1f}) mass={mass_sum:.1f} "
                 f"rho_max={rho_max:.3f}{bub_note} "
                 f"v=({vx:+.4f},{vz:+.4f}) |u|={speed:.4f} "
-                f"hA={h_a:.1f} hB={h_b:.1f} corn={corn_max} "
+                f"hA={h_a:.3f} hB={h_b:.3f} corn={corn_max} "
                 f"h_rms={rough.height_rms:.3f} h_p2p={rough.height_p2p:.2f} "
-                f"κ_rms={rough.kappa_rms:.3f}{height_note} "
+                f"κ_rms={rough.kappa_rms:.3f}{height_note}{heq_note} "
                 f"lvl={fill_flag} sim={self._last_ms:.0f}ms "
                 f"backend={self.model.lbm_backend}",
                 file=sys.stderr,
@@ -471,6 +461,30 @@ def main():
             "Default off; headspace touching top stays ρ=1."
         ),
     )
+    parser.add_argument(
+        "--g-scale",
+        type=float,
+        default=1.0,
+        help="Multiply baseline lattice gravity (home: |gz|≈0.002·48/n). Try 2–4 to probe one-cell pinning.",
+    )
+    parser.add_argument(
+        "--late-pool",
+        action="store_true",
+        help="Opt-in host quiet-level / orphan / topup (default off).",
+    )
+    parser.add_argument(
+        "--height-eq",
+        action="store_true",
+        help=(
+            "Enable solver IF-φ leveling (existing interface cells only). "
+            "Arms after t=8. Omit to roll back."
+        ),
+    )
+    parser.add_argument(
+        "--disable-late-pool",
+        action="store_true",
+        help=argparse.SUPPRESS,  # kept for old scripts; now the default
+    )
     pre_args, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0], *remaining]
 
@@ -482,6 +496,9 @@ def main():
             n=pre_args.n,
             home_faithful=pre_args.home_faithful,
             bubble_pressure=pre_args.bubble_pressure,
+            g_scale=float(pre_args.g_scale),
+            enable_late_pool=bool(pre_args.late_pool) and not bool(pre_args.disable_late_pool),
+            enable_height_eq=bool(pre_args.height_eq),
         ),
         args,
     )

@@ -84,6 +84,67 @@ def _solid_f_eq24(
 
 
 @wp.kernel
+def home_vof_solid_mac_to_cell_kernel(
+    solid_phi: wp.array3d(dtype=float),
+    vel_solid_u: wp.array3d(dtype=float),
+    vel_solid_v: wp.array3d(dtype=float),
+    vel_solid_w: wp.array3d(dtype=float),
+    solid_ux: wp.array3d(dtype=float),
+    solid_uy: wp.array3d(dtype=float),
+    solid_uz: wp.array3d(dtype=float),
+    nx: int,
+    ny: int,
+    nz: int,
+) -> None:
+    """Average MAC solid face velocities onto solid cell centres."""
+    i, j, k = wp.tid()
+    if solid_phi[i, j, k] >= 0.0:
+        solid_ux[i, j, k] = 0.0
+        solid_uy[i, j, k] = 0.0
+        solid_uz[i, j, k] = 0.0
+        return
+    solid_ux[i, j, k] = 0.5 * (vel_solid_u[i, j, k] + vel_solid_u[i + 1, j, k])
+    solid_uy[i, j, k] = 0.5 * (vel_solid_v[i, j, k] + vel_solid_v[i, j + 1, k])
+    solid_uz[i, j, k] = 0.5 * (vel_solid_w[i, j, k] + vel_solid_w[i, j, k + 1])
+
+
+@wp.kernel
+def home_vof_apply_solid_mask_kernel(
+    solid_phi: wp.array3d(dtype=float),
+    rho: wp.array3d(dtype=float),
+    ux: wp.array3d(dtype=float),
+    uy: wp.array3d(dtype=float),
+    uz: wp.array3d(dtype=float),
+    sxx: wp.array3d(dtype=float),
+    syy: wp.array3d(dtype=float),
+    szz: wp.array3d(dtype=float),
+    sxy: wp.array3d(dtype=float),
+    sxz: wp.array3d(dtype=float),
+    syz: wp.array3d(dtype=float),
+    mass: wp.array3d(dtype=float),
+    phi: wp.array3d(dtype=float),
+    cell_type: wp.array3d(dtype=wp.int32),
+) -> None:
+    """Force rasterized solid cells to empty gas (Home TYPE_S skip)."""
+    i, j, k = wp.tid()
+    if solid_phi[i, j, k] >= 0.0:
+        return
+    rho[i, j, k] = 0.0
+    ux[i, j, k] = 0.0
+    uy[i, j, k] = 0.0
+    uz[i, j, k] = 0.0
+    sxx[i, j, k] = 0.0
+    syy[i, j, k] = 0.0
+    szz[i, j, k] = 0.0
+    sxy[i, j, k] = 0.0
+    sxz[i, j, k] = 0.0
+    syz[i, j, k] = 0.0
+    mass[i, j, k] = 0.0
+    phi[i, j, k] = 0.0
+    cell_type[i, j, k] = CELL_GAS
+
+
+@wp.kernel
 def home_vof_fused_kernel(
     rho_in: wp.array3d(dtype=float),
     ux_in: wp.array3d(dtype=float),
@@ -99,6 +160,10 @@ def home_vof_fused_kernel(
     massex: wp.array3d(dtype=float),
     phi: wp.array3d(dtype=float),
     cell_type: wp.array3d(dtype=wp.int32),
+    solid_phi: wp.array3d(dtype=float),
+    solid_ux: wp.array3d(dtype=float),
+    solid_uy: wp.array3d(dtype=float),
+    solid_uz: wp.array3d(dtype=float),
     rho_out: wp.array3d(dtype=float),
     ux_out: wp.array3d(dtype=float),
     uy_out: wp.array3d(dtype=float),
@@ -147,6 +212,21 @@ def home_vof_fused_kernel(
 ) -> None:
     """Fused pull-stream + mass + FS BC + collide (Home-FSLBM style)."""
     i, j, k = wp.tid()
+    if solid_phi[i, j, k] < 0.0:
+        rho_out[i, j, k] = 0.0
+        ux_out[i, j, k] = 0.0
+        uy_out[i, j, k] = 0.0
+        uz_out[i, j, k] = 0.0
+        sxx_out[i, j, k] = 0.0
+        syy_out[i, j, k] = 0.0
+        szz_out[i, j, k] = 0.0
+        sxy_out[i, j, k] = 0.0
+        sxz_out[i, j, k] = 0.0
+        syz_out[i, j, k] = 0.0
+        mass_out[i, j, k] = 0.0
+        cell_out[i, j, k] = CELL_GAS
+        return
+
     ctype = int(cell_type[i, j, k])
     # Normalize pending flags from previous surface pass
     if ctype == CELL_IF:
@@ -341,6 +421,13 @@ def home_vof_fused_kernel(
                     uxp = face_ux[5]
                     uyp = face_uy[5]
                     uzp = face_uz[5]
+
+        # Moving / static rigid solid (rasterized solid_phi < 0).
+        if is_wall == 0 and solid_phi[ni, nj, nk] < 0.0:
+            is_wall = 1
+            uxp = solid_ux[ni, nj, nk]
+            uyp = solid_uy[ni, nj, nk]
+            uzp = solid_uz[ni, nj, nk]
 
         fhn = float(0.0)
         ntype = CELL_GAS
@@ -1221,6 +1308,181 @@ def level_surface_high_to_low(
     )
     return float(np.nansum(mass)) - m0
 
+
+def flatten_top_interface_layer(
+    buf: "HomeVofGpuBuffers",
+    *,
+    climb_margin: int | None = None,
+    min_frac: float = 0.02,
+    max_frac: float = 0.98,
+) -> dict[str, float]:
+    """Rebuild main-pool columns as liquid stack + one interface with shared φ.
+
+    Uses **continuous** column volume ``h = Σ (mass/ρ)`` (sub-cell height). Pool
+    columns (excluding wall-climb outliers) are assigned the same target height
+    ``H* = V_pool / N_pool`` and rewritten as::
+
+        k < ⌊H*⌋     → LIQUID (φ=1)
+        k = ⌊H*⌋     → INTERFACE (φ = {H*})
+        k > ⌊H*⌋     → GAS
+
+    This is the late-pool "亚格子顶层铺平" pass: not pure LBM, but conservative
+    in Σmass over the rewritten columns (inventory redistributed, not invented).
+
+    Returns diagnostics: ``dmass``, ``H_star``, ``cont_rms``, ``cont_rob``, ``n_pool``.
+    """
+    ctype = buf.cell_type.numpy().copy()
+    phi = buf.phi.numpy().copy()
+    mass = buf.mass.numpy().copy()
+    rho = buf.rho.numpy().copy()
+    ux = buf.ux.numpy().copy()
+    uy = buf.uy.numpy().copy()
+    uz = buf.uz.numpy().copy()
+    sxx = buf.sxx.numpy().copy()
+    syy = buf.syy.numpy().copy()
+    szz = buf.szz.numpy().copy()
+    sxy = buf.sxy.numpy().copy()
+    sxz = buf.sxz.numpy().copy()
+    syz = buf.syz.numpy().copy()
+    solid = buf.solid_phi.numpy()
+    nx, ny, nz = buf.shape
+    m0 = float(np.nansum(mass))
+
+    # Continuous column fluid volume (lattice cells of liquid).
+    h = np.zeros((nx, ny), dtype=np.float64)
+    for k in range(nz):
+        fluid = (ctype[:, :, k] > 0) & (solid[:, :, k] >= 0.0)
+        r = np.maximum(rho[:, :, k], 0.05)
+        h = h + np.where(fluid, mass[:, :, k] / r, 0.0)
+
+    wet_cols = h > float(min_frac)
+    if not np.any(wet_cols):
+        return {
+            "dmass": 0.0,
+            "H_star": 0.0,
+            "cont_rms": 0.0,
+            "cont_rob": 0.0,
+            "n_pool": 0.0,
+        }
+
+    med = float(np.median(h[wet_cols]))
+    if climb_margin is None:
+        climb_margin = max(3, int(nz // 16))
+    climb_margin = int(max(2, climb_margin))
+    climber = wet_cols & (h > med + float(climb_margin))
+    pool = wet_cols & (~climber)
+    if not np.any(pool):
+        pool = wet_cols
+
+    v_pool = float(np.sum(h[pool]))
+    n_pool = int(np.count_nonzero(pool))
+    # Shared continuous height; bias slightly so the top stays INTERFACE
+    # (φ∈(min_frac, max_frac)) with minimal Σmass change.
+    H_exact = v_pool / float(max(n_pool, 1))
+    k_full = int(np.floor(H_exact + 1.0e-12))
+    frac = float(H_exact - float(k_full))
+    if frac < float(min_frac):
+        # Prefer H = k_full + min_frac (tiny invent) over demoting a full cell.
+        if k_full >= 1 and (1.0 - float(max_frac)) < (float(min_frac) - frac):
+            k_full -= 1
+            frac = float(max_frac)
+        else:
+            frac = float(min_frac)
+    elif frac > float(max_frac):
+        if (1.0 - frac) <= (frac - float(max_frac)) and k_full + 1 < nz:
+            k_full += 1
+            frac = float(min_frac)
+        else:
+            frac = float(max_frac)
+    H_star = float(k_full) + float(frac)
+
+    def _clear_fluid(i: int, j: int) -> None:
+        for k in range(nz):
+            if solid[i, j, k] < 0.0:
+                continue
+            mass[i, j, k] = 0.0
+            phi[i, j, k] = 0.0
+            rho[i, j, k] = 0.0
+            ctype[i, j, k] = CELL_GAS
+            ux[i, j, k] = 0.0
+            uy[i, j, k] = 0.0
+            uz[i, j, k] = 0.0
+            sxx[i, j, k] = 0.0
+            syy[i, j, k] = 0.0
+            szz[i, j, k] = 0.0
+            sxy[i, j, k] = 0.0
+            sxz[i, j, k] = 0.0
+            syz[i, j, k] = 0.0
+
+    def _set_liquid(i: int, j: int, k: int) -> None:
+        rho[i, j, k] = 1.0
+        mass[i, j, k] = 1.0
+        phi[i, j, k] = 1.0
+        ctype[i, j, k] = CELL_LIQUID
+        ux[i, j, k] = uy[i, j, k] = uz[i, j, k] = 0.0
+        sxx[i, j, k] = syy[i, j, k] = szz[i, j, k] = 0.0
+        sxy[i, j, k] = sxz[i, j, k] = syz[i, j, k] = 0.0
+
+    def _set_interface(i: int, j: int, k: int, fphi: float) -> None:
+        rho[i, j, k] = 1.0
+        mass[i, j, k] = float(fphi)
+        phi[i, j, k] = float(fphi)
+        ctype[i, j, k] = CELL_INTERFACE
+        ux[i, j, k] = uy[i, j, k] = uz[i, j, k] = 0.0
+        sxx[i, j, k] = syy[i, j, k] = szz[i, j, k] = 0.0
+        sxy[i, j, k] = sxz[i, j, k] = syz[i, j, k] = 0.0
+
+    pool_ij = np.argwhere(pool)
+    for i, j in pool_ij:
+        i = int(i)
+        j = int(j)
+        _clear_fluid(i, j)
+        filled = 0
+        k = 0
+        while filled < k_full and k < nz:
+            if solid[i, j, k] >= 0.0:
+                _set_liquid(i, j, k)
+                filled += 1
+            k += 1
+        # Place interface in the next non-solid cell.
+        # Place interface in the next non-solid cell (always; top is interface).
+        while k < nz and solid[i, j, k] < 0.0:
+            k += 1
+        if k < nz:
+            _set_interface(i, j, k, frac)
+
+    # Diagnostics on rewritten pool.
+    h2 = np.zeros((nx, ny), dtype=np.float64)
+    for k in range(nz):
+        fluid = (ctype[:, :, k] > 0) & (solid[:, :, k] >= 0.0)
+        r = np.maximum(rho[:, :, k], 0.05)
+        h2 = h2 + np.where(fluid, mass[:, :, k] / r, 0.0)
+    hp = h2[pool]
+    p05, p95 = np.percentile(hp, [5.0, 95.0]) if hp.size else (0.0, 0.0)
+
+    device = buf.device
+    buf.mass.assign(wp.array(mass.astype(np.float32), dtype=float, device=device))
+    buf.phi.assign(wp.array(phi.astype(np.float32), dtype=float, device=device))
+    buf.rho.assign(wp.array(rho.astype(np.float32), dtype=float, device=device))
+    buf.ux.assign(wp.array(ux.astype(np.float32), dtype=float, device=device))
+    buf.uy.assign(wp.array(uy.astype(np.float32), dtype=float, device=device))
+    buf.uz.assign(wp.array(uz.astype(np.float32), dtype=float, device=device))
+    buf.sxx.assign(wp.array(sxx.astype(np.float32), dtype=float, device=device))
+    buf.syy.assign(wp.array(syy.astype(np.float32), dtype=float, device=device))
+    buf.szz.assign(wp.array(szz.astype(np.float32), dtype=float, device=device))
+    buf.sxy.assign(wp.array(sxy.astype(np.float32), dtype=float, device=device))
+    buf.sxz.assign(wp.array(sxz.astype(np.float32), dtype=float, device=device))
+    buf.syz.assign(wp.array(syz.astype(np.float32), dtype=float, device=device))
+    buf.cell_type.assign(
+        wp.array(ctype.astype(np.int32), dtype=wp.int32, device=device)
+    )
+    return {
+        "dmass": float(np.nansum(mass) - m0),
+        "H_star": float(H_star),
+        "cont_rms": float(np.std(hp)) if hp.size else 0.0,
+        "cont_rob": float(p95 - p05),
+        "n_pool": float(n_pool),
+    }
 
 
 def topup_surface_with_budget(
@@ -2578,6 +2840,9 @@ class HomeVofGpuBuffers:
     kappa: wp.array
     kappa_tmp: wp.array
     solid_phi: wp.array
+    solid_ux: wp.array
+    solid_uy: wp.array
+    solid_uz: wp.array
     bubble_tag: wp.array
     bubble_tag_prev: wp.array
     gas_rho: wp.array
@@ -2662,6 +2927,7 @@ def alloc_home_vof_gpu(
         opp=wp.array(np.asarray(spec.opposite, dtype=np.int32), dtype=wp.int32, device=device),
         face_kind=fk, face_ux=fux, face_uy=fuy, face_uz=fuz,
         kappa=zf(), kappa_tmp=zf(), solid_phi=zf(),
+        solid_ux=zf(), solid_uy=zf(), solid_uz=zf(),
         bubble_tag=zi(), bubble_tag_prev=zi(), gas_rho=gas_rho,
         delta_phi=zf(), disjoin_force=zf(),
         bubble_volume_gpu=wp.zeros(mb, dtype=float, device=device),
@@ -2673,6 +2939,9 @@ def alloc_home_vof_gpu(
         bubble_need_ccl=wp.zeros(1, dtype=wp.int32, device=device),
         shape=shape, device=device, num_dirs=int(spec.num_dirs),
     )
+    # Solid SDF starts as "far fluid" so kappa / fused treat cells as fluid
+    # until coupling stamps rigid bodies (solid_phi < 0).
+    buf.solid_phi.fill_(1000.0)
     buf.bubble_rho_gpu.fill_(1.0)
     buf._bubble_count = 0
     buf._bubble_volume = np.zeros(0, dtype=np.float64)
@@ -2728,6 +2997,40 @@ def set_face_bc_gpu(buf: HomeVofGpuBuffers, domain_bc: HomeDomainBC) -> None:
     buf.face_ux.assign(fux)
     buf.face_uy.assign(fuy)
     buf.face_uz.assign(fuz)
+
+
+def sync_solids_from_lbm_state(buf: HomeVofGpuBuffers, state: object) -> None:
+    """Copy ``LbmState`` solid SDF / MAC wall velocity into HOME-FREE buffers."""
+    solid_phi = getattr(state, "solid_phi", None)
+    if solid_phi is None:
+        return
+    wp.copy(buf.solid_phi, solid_phi)
+    vel_u = getattr(state, "vel_solid_u", None)
+    vel_v = getattr(state, "vel_solid_v", None)
+    vel_w = getattr(state, "vel_solid_w", None)
+    if vel_u is None or vel_v is None or vel_w is None:
+        buf.solid_ux.zero_()
+        buf.solid_uy.zero_()
+        buf.solid_uz.zero_()
+        return
+    nx, ny, nz = buf.shape
+    wp.launch(
+        home_vof_solid_mac_to_cell_kernel,
+        dim=(nx, ny, nz),
+        inputs=[
+            buf.solid_phi,
+            vel_u,
+            vel_v,
+            vel_w,
+            buf.solid_ux,
+            buf.solid_uy,
+            buf.solid_uz,
+            nx,
+            ny,
+            nz,
+        ],
+        device=buf.device,
+    )
 
 
 def step_home_vof_gpu(
@@ -2828,6 +3131,7 @@ def step_home_vof_gpu(
             buf.rho, buf.ux, buf.uy, buf.uz,
             buf.sxx, buf.syy, buf.szz, buf.sxy, buf.sxz, buf.syz,
             buf.mass, buf.massex, buf.phi, buf.cell_type,
+            buf.solid_phi, buf.solid_ux, buf.solid_uy, buf.solid_uz,
             buf.rho_b, buf.ux_b, buf.uy_b, buf.uz_b,
             buf.sxx_b, buf.syy_b, buf.szz_b, buf.sxy_b, buf.sxz_b, buf.syz_b,
             buf.mass_b, buf.cell_tmp,
@@ -2921,6 +3225,19 @@ def step_home_vof_gpu(
             inputs=[buf.cell_type, buf.rho, buf.mass, buf.phi],
             device=buf.device,
         )
+
+    # Keep rasterized solids empty after surface topology (Home TYPE_S).
+    wp.launch(
+        home_vof_apply_solid_mask_kernel,
+        dim=dim,
+        inputs=[
+            buf.solid_phi,
+            buf.rho, buf.ux, buf.uy, buf.uz,
+            buf.sxx, buf.syy, buf.szz, buf.sxy, buf.sxz, buf.syz,
+            buf.mass, buf.phi, buf.cell_type,
+        ],
+        device=buf.device,
+    )
 
     if bubble_pressure:
         every = max(1, int(bubble_update_every))
