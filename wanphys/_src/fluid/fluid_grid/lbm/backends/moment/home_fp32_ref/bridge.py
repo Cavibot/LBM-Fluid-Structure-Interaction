@@ -276,7 +276,7 @@ class HomeFp32VofBridge:
             wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
 
     def apply_height_equation(self, state_out: LbmState | None = None) -> dict[str, float]:
-        """Gradual free-surface leveling: ``Δh = α(H*−h)`` on top IF only."""
+        """Gradual free-surface leveling: local IF Laplacian + airborne drop."""
         from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.height_eq import (
             apply_vof_height_equation,
         )

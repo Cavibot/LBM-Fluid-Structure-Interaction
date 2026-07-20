@@ -128,19 +128,18 @@ class LbmModel(FluidGridModelBase):
     vof_quiet_fill_u_max: float = 0.025
     """Arm leveling only when mean |u| is below this (example gate)."""
     vof_height_eq: bool = False
-    """Opt-in free-surface φ leveling on existing interface cells only.
+    """Opt-in free-surface φ leveling: plane φ→φ* + airborne drop.
 
-    Relaxes ``φ → φ*`` on the dominant pool-surface IF plane (mass-conserving).
-    Does not rewrite bulk liquid or invent mid-air cells.
+    Equalizes φ on the dominant pool IF plane (safe band away from fill/empty).
     """
-    vof_height_eq_rate: float = 0.08
+    vof_height_eq_rate: float = 0.05
     """Mobility α in ``Δφ = α (φ* − φ)`` per call."""
-    vof_height_eq_u_max: float = 0.04
-    """Skip while mean |u| on those IF cells exceeds this."""
-    vof_height_eq_dh_cap: float = 0.08
+    vof_height_eq_u_max: float = 0.05
+    """Skip φ step while mean |u| on pool IF exceeds this."""
+    vof_height_eq_dh_cap: float = 0.05
     """Max |Δφ| per interface cell per call."""
     vof_height_eq_sweeps: int = 1
-    """Reserved (plane-shift disabled)."""
+    """Reserved."""
     vof_height_eq_every: int = 12
     """Run every N lattice steps."""
     vof_orphan_reabsorb: bool = True

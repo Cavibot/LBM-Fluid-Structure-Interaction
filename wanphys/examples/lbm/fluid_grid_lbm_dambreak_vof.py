@@ -154,9 +154,9 @@ class VofDamBreak:
             vof_orphan_max_cells=max(96, self._n),
             vof_orphan_height_margin=3,
             vof_height_eq=False,
-            vof_height_eq_rate=0.08,
-            vof_height_eq_u_max=0.04,
-            vof_height_eq_dh_cap=0.08,
+            vof_height_eq_rate=0.05,
+            vof_height_eq_u_max=0.05,
+            vof_height_eq_dh_cap=0.05,
             vof_height_eq_every=12,
             vof_bubble_pressure=self._bubble_pressure,
             # Disjoint only by default with --bubble-pressure.
@@ -288,10 +288,10 @@ class VofDamBreak:
             self._height_eq_armed = True
             print(
                 f"[height-eq ON] t={self.sim_time:.1f}s "
-                f"solver IF-φ level α={self.model.vof_height_eq_rate} "
+                f"solver IF φ→φ* α={self.model.vof_height_eq_rate} "
                 f"|Δφ|≤{self.model.vof_height_eq_dh_cap} "
                 f"every={self.model.vof_height_eq_every} "
-                f"(interface cells only, no bulk rewrite)",
+                f"(plane equalize + drop airborne, safe φ band)",
                 file=sys.stderr,
                 flush=True,
             )
@@ -409,6 +409,8 @@ class VofDamBreak:
                 heq_note = (
                     f" H*={self._last_height_eq.get('H_star', 0):.3f}"
                     f" φ*={self._last_height_eq.get('phi_star', 0):.3f}"
+                    f" φσ={self._last_height_eq.get('phi_std', 0):.3f}"
+                    f" drop={int(self._last_height_eq.get('n_drop', 0))}"
                     f" Δm_heq={self._last_height_eq.get('mass_delta', 0):+.2f}"
                 )
             print(

@@ -3,19 +3,21 @@
 
 """Free-surface interface-φ leveling for HOME-FREE VOF (solver opt-in).
 
-Only touches cells that are already ``CELL_INTERFACE``. No bulk rewrite, and by
-default **no** L↔I↔G type changes — so this cannot invent mid-air liquid.
+Target look: one dominant pool IF plane with nearly uniform ``φ`` (no large
+high/low patches).
 
-Operator (per call)::
+Per call (IF cells only)::
 
-    φ ← clip( φ + α (φ* − φ), ε, 1−ε )
-    then rescale IF masses so Σmass on the touched set is unchanged.
+    1) Drop airborne wet cells (gas immediately below) onto the pool IF in
+       the same column — splash “balls”, mass-conserving.
+    2) On the dominant plane (mode ``k`` of pool-surface IF):
+       ``φ ← φ + α (φ* − φ)`` with ``φ*`` = mass-weighted mean on that plane.
+       Keep ``φ`` in a **safe band** away from fill/empty thresholds so LBM
+       does not punch random 1-cell pits after each flatten.
+    3) Light tip ``|u|`` damping (optional, weak) — not enough to freeze a tilt.
 
-``φ*`` is the mass-weighted mean fill on the **dominant free-surface plane**
-(mode of interface ``k`` among pool-surface IF cells: liquid below, gas/empty
-above). Columns whose IF sits on another ``k`` are left alone (sub-cell leveling
-only). Cross-plane leveling needs guarded L↔I type changes and is **off** —
-those paths previously invented mid-air liquid.
+Does not invent mid-air liquid. Cross-plane stairs are left to LBM / a future
+guarded single-cell shift.
 
 Enable with ``LbmModel.vof_height_eq = True``.
 """
@@ -34,6 +36,11 @@ if TYPE_CHECKING:
 CELL_GAS = 0
 CELL_INTERFACE = 1
 CELL_LIQUID = 2
+
+# Stay away from fill/empty so the operator does not trigger type flips that
+# show up as random pits / a circular repair wave after each flatten.
+_PHI_LO = 0.18
+_PHI_HI = 0.82
 
 
 def continuous_surface_height(
@@ -66,11 +73,7 @@ def _pool_surface_interfaces(
     *,
     phi_dust: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return ``(ii, jj, kk)`` of free-surface IF cells (liquid below).
-
-    Requires the cell below to be liquid (or domain bottom). Skips climb IF
-    sitting above a gas gap — those are not the pool interface.
-    """
+    """Return ``(ii, jj, kk)`` of free-surface IF cells (liquid below)."""
     nx, ny, nz = cell.shape
     ii_list: list[int] = []
     jj_list: list[int] = []
@@ -84,7 +87,6 @@ def _pool_surface_interfaces(
                     continue
                 if float(phi[i, j, k]) < phi_dust:
                     continue
-                # Must have liquid immediately below (pool surface), or sit on floor.
                 if k == 0:
                     below_ok = True
                 elif solid[i, j, k - 1] < 0.0:
@@ -93,14 +95,13 @@ def _pool_surface_interfaces(
                     below_ok = cell[i, j, k - 1] == CELL_LIQUID
                 if not below_ok:
                     continue
-                # Prefer gas / empty above (true free surface). Allow domain top.
                 if k + 1 < nz and solid[i, j, k + 1] >= 0.0:
                     if cell[i, j, k + 1] == CELL_LIQUID:
                         continue
                 ii_list.append(i)
                 jj_list.append(j)
                 kk_list.append(k)
-                break  # one FS IF per column
+                break
     return (
         np.asarray(ii_list, dtype=np.int32),
         np.asarray(jj_list, dtype=np.int32),
@@ -108,21 +109,88 @@ def _pool_surface_interfaces(
     )
 
 
-def _try_plane_shift(
+def _drop_airborne_onto_pool(
     cell: np.ndarray,
     rho: np.ndarray,
     mass: np.ndarray,
     phi: np.ndarray,
     solid: np.ndarray,
-    i: int,
-    j: int,
-    k: int,
     *,
-    toward_fill: bool,
-) -> bool:
-    """Disabled stub — plane shift can invent water; keep IF-only."""
-    del cell, rho, mass, phi, solid, i, j, k, toward_fill
-    return False
+    mode_k: int,
+) -> int:
+    """Move splash droplets (wet + gas below) onto pool IF in-column."""
+    nx, ny, nz = cell.shape
+    n_clear = 0
+    for i in range(nx):
+        for j in range(ny):
+            dep_k = -1
+            for k in range(min(nz - 1, mode_k + 2), -1, -1):
+                if solid[i, j, k] < 0.0:
+                    continue
+                if cell[i, j, k] != CELL_INTERFACE:
+                    continue
+                if k == 0 or solid[i, j, k - 1] < 0.0 or cell[i, j, k - 1] == CELL_LIQUID:
+                    dep_k = k
+                    break
+            if dep_k < 0:
+                for k in range(min(nz - 1, mode_k + 2), -1, -1):
+                    if solid[i, j, k] < 0.0:
+                        continue
+                    if cell[i, j, k] == CELL_LIQUID:
+                        dep_k = k
+                        break
+            if dep_k < 0:
+                continue
+
+            for k in range(nz - 1, dep_k, -1):
+                if solid[i, j, k] < 0.0:
+                    continue
+                ct = int(cell[i, j, k])
+                if ct == CELL_GAS:
+                    continue
+                below = k - 1
+                if below < 0 or solid[i, j, below] < 0.0:
+                    unsupported = True
+                else:
+                    unsupported = int(cell[i, j, below]) == CELL_GAS
+                if not unsupported:
+                    continue
+                add = float(mass[i, j, k])
+                cell[i, j, k] = CELL_GAS
+                mass[i, j, k] = 0.0
+                phi[i, j, k] = 0.0
+                rho[i, j, k] = 0.0
+                n_clear += 1
+                if add <= 0.0:
+                    continue
+                r_d = float(max(rho[i, j, dep_k], 1.0e-3))
+                if cell[i, j, dep_k] == CELL_LIQUID:
+                    # Absorb into liquid inventory (mass already counted as full cell).
+                    # Spill remainder into a new IF above if gas, else keep on liquid.
+                    above = dep_k + 1
+                    nz = cell.shape[2]
+                    if (
+                        above < nz
+                        and solid[i, j, above] >= 0.0
+                        and int(cell[i, j, above]) == CELL_GAS
+                    ):
+                        cell[i, j, above] = CELL_INTERFACE
+                        rho[i, j, above] = r_d
+                        mass[i, j, above] = add
+                        phi[i, j, above] = float(add / r_d)
+                        dep_k = above
+                    else:
+                        mass[i, j, dep_k] = float(mass[i, j, dep_k]) + add
+                elif cell[i, j, dep_k] == CELL_INTERFACE:
+                    # Never clip mass away — overfull IF is fine; LBM fill promotes.
+                    mass[i, j, dep_k] = float(mass[i, j, dep_k]) + add
+                    phi[i, j, dep_k] = float(mass[i, j, dep_k]) / r_d
+                else:
+                    cell[i, j, dep_k] = CELL_INTERFACE
+                    rho[i, j, dep_k] = max(r_d, 1.0)
+                    mass[i, j, dep_k] = add
+                    phi[i, j, dep_k] = float(add / max(r_d, 1.0e-3))
+    return n_clear
 
 
 def apply_vof_height_equation(
@@ -131,24 +199,27 @@ def apply_vof_height_equation(
     rate: float = 0.05,
     u_max: float = 0.05,
     phi_dust: float = 0.05,
-    dh_cap: float = 0.08,
+    dh_cap: float = 0.05,
     n_sweeps: int = 1,
+    u_damp: float = 0.04,
+    clean_airborne: bool = True,
 ) -> dict[str, float]:
-    """Relax φ on existing free-surface interface cells only.
+    """Plane-wide ``φ → φ*`` on mode-k pool IF + airborne drop.
 
-    ``dh_cap`` here caps ``|Δφ|`` per call (not column height).
-    ``n_sweeps > 1`` enables cautious single-cell plane shift after φ clamp.
-    ``u_max``: skip if mean |u| on those IF tips is too large.
+    ``dh_cap`` caps ``|Δφ|`` per cell per call.
+    ``u_damp`` is intentionally weak (strong damping froze the left/right tilt).
     """
+    del n_sweeps
     cell = buf.cell_type.numpy().astype(np.int32, copy=True)
     phi = buf.phi.numpy().astype(np.float32, copy=True)
     mass = buf.mass.numpy().astype(np.float32, copy=True)
     rho = buf.rho.numpy().astype(np.float32, copy=True)
     solid = buf.solid_phi.numpy()
-    ux = buf.ux.numpy()
-    uy = buf.uy.numpy()
-    uz = buf.uz.numpy()
+    ux = buf.ux.numpy().astype(np.float32, copy=True)
+    uy = buf.uy.numpy().astype(np.float32, copy=True)
+    uz = buf.uz.numpy().astype(np.float32, copy=True)
     fluid = solid >= 0.0
+    m_before = float(mass[fluid].sum())
 
     ii, jj, kk = _pool_surface_interfaces(
         cell, phi, solid, phi_dust=float(phi_dust)
@@ -157,74 +228,103 @@ def apply_vof_height_equation(
     if n_if < 4:
         return {"n_wet": 0.0, "n_if": float(n_if), "dmass": 0.0, "phi_star": 0.0}
 
+    mode_k = int(np.bincount(kk.astype(np.int64)).argmax())
+    n_drop = 0
+    if clean_airborne:
+        n_drop = _drop_airborne_onto_pool(
+            cell, rho, mass, phi, solid, mode_k=mode_k
+        )
+        if n_drop > 0:
+            ii, jj, kk = _pool_surface_interfaces(
+                cell, phi, solid, phi_dust=float(phi_dust)
+            )
+            n_if = int(ii.size)
+            if n_if >= 4:
+                mode_k = int(np.bincount(kk.astype(np.int64)).argmax())
+
+    if n_if < 4:
+        import warp as wp
+
+        device = buf.device
+        buf.cell_type.assign(wp.array(cell, dtype=wp.int32, device=device))
+        buf.phi.assign(wp.array(phi, dtype=float, device=device))
+        buf.mass.assign(wp.array(mass, dtype=float, device=device))
+        buf.rho.assign(wp.array(rho, dtype=float, device=device))
+        m_final = float(mass[fluid].sum())
+        return {
+            "n_wet": float(n_if),
+            "n_if": float(n_if),
+            "n_drop": float(n_drop),
+            "mass_delta": m_final - m_before,
+            "dmass": m_final - m_before,
+            "phi_star": 0.0,
+        }
+
     spd = np.sqrt(ux[ii, jj, kk] ** 2 + uy[ii, jj, kk] ** 2 + uz[ii, jj, kk] ** 2)
     u_mean = float(spd.mean())
-    if u_mean > float(u_max):
-        return {
-            "n_wet": float(n_if),
-            "n_if": float(n_if),
-            "dmass": 0.0,
-            "phi_star": 0.0,
-            "u_mean": u_mean,
-            "skipped": 1.0,
-        }
 
-    m_before = float(mass[fluid].sum())
+    damp = float(np.clip(u_damp, 0.0, 0.5))
+    if damp > 0.0:
+        scale = np.float32(1.0 - damp)
+        ux[ii, jj, kk] *= scale
+        uy[ii, jj, kk] *= scale
+        uz[ii, jj, kk] *= scale
 
-    # Dominant interface plane (mode k).
-    mode_k = int(np.bincount(kk.astype(np.int64)).argmax())
     on_plane = kk == mode_k
     n_plane = int(on_plane.sum())
-    if n_plane < 4:
-        return {
-            "n_wet": float(n_if),
-            "n_if": float(n_if),
-            "n_plane": float(n_plane),
-            "mode_k": float(mode_k),
-            "dmass": 0.0,
-            "phi_star": 0.0,
-            "skipped": 1.0,
-        }
+    skipped = 0.0
+    phi_star = 0.0
+    phi_std = 0.0
+    n_touch = 0
 
-    sel_i = ii[on_plane]
-    sel_j = jj[on_plane]
-    sel_k = kk[on_plane]
+    if u_mean > float(u_max) or n_plane < 4:
+        skipped = 1.0
+    else:
+        sel_i = ii[on_plane]
+        sel_j = jj[on_plane]
+        sel_k = kk[on_plane]
 
-    phi_s = phi[sel_i, sel_j, sel_k].astype(np.float64)
-    mass_s = mass[sel_i, sel_j, sel_k].astype(np.float64)
-    rho_s = np.maximum(rho[sel_i, sel_j, sel_k].astype(np.float64), 1.0e-3)
-    m_plane0 = float(mass_s.sum())
+        phi_s = phi[sel_i, sel_j, sel_k].astype(np.float64)
+        mass_s = mass[sel_i, sel_j, sel_k].astype(np.float64)
+        rho_s = np.maximum(rho[sel_i, sel_j, sel_k].astype(np.float64), 1.0e-3)
+        m_plane0 = float(mass_s.sum())
 
-    # Mass-weighted mean φ on this plane.
-    phi_star = float(np.sum(phi_s * rho_s) / max(float(np.sum(rho_s)), 1.0e-6))
+        # Target inside the safe band so we never drive the plane into fill/empty.
+        phi_star_raw = float(np.sum(phi_s * rho_s) / max(float(np.sum(rho_s)), 1.0e-6))
+        phi_star = float(np.clip(phi_star_raw, _PHI_LO + 0.02, _PHI_HI - 0.02))
 
-    alpha = float(np.clip(rate, 0.0, 1.0))
-    dphi_cap = float(max(dh_cap, 1.0e-4))
-    dphi = alpha * (phi_star - phi_s)
-    np.clip(dphi, -dphi_cap, dphi_cap, out=dphi)
+        alpha = float(np.clip(rate, 0.0, 1.0))
+        dphi_cap = float(max(dh_cap, 1.0e-4))
+        dphi = alpha * (phi_star - phi_s)
+        np.clip(dphi, -dphi_cap, dphi_cap, out=dphi)
+        n_touch = int(np.count_nonzero(np.abs(dphi) > 1.0e-12))
 
-    phi_new = np.clip(phi_s + dphi, 0.02, 0.98)
-    # Convert to mass with local ρ, then renormalize Σmass on the plane.
-    mass_new = phi_new * rho_s
-    sum_m = float(mass_new.sum())
-    if sum_m > 1.0e-6 and abs(sum_m - m_plane0) > 1.0e-8:
-        mass_new *= m_plane0 / sum_m
-        phi_new = np.clip(mass_new / rho_s, 0.02, 0.98)
+        phi_new = np.clip(phi_s + dphi, _PHI_LO, _PHI_HI)
         mass_new = phi_new * rho_s
-        # Second renorm after clip.
-        sum_m2 = float(mass_new.sum())
-        if sum_m2 > 1.0e-6:
-            mass_new *= m_plane0 / sum_m2
-            phi_new = mass_new / rho_s
+        sum_m = float(mass_new.sum())
+        if sum_m > 1.0e-6 and abs(sum_m - m_plane0) > 1.0e-8:
+            mass_new *= m_plane0 / sum_m
+        # After renorm, allow φ slightly outside the band so mass is not clipped away.
+        phi_new = mass_new / rho_s
+        # Soft pull of outliers back into band without destroying Σmass:
+        over = phi_new > _PHI_HI
+        under = phi_new < _PHI_LO
+        if np.any(over) or np.any(under):
+            phi_tgt = phi_new.copy()
+            phi_tgt[over] = _PHI_HI
+            phi_tgt[under] = _PHI_LO
+            mass_tgt = phi_tgt * rho_s
+            sum_t = float(mass_tgt.sum())
+            if sum_t > 1.0e-6:
+                mass_new = mass_tgt * (m_plane0 / sum_t)
+                phi_new = mass_new / rho_s
 
-    phi[sel_i, sel_j, sel_k] = phi_new.astype(np.float32)
-    mass[sel_i, sel_j, sel_k] = mass_new.astype(np.float32)
-
-    # Plane shift disabled (n_sweeps ignored) — IF φ only, no type changes.
-    del n_sweeps
+        phi[sel_i, sel_j, sel_k] = phi_new.astype(np.float32)
+        mass[sel_i, sel_j, sel_k] = mass_new.astype(np.float32)
+        phi_star = float(np.clip(phi_new.mean(), _PHI_LO, _PHI_HI))
+        phi_std = float(phi_new.std())
 
     m_final = float(mass[fluid].sum())
-    phi_star_out = float(phi[sel_i, sel_j, sel_k].mean()) if sel_i.size else phi_star
 
     import warp as wp
 
@@ -232,29 +332,27 @@ def apply_vof_height_equation(
     buf.cell_type.assign(wp.array(cell, dtype=wp.int32, device=device))
     buf.phi.assign(wp.array(phi, dtype=float, device=device))
     buf.mass.assign(wp.array(mass, dtype=float, device=device))
+    buf.rho.assign(wp.array(rho, dtype=float, device=device))
+    buf.ux.assign(wp.array(ux, dtype=float, device=device))
+    buf.uy.assign(wp.array(uy, dtype=float, device=device))
+    buf.uz.assign(wp.array(uz, dtype=float, device=device))
 
     return {
         "n_wet": float(n_if),
         "n_if": float(n_if),
         "n_plane": float(n_plane),
-        "n_touch": float(n_plane),
+        "n_touch": float(n_touch),
+        "n_drop": float(n_drop),
         "mode_k": float(mode_k),
-        "phi_star": phi_star_out,
-        "H_star": float(mode_k) + phi_star_out,
-        "phi_std": float(phi[sel_i, sel_j, sel_k].std()) if sel_i.size else 0.0,
+        "phi_star": float(phi_star),
+        "H_star": float(mode_k) + float(phi_star),
+        "phi_std": float(phi_std),
         "u_mean": u_mean,
-        "alpha": alpha,
+        "alpha": float(np.clip(rate, 0.0, 1.0)),
         "n_shift": 0.0,
         "mass_before": m_before,
         "mass_after": m_final,
         "mass_delta": m_final - m_before,
         "dmass": m_final - m_before,
-        "skipped": 0.0,
+        "skipped": skipped,
     }
-
-
-def _extract_height(cell, phi, solid, ux, uy, uz, *, phi_dust):
-    del solid, ux, uy, uz
-    h = continuous_surface_height(phi, cell, phi_dust=phi_dust)
-    wet = np.isfinite(h)
-    return np.where(wet, h, -1.0), wet, np.zeros_like(h)
