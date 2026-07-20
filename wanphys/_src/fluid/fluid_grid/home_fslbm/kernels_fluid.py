@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import warp as wp
 
-#wp.set_module_options({"enable_backward": False})
+wp.set_module_options({"enable_backward": False})
 
 from . import constants as C
 
@@ -523,6 +523,372 @@ def compute_rho_u_from_f(
 
 
 # ============================================================================
+# ============================================================================
+# 4b. PLIC / curvature helpers — free-surface geometry (Phase 2)
+# ============================================================================
+# Ref: ``mrUtilFuncGpu3D.h:104-420``
+#
+# Warp 1.12 does NOT support ``wp.array(dtype=..., length=...)`` as a local
+# variable inside @wp.func or @wp.kernel.  All helpers below operate on
+# scalar values or read directly from grid arrays passed as parameters.
+# The grid-reading variant ``calculate_curvature_from_grid`` is the primary
+# entry point called from ``stream_collide_bvh_kernel``.
+
+
+@wp.func
+def calculate_phi(rhon: float, massn: float, flagsn: int) -> float:
+    """Compute VOF fill level from density, mass and cell flag."""
+    if (flagsn & C.CellFlag.TYPE_F) != 0:
+        return 1.0
+    elif (flagsn & C.CellFlag.TYPE_I) != 0:
+        if rhon > 0.0:
+            return wp.clamp(massn / rhon, 0.0, 1.0)
+        else:
+            return 0.5
+    else:
+        return 0.0
+
+
+@wp.func
+def plic_cube_reduced(V: float, n1: float, n2: float, n3: float) -> float:
+    """Reduced-symmetry PLIC exact solution (SZ & Kawano 2022)."""
+    n12 = n1 + n2
+    n3V = n3 * V
+    if n12 <= 2.0 * n3V:
+        return n3V + 0.5 * n12
+    sqn1 = n1 * n1
+    n26 = 6.0 * n2
+    v1 = sqn1 / n26
+    if v1 <= n3V and n3V < v1 + 0.5 * (n2 - n1):
+        return 0.5 * (n1 + wp.sqrt(sqn1 + 8.0 * n2 * (n3V - v1)))
+    V6 = n1 * n26 * n3V
+    if n3V < v1:
+        return wp.cbrt(V6)
+    n3_sq = n3 * n3
+    if n3 < n12:
+        v3 = (n3_sq * (3.0 * n12 - n3) + sqn1 * (n1 - 3.0 * n3)
+              + (n2 * n2) * (n2 - 3.0 * n3)) / (n1 * n26)
+    else:
+        v3 = 0.5 * n12
+    sqn12 = sqn1 + n2 * n2
+    n1_cb = n1 * n1 * n1
+    n2_cb = n2 * n2 * n2
+    n3_cb = n3 * n3 * n3
+    V6cbn12 = V6 - n1_cb - n2_cb
+    if n3V < v3:
+        a = V6cbn12
+        b = sqn12
+        c = n12
+    else:
+        a = 0.5 * (V6cbn12 - n3_cb)
+        b = 0.5 * (sqn12 + n3_sq)
+        c = 0.5
+    t = wp.sqrt(c * c - b)
+    t_cb = t * t * t
+    arg = (c * c * c - 0.5 * a - 1.5 * b * c) / t_cb
+    arg = wp.clamp(arg, -1.0, 1.0)
+    return c - 2.0 * t * wp.sin(wp.asin(arg) * 0.33333334)
+
+
+@wp.func
+def plic_cube(V0: float, n: wp.vec3) -> float:
+    """Unit-cube / plane intersection: volume V0, normal n -> offset d0."""
+    ax = wp.abs(n.x)
+    ay = wp.abs(n.y)
+    az = wp.abs(n.z)
+    V = 0.5 - wp.abs(V0 - 0.5)
+    l_sum = ax + ay + az
+    n1 = wp.min(wp.min(ax, ay), az) / l_sum
+    n3 = wp.max(wp.max(ax, ay), az) / l_sum
+    n2 = 1.0 - n1 - n3
+    if n2 < 0.0:
+        n2 = 0.0
+    d = plic_cube_reduced(V, n1, n2, n3)
+    # wp.copysign not available in Warp 1.12
+    if V0 > 0.5:
+        return l_sum * (0.5 - d)
+    else:
+        return l_sum * (d - 0.5)
+
+
+# 5-element float struct (Warp 1.12 has no wp.vec5)
+@wp.struct
+class Vec5:
+    x: float
+    y: float
+    z: float
+    w: float
+    a: float
+
+
+# ---------------------------------------------------------------------------
+# Scalar-based LU solver for 5x5
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _lu_solve_5x5_scalar(
+    m00: float, m01: float, m02: float, m03: float, m04: float,
+    m11: float, m12: float, m13: float, m14: float,
+    m22: float, m23: float, m24: float,
+    m33: float, m34: float,
+    m44: float,
+    b0: float, b1: float, b2: float, b3: float, b4: float,
+    Nsol: int,
+) -> Vec5:
+    """In-place LU decomposition for 5x5; returns (x0, x1, x2, x3, x4)."""
+    # Decompose M into L*U (unrolled for 5x5)
+    if m00 != 0.0:
+        inv_m00 = 1.0 / m00
+    else:
+        inv_m00 = 1.0
+    l10 = m01 * inv_m00
+    l20 = m02 * inv_m00
+    l30 = m03 * inv_m00
+    l40 = m04 * inv_m00
+    u11 = m11 - l10 * m01
+    u12 = m12 - l10 * m02
+    u13 = m13 - l10 * m03
+    u14 = m14 - l10 * m04
+    u22_1 = m22 - l20 * m02
+    u23_1 = m23 - l20 * m03
+    u24_1 = m24 - l20 * m04
+    u32_1 = m23 - l30 * m02
+    u33_1 = m33 - l30 * m03
+    u34_1 = m34 - l30 * m04
+    u42_1 = m24 - l40 * m02
+    u43_1 = m34 - l40 * m03
+    u44_1 = m44 - l40 * m04
+
+    if u11 != 0.0:
+        inv_u11 = 1.0 / u11
+    else:
+        inv_u11 = 1.0
+    l21 = u12 * inv_u11
+    l31 = u13 * inv_u11
+    l41 = u14 * inv_u11
+    u22 = u22_1 - l21 * u12
+    u23 = u23_1 - l21 * u13
+    u24 = u24_1 - l21 * u14
+    u32 = u32_1 - l31 * u12
+    u33_2 = u33_1 - l31 * u13
+    u34_2 = u34_1 - l31 * u14
+    u42 = u42_1 - l41 * u12
+    u43_2 = u43_1 - l41 * u13
+    u44_2 = u44_1 - l41 * u14
+
+    if u22 != 0.0:
+        inv_u22 = 1.0 / u22
+    else:
+        inv_u22 = 1.0
+    l32 = u23 * inv_u22
+    l42 = u24 * inv_u22
+    u33 = u33_2 - l32 * u23
+    u34 = u34_2 - l32 * u24
+    u43 = u43_2 - l42 * u23
+    u44_3 = u44_2 - l42 * u24
+
+    if u33 != 0.0:
+        inv_u33 = 1.0 / u33
+    else:
+        inv_u33 = 1.0
+    l43 = u34 * inv_u33
+    u44 = u44_3 - l43 * u34
+
+    # Forward substitution: L*y = b
+    y0 = b0
+    y1 = b1 - l10 * y0
+    y2 = b2 - l20 * y0 - l21 * y1
+    y3 = b3 - l30 * y0 - l31 * y1 - l32 * y2
+    y4 = b4 - l40 * y0 - l41 * y1 - l42 * y2 - l43 * y3
+
+    # Back substitution: U*x = y
+    if Nsol <= 4:
+        x4 = 0.0
+    else:
+        x4 = y4 / u44
+    if Nsol <= 3:
+        x3 = 0.0
+    else:
+        x3 = (y3 - u34 * x4) / u33
+    if Nsol <= 2:
+        x2 = 0.0
+    else:
+        x2 = (y2 - u23 * x3 - u24 * x4) / u22
+    if Nsol <= 1:
+        x1 = 0.0
+    else:
+        x1 = (y1 - u12 * x2 - u13 * x3 - u14 * x4) / u11
+    if m00 != 0.0:
+        x0 = (y0 - m01 * x1 - m02 * x2 - m03 * x3 - m04 * x4) / m00
+    else:
+        x0 = 0.0
+
+    return Vec5(x0, x1, x2, x3, x4)
+
+
+# ============================================================================
+# Curvature entry point — reads phi directly from grid
+# ============================================================================
+
+
+@wp.func
+def calculate_curvature_from_grid(
+    phi: wp.array3d(dtype=float),
+    cx: wp.array(dtype=wp.int32),
+    cy: wp.array(dtype=wp.int32),
+    cz: wp.array(dtype=wp.int32),
+    opposite: wp.array(dtype=wp.int32),
+    i: int, j: int, k: int,
+    nx: int, ny: int, nz: int,
+    px: int, py: int, pz: int,
+) -> float:
+    """Compute mean curvature at cell (i,j,k) from phi neighbours.
+
+    Reads 27 phi values directly from the grid (no local wp.array needed).
+    Ref: ``mrUtilFuncGpu3D.h:371-420``.
+    """
+    # ---- Step 1: compute normal via 27-pt weighted gradient ----
+    bx_n = float(0.0)
+    by_n = float(0.0)
+    bz_n = float(0.0)
+
+    for di in range(1, 27):
+        opp = opposite[di]
+        ni = i - int(cx[opp])
+        nj = j - int(cy[opp])
+        nk = k - int(cz[opp])
+        if px == 1:
+            if ni < 0: ni += nx
+            elif ni >= nx: ni -= nx
+        if py == 1:
+            if nj < 0: nj += ny
+            elif nj >= ny: nj -= ny
+        if pz == 1:
+            if nk < 0: nk += nz
+            elif nk >= nz: nk -= nz
+        if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+            continue
+        pval = phi[ni, nj, nk]
+
+        if di <= 6:      w = 4.0
+        elif di <= 18:    w = 2.0
+        else:             w = 1.0
+
+        cxi = float(cx[di])
+        cyi = float(cy[di])
+        czi = float(cz[di])
+        bx_n += w * cxi * pval
+        by_n += w * cyi * pval
+        bz_n += w * czi * pval
+
+    bz = wp.vec3(bx_n, by_n, bz_n)
+    len_sq = bx_n * bx_n + by_n * by_n + bz_n * bz_n
+    if len_sq < 1.0e-20:
+        return 0.0
+    bz = wp.normalize(bz)
+
+    # ---- Step 2: local frame ----
+    rn = wp.vec3(0.56270900, 0.32704452, 0.75921047)
+    by_raw = wp.cross(bz, rn)
+    by_len_sq = by_raw.x * by_raw.x + by_raw.y * by_raw.y + by_raw.z * by_raw.z
+    if by_len_sq < 1.0e-20:
+        return 0.0
+    by = wp.normalize(by_raw)
+    bx = wp.cross(by, bz)
+
+    # ---- Step 3: accumulate M and b from interface neighbours ----
+    centre_offset = plic_cube(phi[i, j, k], bz)
+
+    m00 = float(0.0); m01 = float(0.0); m02 = float(0.0); m03 = float(0.0); m04 = float(0.0)
+    m11 = float(0.0); m12 = float(0.0); m13 = float(0.0); m14 = float(0.0)
+    m22 = float(0.0); m23 = float(0.0); m24 = float(0.0)
+    m33 = float(0.0); m34 = float(0.0)
+    m44 = float(0.0)
+    b0 = float(0.0); b1 = float(0.0); b2 = float(0.0); b3 = float(0.0); b4 = float(0.0)
+    num = int(0)
+
+    for di in range(1, 27):
+        opp = opposite[di]
+        ni = i - int(cx[opp])
+        nj = j - int(cy[opp])
+        nk = k - int(cz[opp])
+        if px == 1:
+            if ni < 0: ni += nx
+            elif ni >= nx: ni -= nx
+        if py == 1:
+            if nj < 0: nj += ny
+            elif nj >= ny: nj -= ny
+        if pz == 1:
+            if nk < 0: nk += nz
+            elif nk >= nz: nk -= nz
+        if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+            continue
+        phi_i = phi[ni, nj, nk]
+
+        if phi_i > 0.0 and phi_i < 1.0:
+            cxi = float(cx[di])
+            cyi = float(cy[di])
+            czi = float(cz[di])
+            offset = plic_cube(phi_i, bz) - centre_offset
+
+            px_v = cxi * bx.x + cyi * bx.y + czi * bx.z
+            py_v = cxi * by.x + cyi * by.y + czi * by.z
+            pz_v = (cxi * bz.x + cyi * bz.y + czi * bz.z) + offset
+
+            x2 = px_v * px_v
+            y2 = py_v * py_v
+            x3 = x2 * px_v
+            y3 = y2 * py_v
+
+            m00 += x2 * x2
+            m01 += x2 * y2
+            m02 += x3 * py_v
+            m03 += x3
+            m04 += x2 * py_v
+            m11 += y2 * y2
+            m12 += px_v * y3
+            m13 += px_v * y2
+            m14 += y3
+            m22 += x2 * y2
+            m23 += x2 * py_v
+            m24 += px_v * y2
+            m33 += x2
+            m34 += px_v * py_v
+            m44 += y2
+
+            b0 += x2 * pz_v
+            b1 += y2 * pz_v
+            b2 += px_v * py_v * pz_v
+            b3 += px_v * pz_v
+            b4 += py_v * pz_v
+
+            num += 1
+
+    if num < 5:
+        return 0.0
+
+    # ---- Step 4: solve 5x5 ----
+    use_n = 5 if num >= 5 else num
+    sol = _lu_solve_5x5_scalar(
+        m00, m01, m02, m03, m04,
+        m11, m12, m13, m14,
+        m22, m23, m24,
+        m33, m34, m44,
+        b0, b1, b2, b3, b4,
+        use_n,
+    )
+
+    A = sol.x; B = sol.y; C2 = sol.z; H = sol.w; I = sol.a
+
+    # ---- Step 5: mean curvature ----
+    d_inner = H * H + I * I + 1.0
+    if d_inner < 1.0e-10:
+        return 0.0
+    denom = d_inner * wp.sqrt(d_inner)
+    K_val = (A * (I * I + 1.0) + B * (H * H + 1.0) - C2 * H * I) / denom
+    return wp.clamp(K_val, -1.0, 1.0)
+
 # 5. stream_collide_bvh_kernel — monolithic fluid kernel
 # ============================================================================
 # Ref: ``mrLbmSolverGpu3D.cu:703-1057``
@@ -856,8 +1222,11 @@ def stream_collide_bvh_kernel(
             elif bv < 64.0:
                 sigma_k = 2.0e-4
 
-        # ---- PLIC curvature → placeholder (Phase 2) ----
-        curv = 0.0  # TODO Phase 2: calculate_curvature from phi neighbours
+        # ---- PLIC curvature (Phase 2) ----
+        # Reads phi directly from grid — no local wp.array needed
+        # (Warp 1.12 kernel codegen does not support local wp.array).
+        curv = calculate_curvature_from_grid(
+            phi, cx, cy, cz, opposite, i, j, k, nx, ny, nz, px, py, pz)
 
         rho_laplace = sigma_k * curv
         disjoint_term = disjoin_factor * disjoin_force[i, j, k]
@@ -923,16 +1292,70 @@ def stream_collide_bvh_kernel(
                 )
                 f_streamed[di] = feg_opp - fon[opp] + feg_di
 
-        # ---- Mass exchange: compute Δmass (Phase D skeleton) ----
-        # TODO Phase 2: Full mass exchange logic (lines 926-929, 780-999)
-        # acc_mass: float = 0.0
-        # acc_mass2: float = 0.0
-        # for di in range(27):
-        #     ...  # Detailed mass flux calculation
-        # atomic_add mass, massex, delta_g, delta_phi
+        # ---- Mass exchange: compute Δmass (Phase D, ref lines 926-929) ----
+        # For TYPE_I cells: accumulate mass flux across interface.
+        # Δmass = Σ [0.5*(phi_self + phi_neighbour) * (fhn[di] - fon[opp])]
+        # for all fluid/interface neighbours.
+        mass_exchange = float(0.0)
+        phi_self = phi[i, j, k]
+        for di in range(1, 27):
+            mni = i - cx[di]
+            mnj = j - cy[di]
+            mnk = k - cz[di]
 
-        # ---- Placeholder: store current mass/phi for now ----
-        phi[i, j, k] = 0.5  # TODO Phase 2: proper PLIC phi
+            # Periodic wrap
+            if px == 1:
+                if mni < 0: mni += nx
+                elif mni >= nx: mni -= nx
+            if py == 1:
+                if mnj < 0: mnj += ny
+                elif mnj >= ny: mnj -= ny
+            if pz == 1:
+                if mnk < 0: mnk += nz
+                elif mnk >= nz: mnk -= nz
+
+            if mni < 0 or mni >= nx or mnj < 0 or mnj >= ny or mnk < 0 or mnk >= nz:
+                continue
+
+            mnflag_su = int(flag[mni, mnj, mnk]) & C.TYPE_SU_MASK
+            if mnflag_su == C.TYPE_F or mnflag_su == C.TYPE_I:
+                nphi = phi[mni, mnj, mnk]
+                opp_di = int(opposite[di])
+                dflux = f_streamed[di] - fon[opp_di]
+                if mnflag_su == C.TYPE_F:
+                    mass_exchange += dflux
+                else:  # TYPE_I
+                    mass_exchange += 0.5 * (nphi + phi_self) * dflux
+
+        # Accumulate massex from neighbours (ref lines 808-818)
+        massn_accum = massn + mass_exchange
+        for di in range(1, 27):
+            eni = i - cx[di]
+            enj = j - cy[di]
+            enk = k - cz[di]
+            if px == 1:
+                if eni < 0: eni += nx
+                elif eni >= nx: eni -= nx
+            if py == 1:
+                if enj < 0: enj += ny
+                elif enj >= ny: enj -= ny
+            if pz == 1:
+                if enk < 0: enk += nz
+                elif enk >= nz: enk -= nz
+            if eni >= 0 and eni < nx and enj >= 0 and enj < ny and enk >= 0 and enk < nz:
+                massn_accum += massex[eni, enj, enk]
+
+        mass[i, j, k] = massn_accum
+        phi[i, j, k] = calculate_phi(rho_new, massn_accum, C.CellFlag.TYPE_I)
+
+    elif flagsn_su == C.TYPE_F:
+        # ---- Mass exchange for TYPE_F (ref lines 821-825) ----
+        mass_exchange_f = float(0.0)
+        for di in range(1, 27):
+            mass_exchange_f += f_streamed[di] - fon[di]
+        massn = massn + mass_exchange_f
+        mass[i, j, k] = massn
+        phi[i, j, k] = 1.0
 
     # =====================================================================
     # Phase E: Eddy-viscosity turbulence model
@@ -1171,3 +1594,32 @@ def add_gravity_kernel(
     force_x[i, j, k] = force_x[i, j, k] + gx
     force_y[i, j, k] = force_y[i, j, k] + gy
     force_z[i, j, k] = force_z[i, j, k] + gz
+
+
+# ============================================================================
+# 8. Surface test wrappers — thin kernels for @wp.func unit tests
+# ============================================================================
+
+
+@wp.kernel
+def _kernel_calculate_phi(
+    rhon: wp.array(dtype=float),
+    massn: wp.array(dtype=float),
+    flagsn: wp.array(dtype=wp.int32),
+    result: wp.array(dtype=float),
+):
+    tid = wp.tid()
+    result[tid] = calculate_phi(rhon[tid], massn[tid], int(flagsn[tid]))
+
+
+@wp.kernel
+def _kernel_plic_cube(
+    V0: wp.array(dtype=float),
+    nx_v: wp.array(dtype=float),
+    ny_v: wp.array(dtype=float),
+    nz_v: wp.array(dtype=float),
+    result: wp.array(dtype=float),
+):
+    tid = wp.tid()
+    n = wp.vec3(nx_v[tid], ny_v[tid], nz_v[tid])
+    result[tid] = plic_cube(V0[tid], n)

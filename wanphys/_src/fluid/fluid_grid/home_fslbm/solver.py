@@ -20,6 +20,7 @@ import warp as wp
 from ..base import FluidGridSolverBase
 from . import constants as C
 from . import kernels_fluid
+from . import kernels_surface
 from .model import HomeFslbmModel
 from .state import HomeFslbmState
 
@@ -231,6 +232,54 @@ class HomeFslbmSolver(FluidGridSolverBase):
                 self._cz,
                 self._w3d,
                 self._opposite,
+            ],
+        )
+
+        # ---- Surface marker propagation (Phase 2) ----
+        # Reference: surface_1 → surface_2 → surface_3 pipeline
+        # (``mrLbmSolverGpu3D.cu:444-701``)
+        wp.launch(
+            kernels_surface.surface_1_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                state_out.flag,
+                self._cx, self._cy, self._cz,
+                self.nx, self.ny, self.nz,
+            ],
+        )
+        wp.launch(
+            kernels_surface.surface_2_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                state_out.f_mom_post,
+                state_out.flag,
+                state_out.c_value,
+                state_out.g_mom,
+                state_out.islet,
+                state_out.merge_detector,
+                self._cx, self._cy, self._cz, self._w3d,
+                self.nx, self.ny, self.nz,
+                self._stride,
+            ],
+        )
+        wp.launch(
+            kernels_surface.surface_3_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                state_out.f_mom_post,
+                state_out.flag,
+                state_out.mass,
+                state_out.massex,
+                state_out.phi,
+                state_out.tag_matrix,
+                state_out.previous_tag,
+                state_out.islet,
+                state_out.delta_phi,
+                state_out.delta_g,
+                state_out.g_mom,
+                self._cx, self._cy, self._cz,
+                self.nx, self.ny, self.nz,
+                self._stride,
             ],
         )
 
