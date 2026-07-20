@@ -291,7 +291,7 @@ class VofDamBreak:
                 f"solver IF φ→φ* α={self.model.vof_height_eq_rate} "
                 f"|Δφ|≤{self.model.vof_height_eq_dh_cap} "
                 f"every={self.model.vof_height_eq_every} "
-                f"(plane equalize + drop airborne, safe φ band)",
+                f"(plane φ* + low-stair heal + drop airborne)",
                 file=sys.stderr,
                 flush=True,
             )
@@ -411,6 +411,8 @@ class VofDamBreak:
                     f" φ*={self._last_height_eq.get('phi_star', 0):.3f}"
                     f" φσ={self._last_height_eq.get('phi_std', 0):.3f}"
                     f" drop={int(self._last_height_eq.get('n_drop', 0))}"
+                    f" heal={int(self._last_height_eq.get('n_heal', 0))}"
+                    f" boost={int(self._last_height_eq.get('n_boost', 0))}"
                     f" Δm_heq={self._last_height_eq.get('mass_delta', 0):+.2f}"
                 )
             print(
