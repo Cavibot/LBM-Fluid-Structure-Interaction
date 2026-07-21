@@ -486,7 +486,13 @@ class GridLbmRigidCoupling(CompositeSimulation):
         ):
             rigid_backend: object = self._rigid_domain.model._newton_backend
             rigid_state.clear_forces()
-            pre_feedback_wrench: np.ndarray = np.asarray(rigid_state.body_f.numpy(), dtype=np.float64).copy()
+            # Skip diagnostic D2H of body_f unless something reads the wrench.
+            keep_wrench = self._last_lbm_feedback_wrench is not None
+            pre_feedback_wrench: np.ndarray | None = None
+            if keep_wrench:
+                pre_feedback_wrench = np.asarray(
+                    rigid_state.body_f.numpy(), dtype=np.float64
+                ).copy()
 
             if self._feedback_mode == "momentum_exchange":
                 # HOME-FREE moment path zeros ``f``; fall back to macro feedback.
@@ -574,8 +580,13 @@ class GridLbmRigidCoupling(CompositeSimulation):
                     ],
                 )
 
-            post_feedback_wrench: np.ndarray = np.asarray(rigid_state.body_f.numpy(), dtype=np.float64)
-            self._last_lbm_feedback_wrench = (post_feedback_wrench - pre_feedback_wrench).copy()
+            if keep_wrench and pre_feedback_wrench is not None:
+                post_feedback_wrench: np.ndarray = np.asarray(
+                    rigid_state.body_f.numpy(), dtype=np.float64
+                )
+                self._last_lbm_feedback_wrench = (
+                    post_feedback_wrench - pre_feedback_wrench
+                ).copy()
         elif self._last_lbm_feedback_wrench is not None:
             self._last_lbm_feedback_wrench.fill(0.0)
 

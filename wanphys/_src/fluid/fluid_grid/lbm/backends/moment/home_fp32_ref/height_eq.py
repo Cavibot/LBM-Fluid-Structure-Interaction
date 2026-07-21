@@ -11,13 +11,18 @@ Per call::
     1) Drop airborne wet cells (gas immediately below) onto the pool IF in
        the same column — splash “balls”, mass-conserving.
     2) Heal one-cell **low stairs** (pool IF at ``mode_k−1``; gas or thin IF
-       above): borrow from on-plane IF, promote — wall/corner prioritized by
-       horizontal wall-contact count (domain face or solid), never a fixed index.
-    3) Boost thin/dust IF on the mode plane up to the safe φ band (same borrow).
-    4) Plane ``φ → φ*`` with stronger α on wall-adjacent cells that sit below φ*.
+       above): borrow from on-plane IF, promote — interior first; skip a
+       2-cell domain-face halo (wall-first heal left a wrinkle strip).
+    3) Boost thin/dust IF on the mode plane up to the safe φ band (same borrow;
+       also skips the domain-face halo).
+    4) Plane ``φ → φ*`` with uniform α (no wall boost) × soft body weight.
     5) Light tip ``|u|`` damping (weak).
 
 Does not invent mid-air liquid (promote only with liquid below + gas above).
+Rigid-adjacent pool IF uses a soft weight (Chebyshev distance → α): full
+``φ→φ*`` far from bodies, none on the meniscus, linear blend in between so
+a hard skip ring does not wrinkle the surface. Heal/boost only run where
+weight≈1.
 
 Enable with ``LbmModel.vof_height_eq = True``.
 """
@@ -199,16 +204,95 @@ def _xy_wall_contacts(
     k: int,
     solid: np.ndarray,
 ) -> int:
-    """Count horizontal wall contacts (domain face or solid neighbor)."""
-    nx, ny, _nz = solid.shape
+    """Count horizontal *domain-face* contacts (not rigid ``solid_phi``)."""
+    del k
+    nx, ny = int(solid.shape[0]), int(solid.shape[1])
     n = 0
     for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
         ni, nj = i + di, j + dj
         if ni < 0 or nj < 0 or ni >= nx or nj >= ny:
             n += 1
-        elif float(solid[ni, nj, k]) < 0.0:
-            n += 1
     return n
+
+
+def _xy_dist_to_domain_face(i: int, j: int, nx: int, ny: int) -> int:
+    """Min cells to a domain face (0 = on the face row/col)."""
+    return int(min(i, j, nx - 1 - i, ny - 1 - j))
+
+
+def _has_body_solid_xy(
+    i: int,
+    j: int,
+    k: int,
+    solid: np.ndarray,
+) -> bool:
+    """True if a horizontal neighbor is rigid (``solid_phi < 0``)."""
+    nx, ny, _nz = solid.shape
+    for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        ni, nj = i + di, j + dj
+        if ni < 0 or nj < 0 or ni >= nx or nj >= ny:
+            continue
+        if float(solid[ni, nj, k]) < 0.0:
+            return True
+    return False
+
+
+def _xy_chebyshev_to_solid(
+    i: int,
+    j: int,
+    k: int,
+    solid: np.ndarray,
+    *,
+    max_r: int = 4,
+) -> int:
+    """Chebyshev distance in xy to nearest rigid cell (search ``k±1`` band).
+
+    Returns ``max_r + 1`` if none found within ``max_r``.
+    """
+    nx, ny, nz = solid.shape
+    if float(solid[i, j, k]) < 0.0:
+        return 0
+    k0 = max(0, k - 1)
+    k1 = min(nz - 1, k + 1)
+    for r in range(0, max_r + 1):
+        for di in range(-r, r + 1):
+            for dj in range(-r, r + 1):
+                if max(abs(di), abs(dj)) != r:
+                    continue
+                ni, nj = i + di, j + dj
+                if ni < 0 or nj < 0 or ni >= nx or nj >= ny:
+                    continue
+                for kk in range(k0, k1 + 1):
+                    if float(solid[ni, nj, kk]) < 0.0:
+                        return r
+    return max_r + 1
+
+
+def _body_soft_weight(dist: int, *, r0: int = 1, r1: int = 4) -> float:
+    """0 near rigid (≤r0), 1 far (≥r1), linear in between — avoids a hard ring."""
+    if dist <= r0:
+        return 0.0
+    if dist >= r1:
+        return 1.0
+    return float(dist - r0) / float(r1 - r0)
+
+
+def _pool_body_weights(
+    ii: np.ndarray,
+    jj: np.ndarray,
+    kk: np.ndarray,
+    solid: np.ndarray,
+    *,
+    max_r: int = 4,
+) -> np.ndarray:
+    """Soft weights in ``[0,1]`` for each pool-IF index."""
+    w = np.ones(ii.size, dtype=np.float64)
+    for t in range(ii.size):
+        d = _xy_chebyshev_to_solid(
+            int(ii[t]), int(jj[t]), int(kk[t]), solid, max_r=max_r
+        )
+        w[t] = _body_soft_weight(d, r0=1, r1=max_r)
+    return w
 
 
 def _boost_thin_pool_if(
@@ -224,10 +308,12 @@ def _boost_thin_pool_if(
     mode_k: int,
     max_boost: int = 128,
 ) -> int:
-    """Raise under-filled pool IF (esp. wall/corner) up to ``_PHI_LO``.
+    """Raise under-filled pool IF up to ``_PHI_LO``.
 
     Dust IF (``φ < phi_dust``) is invisible to height maps and reads as a
-    one-cell pit. Borrow from on-plane neighbors — generic, no fixed corner.
+    one-cell pit. Borrow from on-plane neighbors. Skips a 2-cell domain-face
+    halo — wall-prioritized boost used to leave a wrinkle one cell in from
+    the wall.
     """
     nx, ny, _nz = cell.shape
     key = np.full((nx, ny), -1, dtype=np.int32)
@@ -240,7 +326,11 @@ def _boost_thin_pool_if(
     candidates: list[tuple[int, int, int, int]] = []
     for i in range(nx):
         for j in range(ny):
+            if _xy_dist_to_domain_face(i, j, nx, ny) <= 2:
+                continue
             if solid[i, j, mode_k] < 0.0:
+                continue
+            if _has_body_solid_xy(i, j, mode_k, solid):
                 continue
             if int(cell[i, j, mode_k]) != CELL_INTERFACE:
                 continue
@@ -250,8 +340,8 @@ def _boost_thin_pool_if(
             p = float(phi[i, j, mode_k])
             if p >= _PHI_LO - 1.0e-6:
                 continue
-            wc = _xy_wall_contacts(i, j, mode_k, solid)
-            candidates.append((-wc, i, j, mode_k))
+            # Prefer thinner cells first (no wall boost).
+            candidates.append((int(round(p * 1000.0)), i, j, mode_k))
     candidates.sort()
     n_boost = 0
     for _prio, i, j, k in candidates:
@@ -327,7 +417,8 @@ def _heal_low_stairs(
 ) -> int:
     """Promote pool IF at ``mode_k-1`` when above is gas **or** thin IF.
 
-    Borrows fill(+seed) from on-plane IF. Prioritizes wall/corner contacts.
+    Borrows fill(+seed) from on-plane IF. Skips a 2-cell domain-face halo —
+    wall-first heal used to leave a parallel wrinkle just inside the wall.
     """
     nx, ny, nz = cell.shape
     if mode_k <= 0 or mode_k >= nz:
@@ -339,14 +430,14 @@ def _heal_low_stairs(
 
     plane_idx = [t for t in range(ii.size) if int(kk[t]) == mode_k]
     if not plane_idx:
-        # Still allow heal using mode_k IF found by scan.
         pass
 
     low_idx = [t for t in range(ii.size) if int(kk[t]) == mode_k - 1]
 
-    def _prio(t: int) -> tuple[int, float]:
+    def _prio(t: int) -> float:
+        # Interior first (large face-distance), then thinner φ.
         i, j, k = int(ii[t]), int(jj[t]), int(kk[t])
-        return (-_xy_wall_contacts(i, j, k, solid), float(phi[i, j, k]))
+        return (-_xy_dist_to_domain_face(i, j, nx, ny), float(phi[i, j, k]))
 
     low_idx.sort(key=_prio)
     n_heal = 0
@@ -356,7 +447,11 @@ def _heal_low_stairs(
         if n_heal >= max_heals:
             break
         i, j, k = int(ii[t]), int(jj[t]), int(kk[t])
+        if _xy_dist_to_domain_face(i, j, nx, ny) <= 2:
+            continue
         if solid[i, j, k] < 0.0 or int(cell[i, j, k]) != CELL_INTERFACE:
+            continue
+        if _has_body_solid_xy(i, j, k, solid):
             continue
         above = k + 1
         if above >= nz or solid[i, j, above] < 0.0:
@@ -451,13 +546,50 @@ def apply_vof_height_equation(
     n_sweeps: int = 1,
     u_damp: float = 0.04,
     clean_airborne: bool = True,
+    use_gpu: bool = True,
 ) -> dict[str, float]:
-    """Plane-wide ``φ → φ*`` on mode-k pool IF + airborne drop.
+    """Plane-wide ``φ → φ*`` on mode-k pool IF.
 
-    ``dh_cap`` caps ``|Δφ|`` per cell per call.
-    ``u_damp`` is intentionally weak (strong damping froze the left/right tilt).
+    Default ``use_gpu=True`` runs in-place Warp kernels (no full-field D2H).
+    Host path kept for debugging; it is far slower (Python grid scans).
     """
-    del n_sweeps
+    del n_sweeps, clean_airborne
+    if use_gpu:
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.height_eq_warp import (
+            apply_vof_height_equation_gpu,
+        )
+
+        # Force tip u_damp=0 on GPU: host default damping seeds circular waves.
+        del u_damp
+        return apply_vof_height_equation_gpu(
+            buf,
+            rate=float(rate),
+            u_max=float(u_max),
+            phi_dust=float(phi_dust),
+            dh_cap=float(dh_cap),
+            u_damp=0.0,
+            sync_stats=True,
+        )
+    return _apply_vof_height_equation_host(
+        buf,
+        rate=float(rate),
+        u_max=float(u_max),
+        phi_dust=float(phi_dust),
+        dh_cap=float(dh_cap),
+        u_damp=float(u_damp),
+    )
+
+
+def _apply_vof_height_equation_host(
+    buf: HomeVofGpuBuffers,
+    *,
+    rate: float = 0.05,
+    u_max: float = 0.05,
+    phi_dust: float = 0.05,
+    dh_cap: float = 0.05,
+    u_damp: float = 0.04,
+) -> dict[str, float]:
+    """Legacy host implementation (slow — full D2H + Python loops)."""
     cell = buf.cell_type.numpy().astype(np.int32, copy=True)
     phi = buf.phi.numpy().astype(np.float32, copy=True)
     mass = buf.mass.numpy().astype(np.float32, copy=True)
@@ -474,88 +606,29 @@ def apply_vof_height_equation(
     )
     n_if = int(ii.size)
     if n_if < 4:
-        return {"n_wet": 0.0, "n_if": float(n_if), "dmass": 0.0, "phi_star": 0.0}
-
-    mode_k = int(np.bincount(kk.astype(np.int64)).argmax())
-    n_drop = 0
-    if clean_airborne:
-        n_drop = _drop_airborne_onto_pool(
-            cell, rho, mass, phi, solid, mode_k=mode_k
-        )
-        if n_drop > 0:
-            ii, jj, kk = _pool_surface_interfaces(
-                cell, phi, solid, phi_dust=float(phi_dust)
-            )
-            n_if = int(ii.size)
-            if n_if >= 4:
-                mode_k = int(np.bincount(kk.astype(np.int64)).argmax())
-
-    n_heal = 0
-    n_boost = 0
-    if n_if >= 4:
-        n_heal = _heal_low_stairs(
-            cell,
-            rho,
-            mass,
-            phi,
-            solid,
-            ii,
-            jj,
-            kk,
-            mode_k=mode_k,
-            max_heals=64,
-        )
-        if n_heal > 0:
-            ii, jj, kk = _pool_surface_interfaces(
-                cell, phi, solid, phi_dust=float(phi_dust)
-            )
-            n_if = int(ii.size)
-            if n_if >= 4:
-                mode_k = int(np.bincount(kk.astype(np.int64)).argmax())
-        if n_if >= 4:
-            n_boost = _boost_thin_pool_if(
-                cell,
-                rho,
-                mass,
-                phi,
-                solid,
-                ii,
-                jj,
-                kk,
-                mode_k=mode_k,
-                max_boost=128,
-            )
-            if n_boost > 0:
-                ii, jj, kk = _pool_surface_interfaces(
-                    cell, phi, solid, phi_dust=float(phi_dust)
-                )
-                n_if = int(ii.size)
-                if n_if >= 4:
-                    mode_k = int(np.bincount(kk.astype(np.int64)).argmax())
-
-    if n_if < 4:
-        import warp as wp
-
-        device = buf.device
-        buf.cell_type.assign(wp.array(cell, dtype=wp.int32, device=device))
-        buf.phi.assign(wp.array(phi, dtype=float, device=device))
-        buf.mass.assign(wp.array(mass, dtype=float, device=device))
-        buf.rho.assign(wp.array(rho, dtype=float, device=device))
-        m_final = float(mass[fluid].sum())
         return {
-            "n_wet": float(n_if),
+            "n_wet": 0.0,
             "n_if": float(n_if),
-            "n_drop": float(n_drop),
-            "n_heal": float(n_heal),
-            "n_boost": float(n_boost),
-            "mass_delta": m_final - m_before,
-            "dmass": m_final - m_before,
+            "n_body_skip": 0.0,
+            "dmass": 0.0,
             "phi_star": 0.0,
+            "gpu": 0.0,
         }
 
+    body_w = _pool_body_weights(ii, jj, kk, solid, max_r=4)
+    mode_mask = body_w >= 0.5
+    if int(mode_mask.sum()) >= 4:
+        mode_k = int(np.bincount(kk[mode_mask].astype(np.int64)).argmax())
+    else:
+        mode_k = int(np.bincount(kk.astype(np.int64)).argmax())
+    n_body_skip = int((body_w < 1.0e-12).sum())
+    n_drop = 0
+    n_heal = 0
+    n_boost = 0
+
+    # Host path: φ→φ* only (heal/drop deferred — too expensive + wrinkle-prone).
     spd = np.sqrt(ux[ii, jj, kk] ** 2 + uy[ii, jj, kk] ** 2 + uz[ii, jj, kk] ** 2)
     u_mean = float(spd.mean())
-
     damp = float(np.clip(u_damp, 0.0, 0.5))
     if damp > 0.0:
         scale = np.float32(1.0 - damp)
@@ -570,68 +643,50 @@ def apply_vof_height_equation(
     phi_std = 0.0
     n_touch = 0
 
+    if body_w.shape[0] != ii.size:
+        body_w = _pool_body_weights(ii, jj, kk, solid, max_r=4)
+        n_body_skip = int((body_w < 1.0e-12).sum())
+
     if u_mean > float(u_max) or n_plane < 4:
         skipped = 1.0
     else:
         sel_i = ii[on_plane]
         sel_j = jj[on_plane]
         sel_k = kk[on_plane]
-
+        sel_w = body_w[on_plane]
         phi_s = phi[sel_i, sel_j, sel_k].astype(np.float64)
         mass_s = mass[sel_i, sel_j, sel_k].astype(np.float64)
         rho_s = np.maximum(rho[sel_i, sel_j, sel_k].astype(np.float64), 1.0e-3)
         m_plane0 = float(mass_s.sum())
-
-        # Target inside the safe band so we never drive the plane into fill/empty.
-        phi_star_raw = float(np.sum(phi_s * rho_s) / max(float(np.sum(rho_s)), 1.0e-6))
+        core = sel_w >= 0.5
+        if int(core.sum()) >= 4:
+            phi_star_raw = float(
+                np.sum(phi_s[core] * rho_s[core] * sel_w[core])
+                / max(float(np.sum(rho_s[core] * sel_w[core])), 1.0e-6)
+            )
+        else:
+            phi_star_raw = float(
+                np.sum(phi_s * rho_s) / max(float(np.sum(rho_s)), 1.0e-6)
+            )
         phi_star = float(np.clip(phi_star_raw, _PHI_LO + 0.02, _PHI_HI - 0.02))
-
         alpha = float(np.clip(rate, 0.0, 1.0))
         dphi_cap = float(max(dh_cap, 1.0e-4))
-        # Wall/corner contacts: stronger fill when below φ* (generic, not a fixed corner).
-        dphi = np.empty(sel_i.size, dtype=np.float64)
-        for t in range(sel_i.size):
-            i, j, k = int(sel_i[t]), int(sel_j[t]), int(sel_k[t])
-            n_wall = _xy_wall_contacts(i, j, k, solid)
-            a = alpha
-            if n_wall > 0 and float(phi_s[t]) < phi_star:
-                a = min(1.0, alpha * (1.0 + 0.75 * float(n_wall)))
-            dphi[t] = a * (phi_star - float(phi_s[t]))
+        dphi = alpha * sel_w * (phi_star - phi_s)
         np.clip(dphi, -dphi_cap, dphi_cap, out=dphi)
-        # Allow wall cells a slightly larger step when filling a depression.
-        for t in range(sel_i.size):
-            i, j, k = int(sel_i[t]), int(sel_j[t]), int(sel_k[t])
-            if _xy_wall_contacts(i, j, k, solid) > 0 and dphi[t] > 0.0:
-                dphi[t] = min(dphi[t], 1.5 * dphi_cap)
         n_touch = int(np.count_nonzero(np.abs(dphi) > 1.0e-12))
-
         phi_new = np.clip(phi_s + dphi, _PHI_LO, _PHI_HI)
         mass_new = phi_new * rho_s
         sum_m = float(mass_new.sum())
         if sum_m > 1.0e-6 and abs(sum_m - m_plane0) > 1.0e-8:
             mass_new *= m_plane0 / sum_m
-        # After renorm, allow φ slightly outside the band so mass is not clipped away.
         phi_new = mass_new / rho_s
-        # Soft pull of outliers back into band without destroying Σmass:
-        over = phi_new > _PHI_HI
-        under = phi_new < _PHI_LO
-        if np.any(over) or np.any(under):
-            phi_tgt = phi_new.copy()
-            phi_tgt[over] = _PHI_HI
-            phi_tgt[under] = _PHI_LO
-            mass_tgt = phi_tgt * rho_s
-            sum_t = float(mass_tgt.sum())
-            if sum_t > 1.0e-6:
-                mass_new = mass_tgt * (m_plane0 / sum_t)
-                phi_new = mass_new / rho_s
-
         phi[sel_i, sel_j, sel_k] = phi_new.astype(np.float32)
         mass[sel_i, sel_j, sel_k] = mass_new.astype(np.float32)
-        phi_star = float(np.clip(phi_new.mean(), _PHI_LO, _PHI_HI))
+        core_phi = phi_new[sel_w >= 0.5] if int((sel_w >= 0.5).sum()) else phi_new
+        phi_star = float(np.clip(float(core_phi.mean()), _PHI_LO, _PHI_HI))
         phi_std = float(phi_new.std())
 
     m_final = float(mass[fluid].sum())
-
     import warp as wp
 
     device = buf.device
@@ -651,6 +706,7 @@ def apply_vof_height_equation(
         "n_drop": float(n_drop),
         "n_heal": float(n_heal),
         "n_boost": float(n_boost),
+        "n_body_skip": float(n_body_skip),
         "mode_k": float(mode_k),
         "phi_star": float(phi_star),
         "H_star": float(mode_k) + float(phi_star),
@@ -663,4 +719,6 @@ def apply_vof_height_equation(
         "mass_delta": m_final - m_before,
         "dmass": m_final - m_before,
         "skipped": skipped,
+        "gpu": 0.0,
     }
+

@@ -8,12 +8,20 @@ rasterized into ``solid_phi`` each substep; the HOME-FREE fused kernel treats
 ``solid_phi < 0`` as moving walls. Fluid→rigid feedback uses the macro
 approximation (distributions are not stored on the moment path).
 
+Optional late-pool ``--height-eq`` (same IF ``φ→φ*`` regularizer as the
+single-phase dam-break example). Arms after ``t=8``; body-adjacent IF is
+left alone so sphere menisci are not flattened into the pool plane.
+
 Run:
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
         --viewer gl --n 64
 
-Sphere trajectories are flushed every frame to ``sphere_traj.csv`` (override with
-``--sphere-log PATH``, disable with ``--sphere-log ""``).
+    uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
+        --viewer gl --n 48 --height-eq
+
+Sphere trajectories append to ``sphere_traj.csv`` (override with
+``--sphere-log PATH``, disable with ``--sphere-log ""``). Buffered writes;
+use ``--sphere-log-every N`` to thin rows (default 10).
 
 Controls: [Space] pause/resume  [R] reset  [mouse] orbit  [scroll] zoom
 """
@@ -34,6 +42,10 @@ import warp as wp
 
 from wanphys._src.fluid.fluid_grid.coupling import GridLbmRigidCoupling
 from wanphys._src.fluid.fluid_grid.lbm import LbmDomain, LbmModel, LbmState
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.sphere_buoyancy_warp import (
+    apply_sphere_buoyancy_forces_gpu,
+    ensure_buoyancy_scratch,
+)
 from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRenderer
 from wanphys._src.fluid.fluid_viewer import init as init_fluid_viewer
 from wanphys.rigid import RigidDomain, RigidModelBuilder, ShapeConfig
@@ -205,13 +217,18 @@ class HomeVofDamBreakTwoSpheres:
         water_horizontal_drag_rate: float = WATER_HORIZONTAL_DRAG_RATE,
         water_vertical_drag_rate: float = WATER_VERTICAL_DRAG_RATE,
         sphere_log_path: str | Path | None = DEFAULT_SPHERE_LOG,
-        sphere_log_every: int = 1,
+        sphere_log_every: int = 10,
+        enable_height_eq: bool = False,
     ) -> None:
         self.viewer: Any = viewer
         if isinstance(self.viewer, FluidViewerGL):
             self.viewer._paused = True
 
         self._n = int(n)
+        self._enable_height_eq = bool(enable_height_eq)
+        self._height_eq_armed = False
+        self._height_eq_arm_after_t = 8.0
+        self._last_height_eq: dict | None = None
         n_ref = 48
         gravity = -0.0020 * (float(n_ref) / float(self._n))
         self._substeps = max(SIM_SUBSTEPS, 12)
@@ -228,7 +245,7 @@ class HomeVofDamBreakTwoSpheres:
                 "light_x,light_y,light_z,light_vx,light_vy,light_vz,light_sub,"
                 "heavy_fx,heavy_fy,heavy_fz,light_fx,light_fy,light_fz\n"
             )
-            self._sphere_log_fp.flush()
+            # No flush here — buffered I/O; flush on close / periodic.
             print(f"  sphere traj log → {self._sphere_log_path} (every {self._sphere_log_every} frame)")
 
         self.model = LbmModel(
@@ -255,6 +272,11 @@ class HomeVofDamBreakTwoSpheres:
             vof_orphan_height_margin=3,
             vof_bubble_pressure=False,
             vof_bubble_disjoint=False,
+            vof_height_eq=False,
+            vof_height_eq_rate=0.025,
+            vof_height_eq_u_max=0.05,
+            vof_height_eq_dh_cap=0.03,
+            vof_height_eq_every=24,
             lambda_trt=LAMBDA_TRT,
             initial_density=RHO_LIQUID,
             gravity_x=0.0,
@@ -275,6 +297,7 @@ class HomeVofDamBreakTwoSpheres:
         self._sphere_volume = (4.0 / 3.0) * math.pi * SPHERE_RADIUS**3
         self._last_submerged_by_body: dict[int, float] = {}
         self._last_extra_force_by_body: dict[int, tuple[float, float, float]] = {}
+        self._buoyancy_scratch: dict | None = None
 
         self._init_fluid()
         self._init_rigid_scene(feedback_force_scale=float(feedback_force_scale))
@@ -298,7 +321,9 @@ class HomeVofDamBreakTwoSpheres:
 
         print(
             f"HOME-VOF dam-break two spheres: {self._n}^3, tau={TAU}, "
-            f"gz={gravity:.5f}, gamma={VOF_GAMMA}, substeps={self._substeps}"
+            f"gz={gravity:.5f}, gamma={VOF_GAMMA}, substeps={self._substeps}, "
+            f"height_eq={self._enable_height_eq} "
+            f"(arm_t>={self._height_eq_arm_after_t})"
         )
         print("Controls: [Space] pause/resume  [R] reset  [mouse] orbit  [scroll] zoom")
 
@@ -457,20 +482,35 @@ class HomeVofDamBreakTwoSpheres:
 
     def step(self) -> None:
         t0 = time.perf_counter()
+        home = self.domain.solver._home_fp32
+        if (
+            self._enable_height_eq
+            and home is not None
+            and self.sim_time >= self._height_eq_arm_after_t
+            and not self._height_eq_armed
+        ):
+            self.model.vof_height_eq = True
+            self._height_eq_armed = True
+            print(
+                f"[height-eq ON] t={self.sim_time:.1f}s "
+                f"GPU IF φ→φ* α={self.model.vof_height_eq_rate} "
+                f"|Δφ|≤{self.model.vof_height_eq_dh_cap} "
+                f"every={self.model.vof_height_eq_every} "
+                f"(pool plane; soft fade near rigid)",
+                file=sys.stderr,
+                flush=True,
+            )
         for _ in range(self._substeps):
             self._step_coupled()
-        # Same late-pool surface policy as fluid_grid_lbm_dambreak_vof.
-        if self._late_pool is not None:
-            events, _stats = self._late_pool.after_frame(
-                self.domain.state,
-                sim_time=self.sim_time + FRAME_DT,
-                frame_count=self.frame_count + 1,
-                update_visual=lambda st: self.domain.solver._vof_sharp.update_visual_field(
-                    st, self._n, self._n, self._n
-                ),
-            )
-            for ev in events:
-                print(ev.message, file=sys.stderr, flush=True)
+        # Sync submerged/forces only when status/CSV needs them (not every substep).
+        next_frame = self.frame_count + 1
+        need_log = self._sphere_log_fp is not None and (
+            next_frame % self._sphere_log_every == 0
+        )
+        if need_log or next_frame % 30 == 0:
+            self._sync_buoyancy_submerged()
+        if home is not None and self.model.vof_height_eq:
+            self._last_height_eq = dict(getattr(home, "_last_height_eq_stats", {}) or {})
         wp.synchronize_device(self.model._device)
         self._last_ms = (time.perf_counter() - t0) * 1000.0
         self.sim_time += FRAME_DT
@@ -480,7 +520,7 @@ class HomeVofDamBreakTwoSpheres:
             self._print_status()
 
     def _log_spheres(self, *, phase: str) -> None:
-        """Append one CSV row and flush immediately (real-time)."""
+        """Append one CSV row (buffered; no per-row flush)."""
         fp = self._sphere_log_fp
         if fp is None:
             return
@@ -519,7 +559,8 @@ class HomeVofDamBreakTwoSpheres:
             f"{heavy_f[0]:.8f},{heavy_f[1]:.8f},{heavy_f[2]:.8f},"
             f"{light_f[0]:.8f},{light_f[1]:.8f},{light_f[2]:.8f}\n"
         )
-        fp.flush()
+        if phase != "run" or (self.frame_count % 60) == 0:
+            fp.flush()
 
     def close(self) -> None:
         if self._sphere_log_fp is not None:
@@ -536,124 +577,59 @@ class HomeVofDamBreakTwoSpheres:
 
     def _apply_empirical_buoyancy_and_drag(self) -> None:
         state = self.domain.state
-        phi_np = state.phi.numpy()
-        ctype_np = state.cell_type.numpy()
-        solid_np = state.solid_phi.numpy()
-        ux_np = state.velocity_x.numpy()
-        uy_np = state.velocity_y.numpy()
-        uz_np = state.velocity_z.numpy()
-        self._apply_sphere_buoyancy_and_drag(
-            self.heavy_body_id,
-            HEAVY_SPHERE_DENSITY,
-            phi_np,
-            ctype_np,
-            solid_np,
-            ux_np,
-            uy_np,
-            uz_np,
+        rigid = self.rigid_domain.state
+        self._buoyancy_scratch = ensure_buoyancy_scratch(
+            device=self.model._device,
+            offsets_xyz=BUOYANCY_SAMPLE_OFFSETS,
+            body_ids=(self.heavy_body_id, self.light_body_id),
+            densities=(HEAVY_SPHERE_DENSITY, LIGHT_SPHERE_DENSITY),
+            scratch=self._buoyancy_scratch,
         )
-        self._apply_sphere_buoyancy_and_drag(
-            self.light_body_id,
-            LIGHT_SPHERE_DENSITY,
-            phi_np,
-            ctype_np,
-            solid_np,
-            ux_np,
-            uy_np,
-            uz_np,
+        vel_scale = DH / max(self.sim_dt, 1.0e-12)
+        apply_sphere_buoyancy_forces_gpu(
+            phi=state.phi,
+            cell=state.cell_type,
+            solid=state.solid_phi,
+            ux=state.velocity_x,
+            uy=state.velocity_y,
+            uz=state.velocity_z,
+            body_q=rigid.body_q,
+            body_qd=rigid.body_qd,
+            body_f_apply=rigid.apply_body_forces,
+            radius=SPHERE_RADIUS,
+            dh=DH,
+            nx=self._n,
+            ny=self._n,
+            nz=self._n,
+            scratch=self._buoyancy_scratch,
+            volume=self._sphere_volume,
+            rho_liquid=RHO_LIQUID,
+            gravity_abs=abs(RIGID_GRAVITY_Z),
+            buoyancy_scale=self.buoyancy_force_scale,
+            push_rate=FLUID_PUSH_RATE,
+            drag_xy=self.water_horizontal_drag_rate,
+            drag_z=self.water_vertical_drag_rate,
+            vel_scale=vel_scale,
+            sync_submerged=False,
         )
 
-    def _apply_sphere_buoyancy_and_drag(
-        self,
-        body_id: int,
-        sphere_density: float,
-        phi_np: np.ndarray,
-        ctype_np: np.ndarray,
-        solid_np: np.ndarray,
-        ux_np: np.ndarray,
-        uy_np: np.ndarray,
-        uz_np: np.ndarray,
-    ) -> None:
-        position = np.asarray(
-            self.rigid_domain.state.get_body_position(body_id), dtype=np.float64
-        )
-        velocity = np.asarray(
-            self.rigid_domain.state.get_body_linear_velocity(body_id), dtype=np.float64
-        )
-        submerged, fluid_vel = self._estimate_submerged_and_fluid_vel(
-            position, phi_np, ctype_np, solid_np, ux_np, uy_np, uz_np
-        )
-        mass = float(sphere_density) * self._sphere_volume
-
-        buoyancy_z = (
-            self.buoyancy_force_scale
-            * RHO_LIQUID
-            * self._sphere_volume
-            * abs(RIGID_GRAVITY_Z)
-            * submerged
-        )
-        # Match sphere velocity toward nearby liquid (horizontal bore push).
-        rel = fluid_vel - velocity
-        push = FLUID_PUSH_RATE * mass * submerged
-        push_x = push * float(rel[0])
-        push_y = push * float(rel[1])
-        push_z = 0.35 * push * float(rel[2])
-        drag_x = -self.water_horizontal_drag_rate * mass * submerged * float(velocity[0])
-        drag_y = -self.water_horizontal_drag_rate * mass * submerged * float(velocity[1])
-        drag_z = -self.water_vertical_drag_rate * mass * submerged * float(velocity[2])
-        force = (
-            float(push_x + drag_x),
-            float(push_y + drag_y),
-            float(buoyancy_z + push_z + drag_z),
-            0.0,
-            0.0,
-            0.0,
-        )
-        self.rigid_domain.state.add_body_force(body_id, force)
-        self._last_submerged_by_body[body_id] = submerged
-        self._last_extra_force_by_body[body_id] = (force[0], force[1], force[2])
-
-    def _estimate_submerged_and_fluid_vel(
-        self,
-        position: np.ndarray,
-        phi_np: np.ndarray,
-        ctype_np: np.ndarray,
-        solid_np: np.ndarray,
-        ux_np: np.ndarray,
-        uy_np: np.ndarray,
-        uz_np: np.ndarray,
-    ) -> tuple[float, np.ndarray]:
-        """Sample fluid just outside the solid; interior cells are masked gas."""
-        water_samples = 0
-        valid = 0
-        vel_acc = np.zeros(3, dtype=np.float64)
-        n = self._n
-        for offset in BUOYANCY_SAMPLE_OFFSETS:
-            sample_x = float(position[0] + offset[0] * SPHERE_RADIUS)
-            sample_y = float(position[1] + offset[1] * SPHERE_RADIUS)
-            sample_z = float(position[2] + offset[2] * SPHERE_RADIUS)
-            i = int(np.clip(sample_x / DH, 0, n - 1))
-            j = int(np.clip(sample_y / DH, 0, n - 1))
-            k = int(np.clip(sample_z / DH, 0, n - 1))
-            if float(solid_np[i, j, k]) < 0.0:
-                continue
-            valid += 1
-            if int(ctype_np[i, j, k]) > 0 and float(phi_np[i, j, k]) > 0.25:
-                water_samples += 1
-                vel_acc[0] += float(ux_np[i, j, k])
-                vel_acc[1] += float(uy_np[i, j, k])
-                vel_acc[2] += float(uz_np[i, j, k])
-        if valid <= 0:
-            return 0.0, vel_acc
-        submerged = float(water_samples) / float(valid)
-        if water_samples > 0:
-            vel_acc /= float(water_samples)
-            # Lattice → world (same scale as coupling: u_world ≈ u_lbm * dh / dt
-            # is already embedded in LBM wall vel; here macros are lattice units.
-            # Convert with dh/sim_dt so push matches rigid world units.
-            scale = DH / max(self.sim_dt, 1.0e-12)
-            vel_acc *= scale
-        return submerged, vel_acc
+    def _sync_buoyancy_submerged(self) -> None:
+        scratch = self._buoyancy_scratch
+        if scratch is None:
+            return
+        sub = scratch["submerged"].numpy()
+        ids = scratch["body_ids_host"]
+        for i, body_id in enumerate(ids):
+            self._last_submerged_by_body[int(body_id)] = float(sub[i])
+        # Forces stay on device; log zeros unless we sync (optional).
+        forces = scratch["forces"].numpy()
+        for i, body_id in enumerate(ids):
+            f = forces[i]
+            self._last_extra_force_by_body[int(body_id)] = (
+                float(f[0]),
+                float(f[1]),
+                float(f[2]),
+            )
 
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)
@@ -695,10 +671,7 @@ class HomeVofDamBreakTwoSpheres:
             raise ValueError("density field contains non-finite values")
 
     def _print_status(self) -> None:
-        state = self.domain.state
-        phi = state.phi.numpy()
-        ctype = state.cell_type.numpy()
-        wet = (ctype > 0) & (phi > 0.35)
+        # No full-field D2H — keep host logs off the sim critical path.
         heavy_pos = np.asarray(
             self.rigid_domain.state.get_body_position(self.heavy_body_id),
             dtype=np.float64,
@@ -711,15 +684,22 @@ class HomeVofDamBreakTwoSpheres:
             self.rigid_domain.state.get_body_linear_velocity(self.light_body_id),
             dtype=np.float64,
         )
-        solid = state.solid_phi.numpy() < 0.0
+        heq = ""
+        if self._last_height_eq:
+            heq = (
+                f" H*={self._last_height_eq.get('H_star', 0):.3f}"
+                f" φ*={self._last_height_eq.get('phi_star', 0):.3f}"
+                f" nIF={int(self._last_height_eq.get('n_if', 0))}"
+                f" skipB={int(self._last_height_eq.get('n_body_skip', 0))}"
+            )
         print(
-            f"[t={self.sim_time:.1f}s] wet={int(wet.sum())} solid={int(solid.sum())} "
+            f"[t={self.sim_time:.1f}s] "
             f"heavy=({heavy_pos[0]:.2f},{heavy_pos[1]:.2f},{heavy_pos[2]:.2f}) "
             f"light=({light_pos[0]:.2f},{light_pos[1]:.2f},{light_pos[2]:.2f}) "
             f"sub=({self._last_submerged_by_body.get(self.heavy_body_id, 0.0):.2f},"
             f"{self._last_submerged_by_body.get(self.light_body_id, 0.0):.2f}) "
             f"light_v=({light_vel[0]:+.3f},{light_vel[2]:+.3f}) "
-            f"sim={self._last_ms:.0f}ms",
+            f"sim={self._last_ms:.0f}ms{heq}",
             file=sys.stderr,
             flush=True,
         )
@@ -759,8 +739,16 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sphere-log-every",
         type=int,
-        default=1,
-        help="Write a CSV row every N viewer frames (default 1 = every frame).",
+        default=10,
+        help="Write a CSV row every N viewer frames (default 10).",
+    )
+    parser.add_argument(
+        "--height-eq",
+        action="store_true",
+        help=(
+            "Enable solver IF-φ leveling on the pool plane (same as dam-break "
+            "--height-eq). Arms after t=8; soft-fades near rigid spheres."
+        ),
     )
     return parser
 
@@ -778,6 +766,7 @@ def main() -> None:
         water_vertical_drag_rate=float(args.water_vertical_drag_rate),
         sphere_log_path=log_path if log_path else None,
         sphere_log_every=int(args.sphere_log_every),
+        enable_height_eq=bool(args.height_eq),
     )
     try:
         newton.examples.run(example, args)

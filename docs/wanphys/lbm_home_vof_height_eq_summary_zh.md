@@ -101,9 +101,15 @@ mode_k = 池面 IF 的 k 众数（主导平面）
 
 算例：`--height-eq` 在 `t≥8` 后置 `vof_height_eq=True`。
 
+双球 FSI：`fluid_grid_lbm_dambreak_vof_two_spheres.py --height-eq` 使用同一算子；
+刚体附近用 Chebyshev 距离做 **软权重**（贴球 α→0，远场 α→满，中间线性），避免硬跳过在球周形成褶皱环；heal/boost 仅在权重≈1 处执行。
+
 ```bash
 uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof \
   --backend home --n 48 --height-eq
+
+uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \
+  --viewer gl --n 48 --height-eq
 ```
 
 日志字段（示意）：`H*` / `φ*` / `φσ` / `drop` / `heal` / `boost` / `Δm_heq`。
