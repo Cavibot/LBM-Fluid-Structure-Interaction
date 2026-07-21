@@ -735,6 +735,7 @@ def _lu_solve_5x5_scalar(
 @wp.func
 def calculate_curvature_from_grid(
     phi: wp.array3d(dtype=float),
+    flag: wp.array3d(dtype=wp.uint8),
     cx: wp.array(dtype=wp.int32),
     cy: wp.array(dtype=wp.int32),
     cz: wp.array(dtype=wp.int32),
@@ -742,10 +743,13 @@ def calculate_curvature_from_grid(
     i: int, j: int, k: int,
     nx: int, ny: int, nz: int,
     px: int, py: int, pz: int,
+    phi_center: float,
 ) -> float:
     """Compute mean curvature at cell (i,j,k) from phi neighbours.
 
-    Reads 27 phi values directly from the grid (no local wp.array needed).
+    Centre *phi_center* is mass-corrected (ref line 867); neighbour phi
+    reads fall back across solid cells (ref lines 842-860).
+
     Ref: ``mrUtilFuncGpu3D.h:371-420``.
     """
     # ---- Step 1: compute normal via 27-pt weighted gradient ----
@@ -770,6 +774,23 @@ def calculate_curvature_from_grid(
         if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
             continue
         pval = phi[ni, nj, nk]
+        # Solid-neighbour fallback (ref: mrLbmSolverGpu3D.cu:842-860)
+        if (int(flag[ni, nj, nk]) & C.TYPE_BO_MASK) == C.TYPE_S:
+            for fd in range(1, 7):
+                fi = ni - int(cx[fd]); fj = nj - int(cy[fd]); fk = nk - int(cz[fd])
+                if px == 1:
+                    if fi < 0: fi += nx
+                    elif fi >= nx: fi -= nx
+                if py == 1:
+                    if fj < 0: fj += ny
+                    elif fj >= ny: fj -= ny
+                if pz == 1:
+                    if fk < 0: fk += nz
+                    elif fk >= nz: fk -= nz
+                if fi >= 0 and fi < nx and fj >= 0 and fj < ny and fk >= 0 and fk < nz:
+                    if (int(flag[fi, fj, fk]) & C.TYPE_BO_MASK) != C.TYPE_S:
+                        pval = phi[fi, fj, fk]
+                        break
 
         if di <= 6:      w = 4.0
         elif di <= 18:    w = 2.0
@@ -798,7 +819,7 @@ def calculate_curvature_from_grid(
     bx = wp.cross(by, bz)
 
     # ---- Step 3: accumulate M and b from interface neighbours ----
-    centre_offset = plic_cube(phi[i, j, k], bz)
+    centre_offset = plic_cube(phi_center, bz)
 
     m00 = float(0.0); m01 = float(0.0); m02 = float(0.0); m03 = float(0.0); m04 = float(0.0)
     m11 = float(0.0); m12 = float(0.0); m13 = float(0.0); m14 = float(0.0)
@@ -825,6 +846,23 @@ def calculate_curvature_from_grid(
         if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
             continue
         phi_i = phi[ni, nj, nk]
+        # Solid-neighbour fallback (ref: mrLbmSolverGpu3D.cu:842-860)
+        if (int(flag[ni, nj, nk]) & C.TYPE_BO_MASK) == C.TYPE_S:
+            for fd in range(1, 7):
+                fi = ni - int(cx[fd]); fj = nj - int(cy[fd]); fk = nk - int(cz[fd])
+                if px == 1:
+                    if fi < 0: fi += nx
+                    elif fi >= nx: fi -= nx
+                if py == 1:
+                    if fj < 0: fj += ny
+                    elif fj >= ny: fj -= ny
+                if pz == 1:
+                    if fk < 0: fk += nz
+                    elif fk >= nz: fk -= nz
+                if fi >= 0 and fi < nx and fj >= 0 and fj < ny and fk >= 0 and fk < nz:
+                    if (int(flag[fi, fj, fk]) & C.TYPE_BO_MASK) != C.TYPE_S:
+                        phi_i = phi[fi, fj, fk]
+                        break
 
         if phi_i > 0.0 and phi_i < 1.0:
             cxi = float(cx[di])
@@ -1198,15 +1236,13 @@ def stream_collide_bvh_kernel(
     # Phase C: Free-surface interface handling (TYPE_I only)
     # =====================================================================
     # Reference: ``mrLbmSolverGpu3D.cu:862-910``
-    #
-    # TODO Phase 2: Implement PLIC curvature, bubble pressure lookup,
-    # surface tension modulation, Laplace pressure, gas pressure BC,
-    # and Guo forcing correction for interface cells.
-    #
-    # Skeleton: skip if not interface.
-    # Full implementation will replace the skip with the logic below.
     if flagsn_su == C.TYPE_I:
-        # ---- Placeholder: gas pressure ρ_k from bubble ----
+        # ---- Recalculate centre phi from current mass (ref line 867) ----
+        # "don't load phi[n] from memory, instead recalculate it with mass
+        #  corrected by excess mass"
+        phi_self = calculate_phi(rho_new, massn, C.CellFlag.TYPE_I)
+
+        # ---- Gas pressure ρ_k from bubble ----
         tag = tag_matrix[i, j, k]
         rho_k = 1.0  # default gas density
         if tag > 0:
@@ -1227,11 +1263,11 @@ def stream_collide_bvh_kernel(
                     if bv < 64.0:
                         sigma_k = 2.0e-4
 
-        # ---- PLIC curvature (Phase 2) ----
-        # Reads phi directly from grid — no local wp.array needed
-        # (Warp 1.12 kernel codegen does not support local wp.array).
+        # ---- PLIC curvature ----
+        # Centre phi is mass-corrected (ref line 867); neighbours read from grid.
         curv = calculate_curvature_from_grid(
-            phi, cx, cy, cz, opposite, i, j, k, nx, ny, nz, px, py, pz)
+            phi, flag, cx, cy, cz, opposite, i, j, k, nx, ny, nz, px, py, pz,
+            phi_self)
 
         # Compute Laplace pressure, guarding against zero surface tension
         if sigma_k == 0.0:
@@ -1304,8 +1340,8 @@ def stream_collide_bvh_kernel(
         # For TYPE_I cells: accumulate mass flux across interface.
         # Δmass = Σ [0.5*(phi_self + phi_neighbour) * (fhn[di] - fon[opp])]
         # for all fluid/interface neighbours.
+        # phi_self was already recalculated at the top of Phase C (ref line 867).
         mass_exchange = float(0.0)
-        phi_self = phi[i, j, k]
         for di in range(1, 27):
             mni = i - cx[di]
             mnj = j - cy[di]
