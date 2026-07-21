@@ -17,6 +17,7 @@ import numpy as np
 
 from newton import Contacts
 from newton import Model as NewtonModel
+from newton._src.geometry.flags import ShapeFlags
 from newton._src.geometry.sdf_hydroelastic import HydroelasticSDF
 from newton._src.geometry.types import GeoType
 
@@ -220,8 +221,22 @@ class RigidCollisionPipeline:
             has_heightfields = False
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
-                has_heightfields = bool((shape_types == int(GeoType.HFIELD)).any())
-                has_meshes = bool((shape_types == int(GeoType.MESH)).any())
+                # Only enable mesh/hfield narrow-phase paths when a *colliding*
+                # mesh exists. Visual-only meshes (VISIBLE, no COLLIDE_SHAPES)
+                # used to force has_meshes=True and pay triangle pipelines.
+                flags = None
+                if hasattr(model, "shape_flags") and model.shape_flags is not None:
+                    flags = model.shape_flags.numpy()
+                collide = int(ShapeFlags.COLLIDE_SHAPES)
+                if flags is None:
+                    mesh_active = shape_types == int(GeoType.MESH)
+                    hfield_active = shape_types == int(GeoType.HFIELD)
+                else:
+                    collides = (flags.astype(np.int64) & collide) != 0
+                    mesh_active = (shape_types == int(GeoType.MESH)) & collides
+                    hfield_active = (shape_types == int(GeoType.HFIELD)) & collides
+                has_heightfields = bool(hfield_active.any())
+                has_meshes = bool(mesh_active.any())
 
             self.narrow_phase = NarrowPhase(
                 max_candidate_pairs=self.shape_pairs_max,

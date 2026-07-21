@@ -205,6 +205,31 @@ def _mask_solid_visual(
         density_out[i, j, k] = density[i, j, k] * phi[i, j, k]
 
 
+def _prune_static_static_contact_pairs(model: Any) -> None:
+    """Keep only pairs involving at least one dynamic body (drop wall–wall)."""
+    pairs = getattr(model, "shape_contact_pairs", None)
+    if pairs is None:
+        return
+    backend = model._newton_backend
+    mass = backend.body_mass.numpy()
+    shape_body = backend.shape_body.numpy()
+    raw = pairs.numpy()
+    kept: list[tuple[int, int]] = []
+    for a, b in raw:
+        ba = int(shape_body[int(a)])
+        bb = int(shape_body[int(b)])
+        if float(mass[ba]) > 0.0 or float(mass[bb]) > 0.0:
+            kept.append((int(a), int(b)))
+    if len(kept) == len(raw):
+        return
+    device = pairs.device
+    model.shape_contact_pairs = wp.array(kept, dtype=wp.vec2i, device=device)
+    # Invalidate cached collision pipelines that captured the old pair buffer.
+    from wanphys._src.collision.pipeline import CollisionPipeline
+
+    CollisionPipeline._rigid_pipeline_cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # Example
 # ---------------------------------------------------------------------------
@@ -449,6 +474,8 @@ class HomeVofDamBreakTwoSpheres:
 
         self.rigid_domain = RigidDomain(builder.finalize(device=self.model._device))
         self.rigid_domain.create_state()
+        # Drop wall–wall pairs from explicit broadphase (15/28 were static–static).
+        _prune_static_static_contact_pairs(self.rigid_domain.model)
         if self.viewer is not None and hasattr(self.viewer, "set_model"):
             self.rigid_domain.model.setup_viewer(self.viewer)
 
