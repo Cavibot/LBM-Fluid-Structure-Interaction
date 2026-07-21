@@ -1216,11 +1216,16 @@ def stream_collide_bvh_kernel(
         # ---- Surface tension modulation (ref lines 880-888) ----
         sigma_k = surface_tension
         if tag > 0:
-            bv = float(bubble_volume[tag - 1])
-            if bv > 5.0e6:
+            # For large bubbles (air layer): use init_volume (ref line 880)
+            init_bv = float(bubble_init_volume[tag - 1])
+            if init_bv > 5000000.0:
                 sigma_k = 1.0e-6
-            elif bv < 64.0:
-                sigma_k = 2.0e-4
+            # For small bubbles: additional preconditions (ref lines 885-888)
+            bv = float(bubble_volume[tag - 1])
+            if disjoin_force[i, j, k] <= 0.0:
+                if sigma_k > 1.0e-3:
+                    if bv < 64.0:
+                        sigma_k = 2.0e-4
 
         # ---- PLIC curvature (Phase 2) ----
         # Reads phi directly from grid — no local wp.array needed
@@ -1228,7 +1233,11 @@ def stream_collide_bvh_kernel(
         curv = calculate_curvature_from_grid(
             phi, cx, cy, cz, opposite, i, j, k, nx, ny, nz, px, py, pz)
 
-        rho_laplace = sigma_k * curv
+        # Compute Laplace pressure, guarding against zero surface tension
+        if sigma_k == 0.0:
+            rho_laplace = 0.0
+        else:
+            rho_laplace = sigma_k * curv
         disjoint_term = disjoin_factor * disjoin_force[i, j, k]
         gas_pressure = rho_k - rho_laplace - disjoint_term
 
@@ -1251,16 +1260,15 @@ def stream_collide_bvh_kernel(
             uzn_corrected = uzn_corrected * scale
 
         # ---- Gas boundary condition: free-surface bounce-back (ref lines 930-934) ----
-        # For each direction di, if the neighbour at (i + cx[di], ...) is gas (TYPE_G),
+        # For each direction di (1..26), if the neighbour at direction di is gas (TYPE_G),
         # replace f_streamed[di] with the reference formula:
-        #   f_streamed[di] = feg[di] - fon[opp] + feg[opp]
-        # where opp = opposite[di], feg[*] = gas equilibrium, fon[opp] = outgoing
-        # distribution from the current cell toward the gas neighbour.
-        for di in range(27):
+        #   fhn[i] = feg[opp(i)] - fon[opp(i)] + feg[i]
+        # where opp(i) = opposite[i], feg[*] = gas equilibrium.
+        for di in range(1, 27):
             opp = opposite[di]
-            ni = i - cx[opp]
-            nj = j - cy[opp]
-            nk = k - cz[opp]
+            ni = i - cx[di]
+            nj = j - cy[di]
+            nk = k - cz[di]
 
             # Periodic wrap
             if px == 1:
@@ -1356,6 +1364,49 @@ def stream_collide_bvh_kernel(
         massn = massn + mass_exchange_f
         mass[i, j, k] = massn
         phi[i, j, k] = 1.0
+
+    # =====================================================================
+    # TYPE_NO_F / TYPE_NO_G flag transitions (ref lines 974-998)
+    # =====================================================================
+    # After mass exchange, TYPE_I cells are checked for neighbour deficiency.
+    # If a TYPE_I cell has no fluid neighbours or mass exceeds density, it is
+    # flagged TYPE_IF (interface->fluid).  If it has no gas neighbours or
+    # mass is negative, it is flagged TYPE_IG (interface->gas).
+    if flagsn_su == C.TYPE_I:
+        type_no_f = int(1)  # int bool: 1 = no TYPE_F neighbour found yet
+        type_no_g = int(1)
+        for di in range(1, 27):
+            nni = i - cx[di]
+            nnj = j - cy[di]
+            nnk = k - cz[di]
+            if px == 1:
+                if nni < 0: nni += nx
+                elif nni >= nx: nni -= nx
+            if py == 1:
+                if nnj < 0: nnj += ny
+                elif nnj >= ny: nnj -= ny
+            if pz == 1:
+                if nnk < 0: nnk += nz
+                elif nnk >= nz: nnk -= nz
+            if nni >= 0 and nni < nx and nnj >= 0 and nnj < ny and nnk >= 0 and nnk < nz:
+                nsu = int(flag[nni, nnj, nnk]) & C.TYPE_SU_MASK
+                if nsu == C.TYPE_F:
+                    type_no_f = 0
+                if nsu == C.TYPE_G:
+                    type_no_g = 0
+
+        cur_mass = mass[i, j, k]
+        if cur_mass > rho_new:
+            flag[i, j, k] = wp.uint8((flagsn & (0xFF ^ C.TYPE_SU_MASK)) | C.CellFlag.TYPE_IF)
+        else:
+            if type_no_g == 1:
+                flag[i, j, k] = wp.uint8((flagsn & (0xFF ^ C.TYPE_SU_MASK)) | C.CellFlag.TYPE_IF)
+            else:
+                if cur_mass < 0.0:
+                    flag[i, j, k] = wp.uint8((flagsn & (0xFF ^ C.TYPE_SU_MASK)) | C.CellFlag.TYPE_IG)
+                else:
+                    if type_no_f == 1:
+                        flag[i, j, k] = wp.uint8((flagsn & (0xFF ^ C.TYPE_SU_MASK)) | C.CellFlag.TYPE_IG)
 
     # =====================================================================
     # Phase E: Eddy-viscosity turbulence model

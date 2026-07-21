@@ -204,7 +204,7 @@ class TestSurface3:
                 state["massex"], state["phi"], state["tag_matrix"],
                 state["previous_tag"], state["islet"],
                 state["delta_phi"], state["delta_g"], state["g_mom"],
-                cx, cy, cz, N, N, N, N * N * N,
+                state["split_flag_gpu"], cx, cy, cz, N, N, N, N * N * N,
             ],
             device=device,
         )
@@ -244,7 +244,7 @@ class TestSurface3:
                 state["massex"], state["phi"], state["tag_matrix"],
                 state["previous_tag"], state["islet"],
                 state["delta_phi"], state["delta_g"], state["g_mom"],
-                cx, cy, cz, N, N, N, N * N * N,
+                state["split_flag_gpu"], cx, cy, cz, N, N, N, N * N * N,
             ],
             device=device,
         )
@@ -277,6 +277,7 @@ def _make_surface3_state(N: int, device) -> dict:
     delta_phi = wp.zeros((N, N, N), dtype=float, device=device)
     delta_g = wp.zeros((N, N, N), dtype=float, device=device)
     g_mom = wp.zeros(7 * stride, dtype=float, device=device)
+    split_flag_gpu = wp.zeros(1, dtype=wp.int32, device=device)
     return {
         "f_mom_post": f_mom_post,
         "flag": flag,
@@ -289,4 +290,5 @@ def _make_surface3_state(N: int, device) -> dict:
         "delta_phi": delta_phi,
         "delta_g": delta_g,
         "g_mom": g_mom,
+        "split_flag_gpu": split_flag_gpu,
     }

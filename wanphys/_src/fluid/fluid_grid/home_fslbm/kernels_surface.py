@@ -277,6 +277,7 @@ def surface_3_kernel(
     delta_phi: wp.array3d(dtype=float),             # [out]
     delta_g: wp.array3d(dtype=float),               # [in/out]
     g_mom: wp.array(dtype=float),                   # [7 * N] [in]
+    split_flag_gpu: wp.array(dtype=wp.int32),      # [1] [out]
     cx: wp.array(dtype=wp.int32),                  # [27]
     cy: wp.array(dtype=wp.int32),                  # [27]
     cz: wp.array(dtype=wp.int32),                  # [27]
@@ -346,8 +347,14 @@ def surface_3_kernel(
         flag[i, j, k] = wp.uint8(
             (flagsn & (0xFF ^ C.CellFlag.TYPE_SU)) | C.CellFlag.TYPE_F
         )
-        previous_tag[i, j, k] = tag_matrix[i, j, k]
+        # report_split (ref: mrLbmSolverGpu3D.cu:53-61, 649-652)
+        # Cell transitions interface->fluid with a bubble tag:
+        # record the split signal for subsequent bubble merge/split detection.
+        prev_tag = tag_matrix[i, j, k]
+        previous_tag[i, j, k] = prev_tag
         tag_matrix[i, j, k] = -1
+        if prev_tag > 0:
+            wp.atomic_add(split_flag_gpu, 0, 1)
         massexn = massn - rhon
         massn = rhon
         phin = 1.0

@@ -54,6 +54,11 @@ class HomeFslbmSolver(FluidGridSolverBase):
             (self.nx, self.ny, self.nz), dtype=float, device=self.device
         )
 
+        # GPU-side split_flag for report_split (ref: mrLbmSolverGpu3D.cu:53-61)
+        # surface_3_kernel atomically sets this when TYPE_IF cells transition to
+        # TYPE_F with a valid previous bubble tag.
+        self._split_flag_gpu = wp.zeros(1, dtype=wp.int32, device=self.device)
+
         # Direction arrays for kernel (warp-compatible, avoid Python list subscript)
         import numpy as np
         self._cx = wp.array(np.array(C.CX, dtype=np.int32), dtype=wp.int32, device=self.device)
@@ -262,6 +267,10 @@ class HomeFslbmSolver(FluidGridSolverBase):
                 self._stride,
             ],
         )
+        # Zero split_flag before surface_3 (ref: clear_detector curind==1
+        # resets split_flag/merge_flag, mrLbmSolverGpu3D.cu:78-82)
+        self._split_flag_gpu.zero_()
+
         wp.launch(
             kernels_surface.surface_3_kernel,
             dim=(self.nx, self.ny, self.nz),
@@ -277,11 +286,16 @@ class HomeFslbmSolver(FluidGridSolverBase):
                 state_out.delta_phi,
                 state_out.delta_g,
                 state_out.g_mom,
+                self._split_flag_gpu,
                 self._cx, self._cy, self._cz,
                 self.nx, self.ny, self.nz,
                 self._stride,
             ],
         )
+
+        # Pull split_flag back to host (ref: MergeSplitDetectorKernel
+        # reads mlflow.split_flag, mrLbmSolverGpu3D.cu:1360-1370)
+        state_out.split_flag = int(self._split_flag_gpu.numpy()[0])
 
         # ---- Post-step swap: f_mom_post → f_mom ----
         # Reference: ``mrSolver3D_step2Kernel`` — copy post-collision moments
