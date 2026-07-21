@@ -151,6 +151,9 @@ class HomeFp32VofBridge:
                 self.model.lattice_spec,
                 device=device,
                 domain_bc=self._domain_bc,
+                moment_quant=bool(
+                    getattr(self.model, "vof_home_moment_quant", False)
+                ),
             )
         return self._gpu
 
@@ -261,6 +264,10 @@ class HomeFp32VofBridge:
             bubble_small_six_sigma=float(self.model.vof_bubble_small_six_sigma),
             bubble_eddy=bool(self.model.vof_bubble_eddy),
             bubble_eddy_atm_vol=float(self.model.vof_bubble_eddy_atm_vol),
+            moment_quant=bool(getattr(self.model, "vof_home_moment_quant", False)),
+            moment_quant_dither=bool(
+                getattr(self.model, "vof_home_moment_quant_dither", True)
+            ),
         )
         # Opt-in free-surface leveling (IF-only, gradual). Runs in the solver.
         if bool(getattr(self.model, "vof_height_eq", False)):

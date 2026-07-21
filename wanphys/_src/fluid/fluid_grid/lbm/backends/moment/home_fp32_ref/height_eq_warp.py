@@ -197,18 +197,35 @@ def heq_dist_to_weight_kernel(
     pool_k: wp.array2d(dtype=wp.int32),
     body_w: wp.array2d(dtype=float),
     max_r: int,
+    w_min: float,
 ) -> None:
+    """Soft fade near rigid: never fully zero (except empty pool columns).
+
+    A hard ``w=0`` ring left permanent meniscus pits / ripple rings around
+    spheres while the open pool leveled to ``φ*``. Floor ``w_min`` still
+    softens contact-line fighting but slowly heals the crater.
+    """
     i, j = wp.tid()
     if int(pool_k[i, j]) < 0:
         body_w[i, j] = 0.0
         return
     d = int(dist[i, j])
-    if d <= 1:
+    wm = w_min
+    if wm < 0.0:
+        wm = 0.0
+    if wm > 1.0:
+        wm = 1.0
+    if d <= 0:
+        # On solid footprint — no IF leveling.
         body_w[i, j] = 0.0
     elif d >= max_r:
         body_w[i, j] = 1.0
+    elif d <= 1:
+        body_w[i, j] = wm
     else:
-        body_w[i, j] = float(d - 1) / float(max_r - 1)
+        # Lerp wm → 1 over (1, max_r].
+        t = float(d - 1) / float(max_r - 1)
+        body_w[i, j] = wm + (1.0 - wm) * t
 
 
 @wp.kernel
@@ -386,6 +403,7 @@ def apply_vof_height_equation_gpu(
     dh_cap: float = 0.05,
     u_damp: float = 0.04,
     body_max_r: int = 4,
+    body_w_min: float = 0.35,
     sync_stats: bool = True,
 ) -> dict[str, float]:
     """In-place GPU plane ``φ→φ*``."""
@@ -457,7 +475,7 @@ def apply_vof_height_equation_gpu(
     wp.launch(
         heq_dist_to_weight_kernel,
         dim=dim2,
-        inputs=[dist2d, pool_k, body_w, int(body_max_r)],
+        inputs=[dist2d, pool_k, body_w, int(body_max_r), float(body_w_min)],
         device=device,
     )
 

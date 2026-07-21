@@ -20,9 +20,8 @@ Per call::
 
 Does not invent mid-air liquid (promote only with liquid below + gas above).
 Rigid-adjacent pool IF uses a soft weight (Chebyshev distance → α): full
-``φ→φ*`` far from bodies, none on the meniscus, linear blend in between so
-a hard skip ring does not wrinkle the surface. Heal/boost only run where
-weight≈1.
+``φ→φ*`` far from bodies, floor ``w_min`` on the meniscus (not zero — a hard
+skip ring left crater ripples), linear blend in between.
 
 Enable with ``LbmModel.vof_height_eq = True``.
 """
@@ -268,13 +267,22 @@ def _xy_chebyshev_to_solid(
     return max_r + 1
 
 
-def _body_soft_weight(dist: int, *, r0: int = 1, r1: int = 4) -> float:
-    """0 near rigid (≤r0), 1 far (≥r1), linear in between — avoids a hard ring."""
-    if dist <= r0:
+def _body_soft_weight(
+    dist: int, *, r0: int = 1, r1: int = 4, w_min: float = 0.35
+) -> float:
+    """``w_min`` near rigid (≤r0), 1 far (≥r1), linear in between.
+
+    Floor avoids a permanent zero-α meniscus pit / ripple ring around spheres.
+    """
+    wm = float(np.clip(w_min, 0.0, 1.0))
+    if dist <= 0:
         return 0.0
+    if dist <= r0:
+        return wm
     if dist >= r1:
         return 1.0
-    return float(dist - r0) / float(r1 - r0)
+    t = float(dist - r0) / float(r1 - r0)
+    return wm + (1.0 - wm) * t
 
 
 def _pool_body_weights(
@@ -284,6 +292,7 @@ def _pool_body_weights(
     solid: np.ndarray,
     *,
     max_r: int = 4,
+    w_min: float = 0.35,
 ) -> np.ndarray:
     """Soft weights in ``[0,1]`` for each pool-IF index."""
     w = np.ones(ii.size, dtype=np.float64)
@@ -291,7 +300,7 @@ def _pool_body_weights(
         d = _xy_chebyshev_to_solid(
             int(ii[t]), int(jj[t]), int(kk[t]), solid, max_r=max_r
         )
-        w[t] = _body_soft_weight(d, r0=1, r1=max_r)
+        w[t] = _body_soft_weight(d, r0=1, r1=max_r, w_min=w_min)
     return w
 
 
@@ -569,6 +578,7 @@ def apply_vof_height_equation(
             phi_dust=float(phi_dust),
             dh_cap=float(dh_cap),
             u_damp=0.0,
+            body_w_min=0.35,
             sync_stats=bool(sync_stats),
         )
     return _apply_vof_height_equation_host(
@@ -616,7 +626,7 @@ def _apply_vof_height_equation_host(
             "gpu": 0.0,
         }
 
-    body_w = _pool_body_weights(ii, jj, kk, solid, max_r=4)
+    body_w = _pool_body_weights(ii, jj, kk, solid, max_r=4, w_min=0.35)
     mode_mask = body_w >= 0.5
     if int(mode_mask.sum()) >= 4:
         mode_k = int(np.bincount(kk[mode_mask].astype(np.int64)).argmax())
@@ -645,7 +655,7 @@ def _apply_vof_height_equation_host(
     n_touch = 0
 
     if body_w.shape[0] != ii.size:
-        body_w = _pool_body_weights(ii, jj, kk, solid, max_r=4)
+        body_w = _pool_body_weights(ii, jj, kk, solid, max_r=4, w_min=0.35)
         n_body_skip = int((body_w < 1.0e-12).sum())
 
     if u_mean > float(u_max) or n_plane < 4:

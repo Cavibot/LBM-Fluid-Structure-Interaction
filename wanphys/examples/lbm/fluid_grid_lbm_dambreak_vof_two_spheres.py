@@ -9,8 +9,8 @@ rasterized into ``solid_phi`` each substep; the HOME-FREE fused kernel treats
 approximation (distributions are not stored on the moment path).
 
 Optional late-pool ``--height-eq`` (same IF ``φ→φ*`` regularizer as the
-single-phase dam-break example). Arms after ``t=8``; body-adjacent IF is
-left alone so sphere menisci are not flattened into the pool plane.
+single-phase dam-break example). Arms after ``t=8``; body-adjacent IF keeps a
+soft floor weight so sphere menisci slowly heal instead of freezing as pits.
 
 Run:
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
@@ -86,7 +86,10 @@ WATER_VERTICAL_DRAG_RATE: float = 12.0
 # Strong push + raw wet-fraction chatter bobbed floaters and dug meniscus pits.
 FLUID_PUSH_RATE: float = 8.0
 # After height-eq arms, further weaken horizontal fluid chase (pool is quiet).
-LATE_POOL_PUSH_SCALE: float = 0.35
+LATE_POOL_PUSH_SCALE: float = 0.12
+# Submerged EMA: light-sphere shell chatter was still ~0.3↔0.7 in status logs.
+SUB_EMA_ALPHA: float = 0.05
+SUB_DSUB_CAP: float = 0.015
 WALL_THICKNESS_CELLS: float = 2.0
 
 DEFAULT_SPHERE_LOG: str = "sphere_traj.csv"
@@ -222,6 +225,7 @@ class HomeVofDamBreakTwoSpheres:
         sphere_log_path: str | Path | None = DEFAULT_SPHERE_LOG,
         sphere_log_every: int = 10,
         enable_height_eq: bool = False,
+        enable_moment_quant: bool = False,
     ) -> None:
         self.viewer: Any = viewer
         if isinstance(self.viewer, FluidViewerGL):
@@ -229,6 +233,7 @@ class HomeVofDamBreakTwoSpheres:
 
         self._n = int(n)
         self._enable_height_eq = bool(enable_height_eq)
+        self._enable_moment_quant = bool(enable_moment_quant)
         self._height_eq_armed = False
         self._height_eq_arm_after_t = 8.0
         self._last_height_eq: dict | None = None
@@ -280,6 +285,8 @@ class HomeVofDamBreakTwoSpheres:
             vof_height_eq_u_max=0.05,
             vof_height_eq_dh_cap=0.03,
             vof_height_eq_every=24,
+            vof_home_moment_quant=self._enable_moment_quant,
+            vof_home_moment_quant_dither=True,
             lambda_trt=LAMBDA_TRT,
             initial_density=RHO_LIQUID,
             gravity_x=0.0,
@@ -326,7 +333,8 @@ class HomeVofDamBreakTwoSpheres:
             f"HOME-VOF dam-break two spheres: {self._n}^3, tau={TAU}, "
             f"gz={gravity:.5f}, gamma={VOF_GAMMA}, substeps={self._substeps}, "
             f"height_eq={self._enable_height_eq} "
-            f"(arm_t>={self._height_eq_arm_after_t})"
+            f"(arm_t>={self._height_eq_arm_after_t}), "
+            f"moment_quant={self._enable_moment_quant}"
         )
         print("Controls: [Space] pause/resume  [R] reset  [mouse] orbit  [scroll] zoom")
 
@@ -616,8 +624,8 @@ class HomeVofDamBreakTwoSpheres:
             drag_xy=self.water_horizontal_drag_rate,
             drag_z=self.water_vertical_drag_rate,
             vel_scale=vel_scale,
-            ema_alpha=0.12,
-            dsub_cap=0.05,
+            ema_alpha=SUB_EMA_ALPHA,
+            dsub_cap=SUB_DSUB_CAP,
             sync_submerged=False,
         )
 
@@ -758,6 +766,14 @@ def create_parser() -> argparse.ArgumentParser:
             "--height-eq). Arms after t=8; soft-fades near rigid spheres."
         ),
     )
+    parser.add_argument(
+        "--moment-quant",
+        action="store_true",
+        help=(
+            "Persistent 16-bit HOME moment SoT (5×uint32/cell). "
+            "Fused loads quant → float work → re-pack; drops moment ping-pong (~25% moment bytes)."
+        ),
+    )
     return parser
 
 
@@ -775,6 +791,7 @@ def main() -> None:
         sphere_log_path=log_path if log_path else None,
         sphere_log_every=int(args.sphere_log_every),
         enable_height_eq=bool(args.height_eq),
+        enable_moment_quant=bool(args.moment_quant),
     )
     try:
         newton.examples.run(example, args)

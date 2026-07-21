@@ -24,6 +24,9 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.bc import (
     HomeDomainBC,
     HomeFaceKind,
 )
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.quant import (
+    load_home_moments_u16,
+)
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.vof_step import (
     HomeVofState,
     seed_dam_break_column,
@@ -206,11 +209,23 @@ def home_vof_fused_kernel(
     fz: float,
     home_fill_empty: int,
     home_wall_eq: int,
+    use_quant_in: int,
+    moment_q: wp.array4d(dtype=wp.uint32),
+    q_rho_min: float,
+    q_rho_max: float,
+    q_u_min: float,
+    q_u_max: float,
+    q_s_min: float,
+    q_s_max: float,
     nx: int,
     ny: int,
     nz: int,
 ) -> None:
-    """Fused pull-stream + mass + FS BC + collide (Home-FSLBM style)."""
+    """Fused pull-stream + mass + FS BC + collide (Home-FSLBM style).
+
+    When ``use_quant_in != 0``, pre-stream moments are loaded from persistent
+    packed ``moment_q`` (paper hybrid: quant SoT → float working out).
+    """
     i, j, k = wp.tid()
     if solid_phi[i, j, k] < 0.0:
         rho_out[i, j, k] = 0.0
@@ -251,18 +266,24 @@ def home_vof_fused_kernel(
         cell_out[i, j, k] = CELL_GAS
         return
 
-    rho_c = rho_in[i, j, k]
+    if use_quant_in != 0:
+        rho_c, vx, vy, vz, sxx, syy, szz, sxy, sxz, syz = load_home_moments_u16(
+            moment_q, i, j, k,
+            q_rho_min, q_rho_max, q_u_min, q_u_max, q_s_min, q_s_max,
+        )
+    else:
+        rho_c = rho_in[i, j, k]
+        vx = ux_in[i, j, k]
+        vy = uy_in[i, j, k]
+        vz = uz_in[i, j, k]
+        sxx = sxx_in[i, j, k]
+        syy = syy_in[i, j, k]
+        szz = szz_in[i, j, k]
+        sxy = sxy_in[i, j, k]
+        sxz = sxz_in[i, j, k]
+        syz = syz_in[i, j, k]
     if rho_c < 0.05:
         rho_c = 0.05
-    vx = ux_in[i, j, k]
-    vy = uy_in[i, j, k]
-    vz = uz_in[i, j, k]
-    sxx = sxx_in[i, j, k]
-    syy = syy_in[i, j, k]
-    szz = szz_in[i, j, k]
-    sxy = sxy_in[i, j, k]
-    sxz = sxz_in[i, j, k]
-    syz = syz_in[i, j, k]
     vx, vy, vz = _clamp_u(vx, vy, vz)
 
     # Eq. 12 + §4.2 + Home disjoint / small-bubble σ:
@@ -467,17 +488,26 @@ def home_vof_fused_kernel(
             else:
                 if ntype == CELL_LIQUID:
                     has_fluid = 1
+                if use_quant_in != 0:
+                    (
+                        rn, uxn, uyn, uzn, sxxn, syyn, szzn, sxyn, sxzn, syzn
+                    ) = load_home_moments_u16(
+                        moment_q, ni, nj, nk,
+                        q_rho_min, q_rho_max, q_u_min, q_u_max, q_s_min, q_s_max,
+                    )
+                else:
+                    rn = rho_in[ni, nj, nk]
+                    uxn = ux_in[ni, nj, nk]
+                    uyn = uy_in[ni, nj, nk]
+                    uzn = uz_in[ni, nj, nk]
+                    sxxn = sxx_in[ni, nj, nk]
+                    syyn = syy_in[ni, nj, nk]
+                    szzn = szz_in[ni, nj, nk]
+                    sxyn = sxy_in[ni, nj, nk]
+                    sxzn = sxz_in[ni, nj, nk]
+                    syzn = syz_in[ni, nj, nk]
                 fhn = home_reconstruct_f_i(
-                    rho_in[ni, nj, nk],
-                    ux_in[ni, nj, nk],
-                    uy_in[ni, nj, nk],
-                    uz_in[ni, nj, nk],
-                    sxx_in[ni, nj, nk],
-                    syy_in[ni, nj, nk],
-                    szz_in[ni, nj, nk],
-                    sxy_in[ni, nj, nk],
-                    sxz_in[ni, nj, nk],
-                    syz_in[ni, nj, nk],
+                    rn, uxn, uyn, uzn, sxxn, syyn, szzn, sxyn, sxzn, syzn,
                     cxi, cyi, czi, w,
                 )
                 # Mass with F/I. Interface uses θ·(fhn−fon_opp) like Home.
@@ -2860,6 +2890,10 @@ class HomeVofGpuBuffers:
     num_dirs: int
 
     def swap_moment_buffers(self) -> None:
+        # Persistent quant: moments are SoT in moment_q; only mass ping-pongs.
+        if getattr(self, "moment_quant_persistent", False):
+            self.mass, self.mass_b = self.mass_b, self.mass
+            return
         self.rho, self.rho_b = self.rho_b, self.rho
         self.ux, self.ux_b = self.ux_b, self.ux
         self.uy, self.uy_b = self.uy_b, self.uy
@@ -2902,6 +2936,8 @@ def alloc_home_vof_gpu(
     lattice: LatticeSpec | str,
     device: str,
     domain_bc: HomeDomainBC | None = None,
+    *,
+    moment_quant: bool = False,
 ) -> HomeVofGpuBuffers:
     spec = get_lattice_spec(lattice) if isinstance(lattice, str) else lattice
     bc = domain_bc if domain_bc is not None else HomeDomainBC.all_walls()
@@ -2917,11 +2953,27 @@ def alloc_home_vof_gpu(
     gas_rho = zf()
     gas_rho.fill_(1.0)
     mb = MAX_BUBBLES
+    rho = zf()
+    ux, uy, uz = zf(), zf(), zf()
+    sxx, syy, szz = zf(), zf(), zf()
+    sxy, sxz, syz = zf(), zf(), zf()
+    # Paper FSI-hybrid: persistent quant SoT + single float working set.
+    # Alias _b → primary so dataclass stays uniform; fused writes in-place
+    # to primary when use_quant_in (no moment ping-pong).
+    if moment_quant:
+        rho_b, ux_b, uy_b, uz_b = rho, ux, uy, uz
+        sxx_b, syy_b, szz_b = sxx, syy, szz
+        sxy_b, sxz_b, syz_b = sxy, sxz, syz
+    else:
+        rho_b, ux_b, uy_b, uz_b = zf(), zf(), zf(), zf()
+        sxx_b, syy_b, szz_b = zf(), zf(), zf()
+        sxy_b, sxz_b, syz_b = zf(), zf(), zf()
     buf = HomeVofGpuBuffers(
-        rho=zf(), ux=zf(), uy=zf(), uz=zf(),
-        sxx=zf(), syy=zf(), szz=zf(), sxy=zf(), sxz=zf(), syz=zf(),
-        rho_b=zf(), ux_b=zf(), uy_b=zf(), uz_b=zf(),
-        sxx_b=zf(), syy_b=zf(), szz_b=zf(), sxy_b=zf(), sxz_b=zf(), syz_b=zf(),
+        rho=rho, ux=ux, uy=uy, uz=uz,
+        sxx=sxx, syy=syy, szz=szz, sxy=sxy, sxz=sxz, syz=syz,
+        rho_b=rho_b, ux_b=ux_b, uy_b=uy_b, uz_b=uz_b,
+        sxx_b=sxx_b, syy_b=syy_b, szz_b=szz_b,
+        sxy_b=sxy_b, sxz_b=sxz_b, syz_b=syz_b,
         mass=zf(), mass_b=zf(), massex=zf(), phi=zf(),
         cell_type=zi(), cell_tmp=zi(), cell_tmp2=zi(),
         cx=wp.array(np.asarray(spec.cx, dtype=np.int32), dtype=wp.int32, device=device),
@@ -2958,6 +3010,17 @@ def alloc_home_vof_gpu(
         "rho_max_bubble": 1.0,
         "did_ccl": 0,
     }
+    buf.moment_quant_persistent = bool(moment_quant)
+    buf.moment_quant_ready = False
+    if moment_quant:
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.quant import (
+            ensure_moment_quant_buffers,
+        )
+
+        ensure_moment_quant_buffers(buf)
+    else:
+        # Tiny stub so fused kernel always receives a valid array4d.
+        buf.moment_q = wp.zeros((1, 1, 1, 5), dtype=wp.uint32, device=device)
     return buf
 
 
@@ -2983,6 +3046,12 @@ def upload_home_vof_state(buf: HomeVofGpuBuffers, state: HomeVofState) -> None:
     buf.cell_type.assign(
         wp.array(state.cell_type.astype(np.int32), dtype=wp.int32, device=device)
     )
+    if getattr(buf, "moment_quant_persistent", False):
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.quant import (
+            pack_moments_from_float,
+        )
+
+        pack_moments_from_float(buf, dither=False)
 
 
 def seed_home_vof_gpu(
@@ -3066,14 +3135,22 @@ def step_home_vof_gpu(
     bubble_small_six_sigma: float = 2.0e-4,
     bubble_eddy: bool = False,
     bubble_eddy_atm_vol: float = 5.0e6,
+    moment_quant: bool = False,
+    moment_quant_dither: bool = True,
 ) -> None:
     """One HOME-FREE VOF step (fused + surface_1/2/3 + optional film / bubbles)."""
     del eps_phi, rho_liquid
     from wanphys._src.fluid.fluid_grid.lbm.phases import vof_plic
+    from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref import quant as home_quant
 
     nx, ny, nz = buf.shape
     dim = (nx, ny, nz)
     g = float(gamma)
+
+    persistent = bool(getattr(buf, "moment_quant_persistent", False)) and bool(moment_quant)
+    if persistent and not getattr(buf, "moment_quant_ready", False):
+        # Seed/upload left floats only — establish quant SoT once.
+        home_quant.pack_moments_from_float(buf, dither=False)
 
     if not bubble_pressure:
         buf.gas_rho.fill_(float(rho_g0))
@@ -3128,6 +3205,7 @@ def step_home_vof_gpu(
     else:
         buf.kappa.zero_()
 
+    use_q_in = 1 if (persistent and getattr(buf, "moment_quant_ready", False)) else 0
     wp.launch(
         home_vof_fused_kernel,
         dim=dim,
@@ -3155,6 +3233,14 @@ def step_home_vof_gpu(
             buf.num_dirs, float(tau), float(fx), float(fy), float(fz),
             1 if home_fill_empty else 0,
             1 if home_wall_eq else 0,
+            use_q_in,
+            buf.moment_q,
+            float(home_quant.RHO_MIN),
+            float(home_quant.RHO_MAX),
+            float(home_quant.U_MIN),
+            float(home_quant.U_MAX),
+            float(home_quant.SNEQ_MIN),
+            float(home_quant.SNEQ_MAX),
             nx, ny, nz,
         ],
         device=buf.device,
@@ -3255,3 +3341,10 @@ def step_home_vof_gpu(
             )
             buf._last_bubble_stats = stats
         buf._bubble_step = step_i + 1
+
+    if moment_quant:
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.quant import (
+            pack_moments_from_float,
+        )
+
+        pack_moments_from_float(buf, dither=bool(moment_quant_dither))

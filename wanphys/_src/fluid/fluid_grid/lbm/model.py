@@ -142,6 +142,15 @@ class LbmModel(FluidGridModelBase):
     """Reserved."""
     vof_height_eq_every: int = 12
     """Run every N lattice steps."""
+    vof_home_moment_quant: bool = False
+    """Persistent 16-bit HOME moment SoT (5×uint32/cell), paper §5.4 hybrid.
+
+    Allocates one float working set (no moment ping-pong) + ``moment_q``.
+    Fused kernel dequants from ``moment_q``, writes floats, then re-packs.
+    ~25% fewer moment bytes vs fp32 double-buffer.
+    """
+    vof_home_moment_quant_dither: bool = True
+    """Spatial dither when packing quantized moments."""
     vof_orphan_reabsorb: bool = True
     """When quiet-level is armed, reabsorb disconnected airborne liquid blobs."""
     vof_orphan_max_cells: int = 96
