@@ -2872,6 +2872,10 @@ class HomeVofGpuBuffers:
         self.syz, self.syz_b = self.syz_b, self.syz
         self.mass, self.mass_b = self.mass_b, self.mass
 
+    def swap_cell_tmp_buffers(self) -> None:
+        """Ping-pong cell flag scratch (avoids full-field ``wp.copy`` each step)."""
+        self.cell_tmp, self.cell_tmp2 = self.cell_tmp2, self.cell_tmp
+
 
 def _face_arrays_from_bc(bc: HomeDomainBC, device: str):
     kinds, uxs, uys, uzs = [], [], [], []
@@ -3156,9 +3160,9 @@ def step_home_vof_gpu(
         device=buf.device,
     )
     buf.swap_moment_buffers()
-    # Flags in cell_tmp; moments/mass in primary. Mutate flags in-place like Home-FSLBM.
-    # Warp: wp.copy(dest, src)
-    wp.copy(buf.cell_tmp2, buf.cell_tmp)
+    # Fused wrote flags into cell_tmp; swap so surface* mutate that buffer as cell_tmp2
+    # (pointer ping-pong — no N³ int32 copy).
+    buf.swap_cell_tmp_buffers()
     wp.launch(
         home_vof_surface1_kernel,
         dim=dim,

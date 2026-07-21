@@ -393,15 +393,17 @@ class GridLbmRigidCoupling(CompositeSimulation):
             if previous_solid_phi is not None:
                 wp.copy(previous_solid_phi, fluid_state.solid_phi)
 
-        # 1. Reset solid fields on the fluid state
-        fluid_state.solid_phi.fill_(1000.0)
-        fluid_state.solid_body_id.fill_(-1)
-        fluid_state.vel_solid_u.zero_()
-        fluid_state.vel_solid_v.zero_()
-        fluid_state.vel_solid_w.zero_()
-
-        # 2. Rasterise rigid-body SDF into solid_phi / solid_body_id
-        if self._body_shape_type is not None and len(self._bodies) > 0:
+        # 1–2. Rasterise rigid SDF (kernel writes every cell with default 1000/-1).
+        # Skip a prior full-grid fill/zero when bodies are present — embed kernels
+        # also write every MAC face.
+        has_bodies = self._body_shape_type is not None and len(self._bodies) > 0
+        if not has_bodies:
+            fluid_state.solid_phi.fill_(1000.0)
+            fluid_state.solid_body_id.fill_(-1)
+            fluid_state.vel_solid_u.zero_()
+            fluid_state.vel_solid_v.zero_()
+            fluid_state.vel_solid_w.zero_()
+        else:
             wp.launch(
                 ck.rasterize_all_body_sdf_warp,
                 dim=(nx, ny, nz),

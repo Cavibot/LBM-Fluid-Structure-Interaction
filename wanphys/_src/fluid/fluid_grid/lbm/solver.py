@@ -547,44 +547,41 @@ class LbmSolver(FluidGridSolverBase):
     ) -> StepStats | None:
         """Moment-encoded HOME-FREE VOF step (``lbm_backend='home_fp32'``)."""
         assert self._home_fp32 is not None
-        wp.copy(state_out.solid_phi, state_in.solid_phi)
-        wp.copy(state_out.solid_body_id, state_in.solid_body_id)
-        wp.copy(state_out.vel_solid_u, state_in.vel_solid_u)
-        wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
-        wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
+        # Solids are copied state_in→state_out once inside HomeFp32VofBridge.step
+        # (after the fluid update). Do not duplicate that full-field copy here.
 
         t0 = time.perf_counter() if collect_stats else 0.0
         self._home_fp32.ensure_from_state(state_in)
         self._home_fp32.step(state_out, state_in=state_in)
-        self._home_fp32.copy_kappa_to(self._vof_sharp._kappa)
         if stats is not None:
             stats.ms_collision = (time.perf_counter() - t0) * 1000.0
 
-        # Keep solver macro buffers in sync for any consumers.
-        wp.copy(self._rho, state_out.density)
-        wp.copy(self._ux, state_out.velocity_x)
-        wp.copy(self._uy, state_out.velocity_y)
-        wp.copy(self._uz, state_out.velocity_z)
-
         t0 = time.perf_counter() if collect_stats else 0.0
+        # MAC faces read cell-centered macros already on state_out — no scratch copy.
         wp.launch(
             kernels.moments_to_mac_u_kernel,
             dim=(self.nx + 1, self.ny, self.nz),
-            inputs=[self._ux, state_out.vel_u, self.nx],
+            inputs=[state_out.velocity_x, state_out.vel_u, self.nx],
         )
         wp.launch(
             kernels.moments_to_mac_v_kernel,
             dim=(self.nx, self.ny + 1, self.nz),
-            inputs=[self._uy, state_out.vel_v, self.ny],
+            inputs=[state_out.velocity_y, state_out.vel_v, self.ny],
         )
         wp.launch(
             kernels.moments_to_mac_w_kernel,
             dim=(self.nx, self.ny, self.nz + 1),
-            inputs=[self._uz, state_out.vel_w, self.nz],
+            inputs=[state_out.velocity_z, state_out.vel_w, self.nz],
         )
-        self._vof_sharp.update_visual_field(
-            state_out, self.nx, self.ny, self.nz,
-        )
+        # κ / visual density are for optional metrics & legacy viz; SSFR reads
+        # state macros directly. Refresh at most every 12 lattice steps.
+        self._home_visual_counter = getattr(self, "_home_visual_counter", 0) + 1
+        if self._home_visual_counter >= 12:
+            self._home_visual_counter = 0
+            self._home_fp32.copy_kappa_to(self._vof_sharp._kappa)
+            self._vof_sharp.update_visual_field(
+                state_out, self.nx, self.ny, self.nz,
+            )
         if stats is not None:
             stats.ms_export = (time.perf_counter() - t0) * 1000.0
             stats.ms_total = (time.perf_counter() - t_step) * 1000.0

@@ -227,8 +227,11 @@ class HomeFp32VofBridge:
         buf = self._ensure_gpu()
         if state_in is not None:
             sync_solids_from_lbm_state(buf, state_in)
-        self._domain_bc = home_domain_bc_from_model(self.model)
-        set_face_bc_gpu(buf, self._domain_bc)
+        # Domain BCs are static for this model — build GPU face tables once.
+        if getattr(self, "_face_bc_ready", False) is False:
+            self._domain_bc = home_domain_bc_from_model(self.model)
+            set_face_bc_gpu(buf, self._domain_bc)
+            self._face_bc_ready = True
         step_home_vof_gpu(
             buf,
             tau=float(self.model.tau),
@@ -264,9 +267,14 @@ class HomeFp32VofBridge:
             every = max(1, int(getattr(self.model, "vof_height_eq_every", 8)))
             self._height_eq_counter += 1
             if self._height_eq_counter % every == 0:
-                self._last_height_eq_stats = self.apply_height_equation(state_out=None)
+                # Pull tiny stats only occasionally (status logs); skip D2H most calls.
+                self._height_eq_stat_pulls = getattr(self, "_height_eq_stat_pulls", 0) + 1
+                sync_stats = self._height_eq_stat_pulls % 4 == 1
+                self._last_height_eq_stats = self.apply_height_equation(
+                    state_out=None, sync_stats=sync_stats
+                )
         self.sync_to_state(state_out)
-        state_out.f.zero_()
+        # HOME-FREE does not use distribution ``f``; skip the D3Q27×N³ zero.
         # Keep solid fields on the output buffer for feedback / visualisation.
         if state_in is not None:
             wp.copy(state_out.solid_phi, state_in.solid_phi)
@@ -275,7 +283,12 @@ class HomeFp32VofBridge:
             wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
             wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
 
-    def apply_height_equation(self, state_out: LbmState | None = None) -> dict[str, float]:
+    def apply_height_equation(
+        self,
+        state_out: LbmState | None = None,
+        *,
+        sync_stats: bool = False,
+    ) -> dict[str, float]:
         """Gradual free-surface leveling: local IF Laplacian + airborne drop."""
         from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.height_eq import (
             apply_vof_height_equation,
@@ -288,11 +301,18 @@ class HomeFp32VofBridge:
             u_max=float(self.model.vof_height_eq_u_max),
             dh_cap=float(self.model.vof_height_eq_dh_cap),
             n_sweeps=int(getattr(self.model, "vof_height_eq_sweeps", 1)),
+            sync_stats=bool(sync_stats),
         )
-        self._last_height_eq_stats = dict(stats)
+        if sync_stats or not self._last_height_eq_stats:
+            self._last_height_eq_stats = dict(stats)
+        elif stats:
+            # Keep prior log fields when this call skipped D2H.
+            merged = dict(self._last_height_eq_stats)
+            merged.update(stats)
+            self._last_height_eq_stats = merged
         if state_out is not None:
             self.sync_to_state(state_out)
-        return dict(stats)
+        return dict(self._last_height_eq_stats)
 
     def level_high_to_low(self, state_out: LbmState | None = None) -> float:
         """Once-per-frame: move mass from high free-surface tops to lower columns.

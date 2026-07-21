@@ -6,6 +6,10 @@
 Samples fluid on device from ``body_q`` / macros and writes forces into a
 persistent ``spatial_vector`` buffer for ``RigidState.apply_body_forces``.
 Hot path avoids host sync; optional ``sync_submerged`` pulls scalars for logs.
+
+Near the free surface, raw shell wet counts chatter (wet/dry sample flips).
+Forces use an EMA-smoothed submerged fraction so spheres do not bob and dig
+meniscus pits that ``height_eq`` intentionally leaves alone (α→0 near rigid).
 """
 
 from __future__ import annotations
@@ -92,6 +96,9 @@ def assemble_sphere_buoyancy_forces_kernel(
     drag_xy: float,
     drag_z: float,
     vel_scale: float,
+    sub_ema: wp.array(dtype=float),
+    ema_alpha: float,
+    dsub_cap: float,
     out_forces: wp.array(dtype=wp.spatial_vector),
     out_submerged: wp.array(dtype=float),
 ) -> None:
@@ -99,9 +106,21 @@ def assemble_sphere_buoyancy_forces_kernel(
     body = int(body_ids[bid])
     n_valid = int(valid[bid])
     n_water = int(water[bid])
-    submerged = float(0.0)
+    submerged_raw = float(0.0)
     if n_valid > 0:
-        submerged = float(n_water) / float(n_valid)
+        submerged_raw = float(n_water) / float(n_valid)
+
+    prev = sub_ema[bid]
+    submerged = submerged_raw
+    if prev >= 0.0:
+        blended = (1.0 - ema_alpha) * prev + ema_alpha * submerged_raw
+        dsub = blended - prev
+        if dsub > dsub_cap:
+            dsub = dsub_cap
+        if dsub < -dsub_cap:
+            dsub = -dsub_cap
+        submerged = prev + dsub
+    sub_ema[bid] = submerged
     out_submerged[bid] = submerged
 
     qd = body_qd[body]
@@ -167,6 +186,8 @@ def ensure_buoyancy_scratch(
         "vz": wp.zeros(n_bodies, dtype=float, device=device),
         "forces": wp.zeros(n_bodies, dtype=wp.spatial_vector, device=device),
         "submerged": wp.zeros(n_bodies, dtype=float, device=device),
+        # -1 = uninitialized; assemble seeds from first raw sample.
+        "sub_ema": wp.full(n_bodies, -1.0, dtype=float, device=device),
     }
 
 
@@ -180,7 +201,7 @@ def apply_sphere_buoyancy_forces_gpu(
     uz: wp.array,
     body_q: wp.array,
     body_qd: wp.array,
-    body_f_apply,  # RigidState.apply_body_forces bound method or callable
+    body_f_apply,
     radius: float,
     dh: float,
     nx: int,
@@ -196,12 +217,11 @@ def apply_sphere_buoyancy_forces_gpu(
     drag_z: float,
     vel_scale: float,
     phi_wet: float = 0.25,
+    ema_alpha: float = 0.12,
+    dsub_cap: float = 0.06,
     sync_submerged: bool = False,
 ) -> dict[int, float]:
-    """Sample shells + assemble forces on GPU; optionally sync submerged fractions.
-
-    Returns ``{body_id: submerged}`` (empty unless ``sync_submerged``).
-    """
+    """Sample shells + assemble forces on GPU; optionally sync submerged fractions."""
     n_off = int(scratch["n_off"])
     n_bodies = int(scratch["n_bodies"])
     scratch["water"].zero_()
@@ -256,6 +276,9 @@ def apply_sphere_buoyancy_forces_gpu(
             float(drag_xy),
             float(drag_z),
             float(vel_scale),
+            scratch["sub_ema"],
+            float(np.clip(ema_alpha, 0.01, 1.0)),
+            float(max(dsub_cap, 1.0e-4)),
             scratch["forces"],
             scratch["submerged"],
         ],

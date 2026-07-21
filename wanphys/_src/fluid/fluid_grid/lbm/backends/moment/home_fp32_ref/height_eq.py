@@ -547,6 +547,7 @@ def apply_vof_height_equation(
     u_damp: float = 0.04,
     clean_airborne: bool = True,
     use_gpu: bool = True,
+    sync_stats: bool = False,
 ) -> dict[str, float]:
     """Plane-wide ``φ → φ*`` on mode-k pool IF.
 
@@ -568,7 +569,7 @@ def apply_vof_height_equation(
             phi_dust=float(phi_dust),
             dh_cap=float(dh_cap),
             u_damp=0.0,
-            sync_stats=True,
+            sync_stats=bool(sync_stats),
         )
     return _apply_vof_height_equation_host(
         buf,

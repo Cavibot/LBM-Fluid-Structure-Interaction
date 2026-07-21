@@ -83,7 +83,10 @@ FEEDBACK_FORCE_SCALE: float = 6.0
 BUOYANCY_FORCE_SCALE: float = 1.0
 WATER_HORIZONTAL_DRAG_RATE: float = 4.0
 WATER_VERTICAL_DRAG_RATE: float = 12.0
-FLUID_PUSH_RATE: float = 25.0
+# Strong push + raw wet-fraction chatter bobbed floaters and dug meniscus pits.
+FLUID_PUSH_RATE: float = 8.0
+# After height-eq arms, further weaken horizontal fluid chase (pool is quiet).
+LATE_POOL_PUSH_SCALE: float = 0.35
 WALL_THICKNESS_CELLS: float = 2.0
 
 DEFAULT_SPHERE_LOG: str = "sphere_traj.csv"
@@ -586,6 +589,9 @@ class HomeVofDamBreakTwoSpheres:
             scratch=self._buoyancy_scratch,
         )
         vel_scale = DH / max(self.sim_dt, 1.0e-12)
+        push = FLUID_PUSH_RATE
+        if self._height_eq_armed:
+            push *= LATE_POOL_PUSH_SCALE
         apply_sphere_buoyancy_forces_gpu(
             phi=state.phi,
             cell=state.cell_type,
@@ -606,10 +612,12 @@ class HomeVofDamBreakTwoSpheres:
             rho_liquid=RHO_LIQUID,
             gravity_abs=abs(RIGID_GRAVITY_Z),
             buoyancy_scale=self.buoyancy_force_scale,
-            push_rate=FLUID_PUSH_RATE,
+            push_rate=push,
             drag_xy=self.water_horizontal_drag_rate,
             drag_z=self.water_vertical_drag_rate,
             vel_scale=vel_scale,
+            ema_alpha=0.12,
+            dsub_cap=0.05,
             sync_submerged=False,
         )
 
