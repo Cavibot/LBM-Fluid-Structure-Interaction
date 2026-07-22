@@ -1,151 +1,441 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""TRT (Two-Relaxation-Time) Shan-Chen dam-break.
+"""Dam-break demo with selectable Encoding / Collision / Force axes.
 
-TRT damps ghost modes at interfaces via independent even/odd relaxation,
-enabling much stronger gravity than pure BGK while keeping the interface
-intact.
+Default path matches the historical Reg-TRT + Shan-Chen dam-break:
+
+    -e f -c t -f gsc
+
+Short CLI flags (aliases accepted):
+
+    -e / --enc     f|fullf | h|home
+    -c / --col     s|srt | t|trt | r|raw|raw_mrt | n|nocm|nocm_mrt
+    -f / --force   0|none | g|gravity | sc|shan_chen | gsc|gs|gravity+shan_chen
 
 Controls: [Space] pause/resume  [R] reset  [mouse] orbit  [scroll] zoom
 """
 
 from __future__ import annotations
 
-import sys, time
+import argparse
+import sys
+import time
+from typing import Any
+
 import numpy as np
 import warp as wp
-from wanphys._src.fluid.fluid_grid.lbm import LbmDomain, LbmModel, LbmState
+
+from wanphys._src.fluid.fluid_grid.lbm import (
+    FullFLbmState,
+    HomeLbmState,
+    LbmDomain,
+    LbmModel,
+    LbmStateBase,
+)
 from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRenderer
 
 # ---------------------------------------------------------------------------
 N: int = 128
-DH: float = 0.02               # domain = 1.536m (20% smaller → fluid traverses faster)
+DH: float = 0.02  # domain = 1.536m (20% smaller → fluid traverses faster)
 
-TAU: float = 0.55               # ν = (0.55-0.5)/3 = 0.0167
-LAMBDA_TRT: float = 0.03       # τ₊ = 0.03/0.05 + 0.5 = 1.1 (mild ghost damping)
-                                # Λ scales with (τ−0.5): must reduce when τ → 0.5
-                                # otherwise τ₊ explodes (was 4.25 with Λ=0.1875!)
+TAU: float = 0.55  # ν = (0.55-0.5)/3 = 0.0167
+LAMBDA_TRT: float = 0.03  # τ₊ = 0.03/0.05 + 0.5 = 1.1 (mild ghost damping)
 G_SC: float = -5.0
-SC_BOUNDARY_PSI: float = -1.0     # gas-like wall ψ: no mirror feedback → no droplets
+SC_BOUNDARY_PSI: float = -1.0  # gas-like wall ψ: no mirror feedback → no droplets
 PSI_TYPE: int = 1
 PSI_REF: float = 1.0
 
 GRAVITY: float = -0.005
-OMEGA_REG: float = 0.5         # reg-TRT: odd part preserved, even part regularized
+OMEGA_REG: float = 0.5  # reg-TRT: odd part preserved, even part regularized
 
 DAM_X_FRAC: float = 0.25
 RHO_WATER: float = 1.8
 RHO_AIR: float = 0.1
 
-SSFR_THRESHOLD: float = 0.7
-RAY_MARCH_STEPS: int = 1600     # 128³ diagonal: ~√(3)×128 ≈ 222 → ×7 samples/lu
+SSFR_THRESHOLD: float = 0.3
+RAY_MARCH_STEPS: int = 1600  # 128³ diagonal: ~√(3)×128 ≈ 222 → ×7 samples/lu
 
 FRAME_DT: float = 1.0 / 60.0
-SIM_SUBSTEPS: int = 5    # 3 lattice steps/frame, ~24ms @ 128³ on RTX 4060
+SIM_SUBSTEPS: int = 5  # lattice steps/frame
+
+
+# ---------------------------------------------------------------------------
+# CLI aliases (short strings)
+# ---------------------------------------------------------------------------
+_ENC_ALIASES: dict[str, str] = {
+    "f": "fullf",
+    "fullf": "fullf",
+    "h": "home",
+    "home": "home",
+}
+_COL_ALIASES: dict[str, str] = {
+    "s": "srt",
+    "srt": "srt",
+    "t": "trt",
+    "trt": "trt",
+    "r": "raw_mrt",
+    "raw": "raw_mrt",
+    "raw_mrt": "raw_mrt",
+    "n": "nocm_mrt",
+    "nocm": "nocm_mrt",
+    "nocm_mrt": "nocm_mrt",
+}
+_FORCE_ALIASES: dict[str, str] = {
+    "0": "none",
+    "none": "none",
+    "g": "gravity",
+    "gravity": "gravity",
+    "sc": "shan_chen",
+    "shan_chen": "shan_chen",
+    "gsc": "gravity+shan_chen",
+    "gs": "gravity+shan_chen",
+    "gravity+shan_chen": "gravity+shan_chen",
+}
+
+
+def _resolve_alias(value: str, table: dict[str, str], axis: str) -> str:
+    key = str(value).strip().lower()
+    try:
+        return table[key]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(set(table.keys())))
+        raise argparse.ArgumentTypeError(
+            f"Unknown {axis} {value!r}; expected one of: {allowed}"
+        ) from exc
+
+
+def _parse_enc(value: str) -> str:
+    return _resolve_alias(value, _ENC_ALIASES, "encoding")
+
+
+def _parse_col(value: str) -> str:
+    return _resolve_alias(value, _COL_ALIASES, "collision")
+
+
+def _parse_force(value: str) -> str:
+    return _resolve_alias(value, _FORCE_ALIASES, "force")
+
+
+def create_parser() -> argparse.ArgumentParser:
+    """CLI with short three-axis selectors."""
+    import newton.examples
+
+    parser = newton.examples.create_parser()
+    parser.add_argument(
+        "-e",
+        "--enc",
+        type=_parse_enc,
+        default="fullf",
+        metavar="E",
+        help="encoding: f|fullf | h|home (default: f)",
+    )
+    parser.add_argument(
+        "-c",
+        "--col",
+        type=_parse_col,
+        default="trt",
+        metavar="C",
+        help="collision: s|srt | t|trt | r|raw | n|nocm (default: t)",
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        type=_parse_force,
+        default="gravity+shan_chen",
+        metavar="F",
+        help="force: 0|none | g|gravity | sc|shan_chen | gsc|gs (default: gsc)",
+    )
+    parser.add_argument(
+        "-n",
+        "--res",
+        type=int,
+        default=N,
+        metavar="N",
+        help=f"grid resolution N³ (default: {N})",
+    )
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Init kernels / helpers
+# ---------------------------------------------------------------------------
+@wp.kernel
+def _init_fullf_dam(
+    f_post: wp.array(dtype=float),
+    density: wp.array3d(dtype=float),
+    dam_x: int,
+    rho_w: float,
+    rho_a: float,
+    seed: int,
+    nx: int,
+    ny: int,
+    nz: int,
+    stride: int,
+) -> None:
+    i, j, k = wp.tid()
+    idx = i * ny * nz + j * nz + k
+    rho = rho_w if i < dam_x else rho_a
+    n = wp.sin(float(i * 127 + j * 311 + k * 541 + seed) * 0.001) * wp.cos(
+        float(i * 419 + j * 233 + k * 577 + seed) * 0.0013
+    )
+    rho = wp.max(rho + n * 0.005 * rho, 0.01)
+    density[i, j, k] = rho
+    f_post[0 * stride + idx] = (1.0 / 3.0) * rho
+    f_post[1 * stride + idx] = (1.0 / 18.0) * rho
+    f_post[2 * stride + idx] = (1.0 / 18.0) * rho
+    f_post[3 * stride + idx] = (1.0 / 18.0) * rho
+    f_post[4 * stride + idx] = (1.0 / 18.0) * rho
+    f_post[5 * stride + idx] = (1.0 / 18.0) * rho
+    f_post[6 * stride + idx] = (1.0 / 18.0) * rho
+    f_post[7 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[8 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[9 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[10 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[11 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[12 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[13 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[14 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[15 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[16 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[17 * stride + idx] = (1.0 / 36.0) * rho
+    f_post[18 * stride + idx] = (1.0 / 36.0) * rho
 
 
 @wp.kernel
-def _init(
-    f: wp.array(dtype=float), density: wp.array3d(dtype=float),
-    dam_x: int, rho_w: float, rho_a: float,
-    seed: int, nx: int, ny: int, nz: int, stride: int,
+def _init_home_dam(
+    rho_field: wp.array3d(dtype=float),
+    density: wp.array3d(dtype=float),
+    dam_x: int,
+    rho_w: float,
+    rho_a: float,
+    seed: int,
 ) -> None:
-    i, j, k = wp.tid(); idx = i * ny * nz + j * nz + k
+    """Rest-fluid HOME dam: persist rho only; momentum/stress left at 0."""
+    i, j, k = wp.tid()
     rho = rho_w if i < dam_x else rho_a
-    n = wp.sin(float(i*127+j*311+k*541+seed)*0.001) * wp.cos(float(i*419+j*233+k*577+seed)*0.0013)
+    n = wp.sin(float(i * 127 + j * 311 + k * 541 + seed) * 0.001) * wp.cos(
+        float(i * 419 + j * 233 + k * 577 + seed) * 0.0013
+    )
     rho = wp.max(rho + n * 0.005 * rho, 0.01)
+    rho_field[i, j, k] = rho
     density[i, j, k] = rho
-    f[0*stride+idx]=(1.0/3.0)*rho; f[1*stride+idx]=(1.0/18.0)*rho; f[2*stride+idx]=(1.0/18.0)*rho
-    f[3*stride+idx]=(1.0/18.0)*rho; f[4*stride+idx]=(1.0/18.0)*rho; f[5*stride+idx]=(1.0/18.0)*rho
-    f[6*stride+idx]=(1.0/18.0)*rho; f[7*stride+idx]=(1.0/36.0)*rho; f[8*stride+idx]=(1.0/36.0)*rho
-    f[9*stride+idx]=(1.0/36.0)*rho; f[10*stride+idx]=(1.0/36.0)*rho; f[11*stride+idx]=(1.0/36.0)*rho
-    f[12*stride+idx]=(1.0/36.0)*rho; f[13*stride+idx]=(1.0/36.0)*rho; f[14*stride+idx]=(1.0/36.0)*rho
-    f[15*stride+idx]=(1.0/36.0)*rho; f[16*stride+idx]=(1.0/36.0)*rho; f[17*stride+idx]=(1.0/36.0)*rho
-    f[18*stride+idx]=(1.0/36.0)*rho
 
 
-class TrtDamBreak:
-    def __init__(self, viewer: FluidViewerGL):
-        self.viewer = viewer; viewer._paused = True
+def _mirror_state(domain: LbmDomain) -> None:
+    """Copy state_in kinetic + observable fields into the double-buffer out state."""
+    src: LbmStateBase = domain.state
+    dst: LbmStateBase = domain._state_out
+    for name in (
+        "density",
+        "velocity_x",
+        "velocity_y",
+        "velocity_z",
+        "force_x",
+        "force_y",
+        "force_z",
+        "solid_phi",
+        "solid_body_id",
+        "vel_solid_u",
+        "vel_solid_v",
+        "vel_solid_w",
+    ):
+        wp.copy(getattr(dst, name), getattr(src, name))
+    if isinstance(src, FullFLbmState):
+        assert isinstance(dst, FullFLbmState)
+        wp.copy(dst.f_post, src.f_post)
+    else:
+        assert isinstance(src, HomeLbmState) and isinstance(dst, HomeLbmState)
+        for a, b in zip(dst.kinetic_fields, src.kinetic_fields):
+            wp.copy(a, b)
 
-        self.model = LbmModel(
-            fluid_grid_res=(N,N,N), fluid_grid_cell_size=DH,
-            tau=TAU, G=G_SC, sc_boundary_psi=SC_BOUNDARY_PSI, psi_type=PSI_TYPE, psi_ref=PSI_REF,
-            lambda_trt=LAMBDA_TRT, use_regularization=True, omega_reg=OMEGA_REG,
-            gravity_x=0.0, gravity_y=0.0, gravity_z=GRAVITY,
+
+def build_model(args: argparse.Namespace) -> LbmModel:
+    encoding: str = args.enc
+    collision: str = args.col
+    force_model: str = args.force
+    n: int = int(args.res)
+
+    use_reg = collision == "trt"
+    lambda_trt = LAMBDA_TRT if collision == "trt" else 0.0
+    g_sc = G_SC if force_model in ("shan_chen", "gravity+shan_chen") else 0.0
+    gz = GRAVITY if force_model in ("gravity", "gravity+shan_chen") else 0.0
+
+    return LbmModel(
+        fluid_grid_res=(n, n, n),
+        fluid_grid_cell_size=DH,
+        encoding=encoding,
+        collision=collision,
+        force_model=force_model,
+        tau=TAU,
+        G=g_sc,
+        sc_boundary_psi=SC_BOUNDARY_PSI,
+        psi_type=PSI_TYPE,
+        psi_ref=PSI_REF,
+        lambda_trt=lambda_trt,
+        use_regularization=use_reg,
+        omega_reg=OMEGA_REG if use_reg else 0.0,
+        gravity_x=0.0,
+        gravity_y=0.0,
+        gravity_z=gz,
+    )
+
+
+class DamBreakExample:
+    """Dam-break visual demo with selectable encoding / collision / force."""
+
+    def __init__(self, viewer: FluidViewerGL, args: argparse.Namespace):
+        self.viewer = viewer
+        viewer._paused = True
+        self.args = args
+
+        self.model = build_model(args)
+        n = int(self.model.nx)
+        print(
+            f"Dam-Break: {n}^3  "
+            f"enc={self.model.encoding}  col={self.model.resolved_collision}  "
+            f"force={self.model.force_model}"
         )
-        n = int(self.model.nx); ws = n*DH
-        print(f"Reg-TRT Dam-Break: {n}^3, tau={TAU}, lambda={LAMBDA_TRT}, omega_reg={OMEGA_REG}")
-        print(f"  tau_plus={self.model.tau_plus:.3f}, tau_minus={self.model.tau_minus:.3f}")
-        print(f"  omega_plus={self.model.omega_plus:.3f}, omega_minus={self.model.omega_minus:.3f}")
-        print(f"  sc_boundary_psi={SC_BOUNDARY_PSI}, gz={GRAVITY}, dam at x<{DAM_X_FRAC*n:.0f}")
+        print(f"  tau={TAU}, G={self.model.G}, gz={self.model.gravity_z}")
+        if self.model.resolved_collision == "trt":
+            print(
+                f"  TRT lambda={LAMBDA_TRT}, tau-/+="
+                f"{self.model.tau_plus:.3f}/{self.model.tau_minus:.3f}, "
+                f"omega_reg={self.model.omega_reg}"
+            )
+        print(f"  sc_boundary_psi={SC_BOUNDARY_PSI}, dam at x<{DAM_X_FRAC * n:.0f}")
+        if self.model.force_model in ("shan_chen", "gravity+shan_chen") and not (
+            self.model.encoding == "fullf"
+            and self.model.resolved_collision in ("srt", "trt")
+        ):
+            print(
+                "  [warn] SC on non-FullF-SRT/TRT path is research-grade "
+                "(may be unstable)",
+                file=sys.stderr,
+                flush=True,
+            )
 
-        self.domain = LbmDomain(self.model); self.domain.create_state()
-        self.sim_dt = FRAME_DT / SIM_SUBSTEPS; self.sim_time = 0.0
+        self.domain = LbmDomain(self.model)
+        self.domain.create_state()
+        self.sim_dt = FRAME_DT / SIM_SUBSTEPS
+        self.sim_time = 0.0
 
-        state = self.domain.state; stride = n*n*n; dam_x = int(n*DAM_X_FRAC)
-        wp.launch(_init, dim=(n,n,n),
-            inputs=[state.f, state.density, dam_x, RHO_WATER, RHO_AIR, 42, n,n,n,stride])
-        for a in ['f','density','velocity_x','velocity_y','velocity_z','solid_phi','solid_body_id']:
-            wp.copy(getattr(self.domain._state_out, a), getattr(state, a))
+        state = self.domain.state
+        dam_x = int(n * DAM_X_FRAC)
+        if isinstance(state, FullFLbmState):
+            wp.launch(
+                _init_fullf_dam,
+                dim=(n, n, n),
+                inputs=[
+                    state.f_post,
+                    state.density,
+                    dam_x,
+                    RHO_WATER,
+                    RHO_AIR,
+                    42,
+                    n,
+                    n,
+                    n,
+                    n * n * n,
+                ],
+                device=self.model._device,
+            )
+        else:
+            assert isinstance(state, HomeLbmState)
+            for field in state.kinetic_fields[1:]:
+                field.zero_()
+            wp.launch(
+                _init_home_dam,
+                dim=(n, n, n),
+                inputs=[state.rho, state.density, dam_x, RHO_WATER, RHO_AIR, 42],
+                device=self.model._device,
+            )
+        _mirror_state(self.domain)
         wp.synchronize_device(self.model._device)
-        print(f"  Water cells: {(state.density.numpy()>SSFR_THRESHOLD).sum()}")
+        print(f"  Water cells: {(state.density.numpy() > SSFR_THRESHOLD).sum()}")
 
         # Gentle gravity ramp to avoid shocking the interface
-        target_gz = float(self.model.gravity_z)
-        self.model.gravity_z = 0.0
-        ramp = 60
-        for s in range(ramp):
-            self.model.gravity_z = target_gz * float(s + 1) / float(ramp)
-            self.domain.step(self.sim_dt)
-        self.model.gravity_z = target_gz
-        wp.synchronize_device(self.model._device)
+        if self.model.force_model in ("gravity", "gravity+shan_chen"):
+            target_gz = float(self.model.gravity_z)
+            self.model.gravity_z = 0.0
+            ramp = 60
+            for s in range(ramp):
+                self.model.gravity_z = target_gz * float(s + 1) / float(ramp)
+                self.domain.step(self.sim_dt)
+            self.model.gravity_z = target_gz
+            wp.synchronize_device(self.model._device)
 
-        self.ssfr = ScreenSpaceFluidRenderer(viewer=viewer, max_particles=1, particle_radius=0.01,
-                                               device=self.model._device)
+        self.ssfr = ScreenSpaceFluidRenderer(
+            viewer=viewer,
+            max_particles=1,
+            particle_radius=0.01,
+            device=self.model._device,
+        )
         viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
-        self.frame_count = 0; self._last_ms = 0.0
+        self.frame_count = 0
+        self._last_ms = 0.0
         print("Controls: [Space] unpause  [R] reset  [mouse] orbit")
 
-    def step(self):
+    def step(self) -> None:
         t0 = time.perf_counter()
-        for _ in range(SIM_SUBSTEPS): self.domain.step(self.sim_dt)
+        for _ in range(SIM_SUBSTEPS):
+            self.domain.step(self.sim_dt)
         wp.synchronize_device(self.model._device)
-        self._last_ms = (time.perf_counter()-t0)*1000; self.sim_time += FRAME_DT
+        self._last_ms = (time.perf_counter() - t0) * 1000
+        self.sim_time += FRAME_DT
         self.frame_count += 1
         if self.frame_count % 30 == 0:
-            r = self.domain.state.density.numpy(); w = r > SSFR_THRESHOLD
+            r = self.domain.state.density.numpy()
+            w = r > SSFR_THRESHOLD
             if w.any():
                 c = np.argwhere(w).mean(axis=0)
                 vx = float(self.domain.state.velocity_x.numpy()[w].mean())
                 vy = float(self.domain.state.velocity_y.numpy()[w].mean())
                 vz = float(self.domain.state.velocity_z.numpy()[w].mean())
-                print(f"[t={self.sim_time:.1f}s] water={w.sum()} COM=({c[0]:.0f},{c[1]:.0f},{c[2]:.0f}) v=({vx:+.3f},{vy:+.3f},{vz:+.3f}) sim={self._last_ms:.0f}ms", file=sys.stderr, flush=True)
-            # ---- boundary density diagnostics ----
+                print(
+                    f"[t={self.sim_time:.1f}s] water={w.sum()} "
+                    f"COM=({c[0]:.0f},{c[1]:.0f},{c[2]:.0f}) "
+                    f"v=({vx:+.3f},{vy:+.3f},{vz:+.3f}) sim={self._last_ms:.0f}ms",
+                    file=sys.stderr,
+                    flush=True,
+                )
             r_np = self.domain.state.density.numpy()
-            x0_slab: np.ndarray = r_np[0, :, :]          # x=0 (left wall, adjacent to water)
-            x1_slab: np.ndarray = r_np[-1, :, :]         # x=63 (right wall, opposite side)
+            x0_slab: np.ndarray = r_np[0, :, :]
+            x1_slab: np.ndarray = r_np[-1, :, :]
             water_left: int = int((x0_slab > SSFR_THRESHOLD).sum())
             water_right: int = int((x1_slab > SSFR_THRESHOLD).sum())
             print(
-                f"  boundary rho: x=0 [{x0_slab.min():.3f}, {x0_slab.max():.3f}] water_cells={water_left}"
-                f"  |  x=-1 [{x1_slab.min():.3f}, {x1_slab.max():.3f}] water_cells={water_right}",
-                file=sys.stderr, flush=True,
+                f"  boundary rho: x=0 [{x0_slab.min():.3f}, {x0_slab.max():.3f}] "
+                f"water_cells={water_left}"
+                f"  |  x=-1 [{x1_slab.min():.3f}, {x1_slab.max():.3f}] "
+                f"water_cells={water_right}",
+                file=sys.stderr,
+                flush=True,
             )
 
-    def render(self):
+    def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)
         if self.ssfr.available:
-            self.ssfr.set_density_field(density=self.domain.state.density,
-                grid_origin=(0,0,0), cell_size=DH, threshold=SSFR_THRESHOLD, max_steps=RAY_MARCH_STEPS)
+            self.ssfr.set_density_field(
+                density=self.domain.state.density,
+                grid_origin=(0, 0, 0),
+                cell_size=DH,
+                threshold=SSFR_THRESHOLD,
+                max_steps=RAY_MARCH_STEPS,
+            )
         self.viewer.end_frame()
 
 
-def main():
+def main() -> None:
     import newton.examples
     from wanphys._src.fluid.fluid_viewer import init as init_fluid_viewer
-    viewer, args = init_fluid_viewer()
-    newton.examples.run(TrtDamBreak(viewer), args)
 
-if __name__ == "__main__": main()
+    parser = create_parser()
+    viewer: Any
+    args: argparse.Namespace
+    viewer, args = init_fluid_viewer(parser)
+    newton.examples.run(DamBreakExample(viewer, args), args)
+
+
+if __name__ == "__main__":
+    main()

@@ -71,6 +71,23 @@ class LbmModel(FluidGridModelBase):
     gravity_z: float = 0.0
     """Gravity / body-force z-component in lattice units."""
 
+    max_lattice_speed: float = 0.4
+    """Maximum velocity magnitude used by the collision equilibrium.
+
+    The second-order D3Q19 equilibrium is a low-Mach closure and loses its
+    population-admissibility margin at large lattice speeds.  A positive
+    value enables a radial limiter in the unified hydrodynamic closure;
+    ``0`` disables the limiter.  The default keeps the collision velocity
+    below the approximately Mach-0.7 edge used by this solver's historical
+    multiphase configurations.
+    """
+
+    enforce_population_positivity: bool = True
+    """Apply a conservative pre-collection population admissibility limiter."""
+
+    population_floor: float = 1.0e-9
+    """Minimum logical population targeted by the admissibility limiter."""
+
     # ---- Shan-Chen multiphase interaction --------------------------------
     G: float = 0.0
     """Shan-Chen interaction strength.  Negative values produce attraction
@@ -358,6 +375,15 @@ class LbmModel(FluidGridModelBase):
             raise ValueError(
                 f"LBM relaxation time tau must be > 0.5 for stability, "
                 f"got tau = {self.tau}"
+            )
+        if self.max_lattice_speed < 0.0:
+            raise ValueError(
+                "max_lattice_speed must be >= 0, "
+                f"got {self.max_lattice_speed}"
+            )
+        if self.population_floor < 0.0:
+            raise ValueError(
+                f"population_floor must be >= 0, got {self.population_floor}"
             )
         if self.lambda_trt < 0.0:
             raise ValueError(

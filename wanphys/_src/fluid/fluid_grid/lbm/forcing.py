@@ -71,11 +71,23 @@ def hydro_closure_kernel(
     ux: wp.array3d(dtype=float),
     uy: wp.array3d(dtype=float),
     uz: wp.array3d(dtype=float),
+    max_lattice_speed: float,
 ) -> None:
-    """Compute physical velocity ``u = (j + F/2) / rho``."""
+    """Compute ``u = (j + F/2) / rho`` inside the D3Q19 low-Mach domain."""
 
     i, j, k = wp.tid()
     inverse_rho = 1.0 / wp.max(rho[i, j, k], 1.0e-12)
-    ux[i, j, k] = (jx[i, j, k] + 0.5 * fx[i, j, k]) * inverse_rho
-    uy[i, j, k] = (jy[i, j, k] + 0.5 * fy[i, j, k]) * inverse_rho
-    uz[i, j, k] = (jz[i, j, k] + 0.5 * fz[i, j, k]) * inverse_rho
+    vx = (jx[i, j, k] + 0.5 * fx[i, j, k]) * inverse_rho
+    vy = (jy[i, j, k] + 0.5 * fy[i, j, k]) * inverse_rho
+    vz = (jz[i, j, k] + 0.5 * fz[i, j, k]) * inverse_rho
+    if max_lattice_speed > 0.0:
+        speed_sq = vx * vx + vy * vy + vz * vz
+        limit_sq = max_lattice_speed * max_lattice_speed
+        if speed_sq > limit_sq:
+            scale = wp.sqrt(limit_sq / speed_sq)
+            vx *= scale
+            vy *= scale
+            vz *= scale
+    ux[i, j, k] = vx
+    uy[i, j, k] = vy
+    uz[i, j, k] = vz

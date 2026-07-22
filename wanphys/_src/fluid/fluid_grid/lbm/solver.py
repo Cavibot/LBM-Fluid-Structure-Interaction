@@ -372,6 +372,12 @@ class LbmSolver(FluidGridSolverBase):
         # 2. Part 3 completes all open-boundary populations before collection.
         self._complete_open_boundaries(self._f_star)
 
+        # Keep every encoding/collision path inside the population-admissible
+        # domain before collecting rho and momentum.  The limiter is a no-op
+        # for already admissible populations and conserves local moments while
+        # the raw velocity remains inside the configured low-Mach domain.
+        self._enforce_population_admissibility(self._f_star)
+
         # 3. The collector inventories the same completed f*[Q] for all paths.
         wp.launch(
             encoding.populations_to_home_kernel,
@@ -402,6 +408,7 @@ class LbmSolver(FluidGridSolverBase):
                 self._ux,
                 self._uy,
                 self._uz,
+                float(self.model.max_lattice_speed),
             ],
             device=self.device,
         )
@@ -461,8 +468,6 @@ class LbmSolver(FluidGridSolverBase):
                 ],
                 device=self.device,
             )
-            if isinstance(state_out, HomeLbmState):
-                self._encode_populations_to_home(output_f, state_out)
         elif self._collision_space is CollisionSpace.RAW_MOMENT:
             assert isinstance(state_out, FullFLbmState)
             self._collide_raw_mrt(state_out.f_post)
@@ -487,6 +492,47 @@ class LbmSolver(FluidGridSolverBase):
                 ],
                 device=self.device,
             )
+
+        # A pre-collision limiter cannot repair a collision output that has
+        # already left the admissible population cone.  Stabilise the stored
+        # post-collision representation as well, so the next streaming step
+        # never starts from negative logical populations.  HOME-NOCM writes
+        # moments directly, therefore reconstruct those moments first.
+        if self.model.enforce_population_positivity:
+            if isinstance(state_out, HomeLbmState) and output_f is None:
+                output_f = self._f_star
+                self._decode_home_to_populations(state_out, output_f)
+            assert output_f is not None
+            self._enforce_population_admissibility(output_f)
+            wp.launch(
+                encoding.populations_to_home_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[output_f, *self._moments, self.ny, self.nz, self._stride],
+                device=self.device,
+            )
+            if isinstance(state_out, HomeLbmState):
+                for destination, source in zip(state_out.kinetic_fields, self._moments):
+                    wp.copy(destination, source)
+            wp.launch(
+                forcing.hydro_closure_kernel,
+                dim=(self.nx, self.ny, self.nz),
+                inputs=[
+                    self._rho,
+                    self._jx,
+                    self._jy,
+                    self._jz,
+                    self._fx,
+                    self._fy,
+                    self._fz,
+                    self._ux,
+                    self._uy,
+                    self._uz,
+                    float(self.model.max_lattice_speed),
+                ],
+                device=self.device,
+            )
+        elif isinstance(state_out, HomeLbmState) and output_f is not None:
+            self._encode_populations_to_home(output_f, state_out)
 
         self._write_observables(state_out)
 
@@ -737,6 +783,31 @@ class LbmSolver(FluidGridSolverBase):
             encoding.populations_to_home_kernel,
             dim=(self.nx, self.ny, self.nz),
             inputs=[f_post, *state.kinetic_fields, self.ny, self.nz, self._stride],
+            device=self.device,
+        )
+
+    def _decode_home_to_populations(self, state: HomeLbmState, f_post: wp.array) -> None:
+        wp.launch(
+            encoding.home_to_populations_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[*state.kinetic_fields, f_post, self.ny, self.nz, self._stride],
+            device=self.device,
+        )
+
+    def _enforce_population_admissibility(self, populations: wp.array) -> None:
+        if not self.model.enforce_population_positivity:
+            return
+        wp.launch(
+            encoding.enforce_population_admissibility_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                populations,
+                float(self.model.population_floor),
+                float(self.model.max_lattice_speed),
+                self.ny,
+                self.nz,
+                self._stride,
+            ],
             device=self.device,
         )
 

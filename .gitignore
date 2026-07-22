@@ -63,3 +63,6 @@ nul
 results.csv
 # Git worktrees
 worktrees/
+
+# Syncthings
+.stignore
