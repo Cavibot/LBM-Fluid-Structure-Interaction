@@ -803,7 +803,8 @@ def calculate_curvature_from_grid(
         by_n += w * cyi * pval
         bz_n += w * czi * pval
 
-    bz = wp.vec3(bx_n, by_n, bz_n)
+    # Match reference convention: normal = -grad(phi) (points fluid→gas)
+    bz = wp.vec3(-bx_n, -by_n, -bz_n)
     len_sq = bx_n * bx_n + by_n * by_n + bz_n * bz_n
     if len_sq < 1.0e-20:
         return 0.0
