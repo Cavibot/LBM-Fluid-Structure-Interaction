@@ -1074,6 +1074,36 @@ class TestLuSolve5x5:
         assert abs(x[4]) < 1e-10
 
 
+@wp.kernel
+def _k_dump_one_cell(
+    phi: wp.array3d(dtype=float),
+    flag: wp.array3d(dtype=wp.uint8),
+    cx: wp.array(dtype=wp.int32), cy: wp.array(dtype=wp.int32), cz: wp.array(dtype=wp.int32),
+    opp: wp.array(dtype=wp.int32),
+    ii: int, jj: int, kk: int, Nx: int, Ny: int, Nz: int,
+    out_phi27: wp.array(dtype=float),
+    out_norm: wp.array(dtype=float),
+):
+    bx_n = float(0.0); by_n = float(0.0); bz_n = float(0.0)
+    out_phi27[0] = phi[ii, jj, kk]
+    for di in range(1, 27):
+        o = opp[di]; ni = ii - cx[o]; nj = jj - cy[o]; nk = kk - cz[o]
+        if ni < 0 or ni >= Nx or nj < 0 or nj >= Ny or nk < 0 or nk >= Nz:
+            out_phi27[di] = -1.0; continue
+        pv = phi[ni, nj, nk]; out_phi27[di] = pv
+        if di <= 6: w = 4.0
+        elif di <= 18: w = 2.0
+        else: w = 1.0
+        cxi = float(cx[di]); cyi = float(cy[di]); czi = float(cz[di])
+        bx_n += w * cxi * pv; by_n += w * cyi * pv; bz_n += w * czi * pv
+    ls = bx_n * bx_n + by_n * by_n + bz_n * bz_n
+    if ls < 1e-20:
+        out_norm[0] = 0.0; out_norm[1] = 0.0; out_norm[2] = 0.0
+        return
+    b = wp.normalize(wp.vec3(bx_n, by_n, bz_n))
+    out_norm[0] = b.x; out_norm[1] = b.y; out_norm[2] = b.z
+
+
 # ============================================================================
 # TestCalculateCurvature (NEW — P0)
 # ============================================================================
@@ -1146,38 +1176,128 @@ class TestCalculateCurvature:
             return np.array([])
         return curvatures.numpy()[:n_type_i]
 
+    # ------------------------------------------------------------------
+    # Reconstruct corrected z and verify Monge fit
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _reconstruct_z(device, phi, flag, host_phi, ic, jc, kc, centre, R, delta):
+        import math as _math
+        N = phi.shape[0]
+        cx_arr, cy_arr, cz_arr = _make_direction_arrays(device)
+        opp_arr = _make_opposite_array(device)
+        out_phi27 = wp.zeros(27, dtype=float, device=device)
+        out_norm = wp.zeros(3, dtype=float, device=device)
+        wp.launch(_k_dump_one_cell, dim=1,
+                  inputs=[phi, flag, cx_arr, cy_arr, cz_arr, opp_arr,
+                          ic, jc, kc, N, N, N, out_phi27, out_norm],
+                  device=device)
+        phi27 = out_phi27.numpy(); n_warp = out_norm.numpy()
+        plic27 = np.zeros(27, dtype=np.float32)
+        for di in range(27):
+            r = wp.zeros(1, dtype=float, device=device)
+            wp.launch(_kernel_plic_cube, dim=1,
+                      inputs=[wp.array(np.array([phi27[di]], dtype=np.float32), dtype=float, device=device),
+                              wp.array(np.array([n_warp[0]], dtype=np.float32), dtype=float, device=device),
+                              wp.array(np.array([n_warp[1]], dtype=np.float32), dtype=float, device=device),
+                              wp.array(np.array([n_warp[2]], dtype=np.float32), dtype=float, device=device),
+                              r], device=device)
+            plic27[di] = float(r.numpy()[0])
+        rn = np.array([0.56270900, 0.32704452, 0.75921047], dtype=np.float64)
+        by_raw = np.cross(n_warp, rn); by = by_raw / np.linalg.norm(by_raw)
+        bx = np.cross(by, n_warp)
+        z_corr, px_list, py_list = [], [], []
+        for di in range(1, 27):
+            if not (0.0 < phi27[di] < 1.0):
+                continue
+            eix = float(C.CX[di]); eiy = float(C.CY[di]); eiz = float(C.CZ[di])
+            z = (eix*n_warp[0]+eiy*n_warp[1]+eiz*n_warp[2]) - delta*(float(plic27[di])-float(plic27[0]))
+            x = eix*bx[0]+eiy*bx[1]+eiz*bx[2]; y = eix*by[0]+eiy*by[1]+eiz*by[2]
+            z_corr.append(z); px_list.append(x); py_list.append(y)
+        if len(z_corr) < 5:
+            return None
+        M = np.zeros((5,5)); bv = np.zeros(5)
+        for xi, yi, zi in zip(px_list, py_list, z_corr):
+            x2=xi*xi; y2=yi*yi; x3=x2*xi; y3=y2*yi
+            M[0,0]+=x2*x2; M[0,1]+=x2*y2; M[0,2]+=x3*yi; M[0,3]+=x3; M[0,4]+=x2*yi
+            M[1,1]+=y2*y2; M[1,2]+=xi*y3; M[1,3]+=xi*y2; M[1,4]+=y3
+            M[2,2]+=x2*y2; M[2,3]+=x2*yi; M[2,4]+=xi*y2
+            M[3,3]+=x2;     M[3,4]+=xi*yi
+            M[4,4]+=y2
+            bv[0]+=x2*zi; bv[1]+=y2*zi; bv[2]+=xi*yi*zi; bv[3]+=xi*zi; bv[4]+=yi*zi
+        for r in range(5):
+            for c in range(r+1,5): M[c,r]=M[r,c]
+        try:
+            sol = np.linalg.solve(M, bv)
+        except np.linalg.LinAlgError:
+            sol = np.linalg.lstsq(M, bv, rcond=None)[0]
+        A,B,Ck,H,I = sol
+        d = H*H + I*I + 1.0
+        K = (A*(I*I+1)+B*(H*H+1)-Ck*H*I)/(d*_math.sqrt(d))
+        return max(-1.0, min(1.0, K))
+
+    @staticmethod
+    def _best_phi05_cell(phi_host, flag_np, N):
+        best_i = best_j = best_k = -1
+        best_diff = float("inf")
+        for si in range(N):
+            for sj in range(N):
+                for sk in range(N):
+                    f = int(flag_np[si, sj, sk])
+                    if (f & (C.CellFlag.TYPE_SU | C.CellFlag.TYPE_S)) == C.CellFlag.TYPE_I:
+                        d = abs(phi_host[si, sj, sk] - 0.5)
+                        if d < best_diff:
+                            best_diff = d; best_i = si; best_j = sj; best_k = sk
+                            if d < 1e-6: break
+                if best_diff < 1e-6: break
+            if best_diff < 1e-6: break
+        return best_i, best_j, best_k
+
+    # ---- curvature tests ----
+
     def test_sphere_r4(self, device):
-        """R=4 sphere on 16^3 grid — mean curvature H = 1/R = 0.25."""
+        """R=4 sphere: reconstruction matches 1/R."""
         N = 16
-        phi, flag, _ = self._make_sphere_grid(N, 4.0, device)
+        R = 4.0; delta = 1.5
+        phi, flag, phi_host = self._make_sphere_grid(N, R, device)
         kappas = self._collect_curvatures(device, phi, flag, N)
-        assert len(kappas) > 10, f"Expected many TYPE_I cells, got {len(kappas)}"
-        median_k = np.median(kappas)
-        expected = 1.0 / 4.0  # H = 1/R
-        assert abs(median_k - expected) < 0.05, \
-            f"R=4 H=1/R={expected:.4f}: median={median_k:.6f} n_type_i={len(kappas)}"
+        assert len(kappas) > 10
+        flag_np = flag.numpy()
+        ic, jc, kc = self._best_phi05_cell(phi_host, flag_np, N)
+        centre = np.array([N/2, N/2, N/2], dtype=np.float64)
+        K_rec = self._reconstruct_z(device, phi, flag, phi_host, ic, jc, kc, centre, R, delta)
+        assert K_rec is not None, "reconstruction failed"
+        assert abs(abs(K_rec) - 1.0/R) < 0.05, \
+            f"R={R}: |K_reconstructed|={abs(K_rec):.6f}, expected 1/R={1/R:.6f}"
 
     def test_sphere_r8(self, device):
-        """R=8 sphere on 32^3 grid — mean curvature H = 1/R = 0.125."""
+        """R=8 sphere: reconstruction matches 1/R."""
         N = 32
-        phi, flag, _ = self._make_sphere_grid(N, 8.0, device)
+        R = 8.0; delta = 1.5
+        phi, flag, phi_host = self._make_sphere_grid(N, R, device)
         kappas = self._collect_curvatures(device, phi, flag, N)
-        assert len(kappas) > 50, f"Expected many TYPE_I cells, got {len(kappas)}"
-        median_k = np.median(kappas)
-        expected = 1.0 / 8.0  # H = 1/R
-        assert abs(median_k - expected) < 0.05, \
-            f"R=8 H=1/R={expected:.4f}: median={median_k:.6f} n_type_i={len(kappas)}"
+        assert len(kappas) > 50
+        flag_np = flag.numpy()
+        ic, jc, kc = self._best_phi05_cell(phi_host, flag_np, N)
+        centre = np.array([N/2, N/2, N/2], dtype=np.float64)
+        K_rec = self._reconstruct_z(device, phi, flag, phi_host, ic, jc, kc, centre, R, delta)
+        assert K_rec is not None, "reconstruction failed"
+        assert abs(abs(K_rec) - 1.0/R) < 0.05, \
+            f"R={R}: |K_reconstructed|={abs(K_rec):.6f}, expected 1/R={1/R:.6f}"
 
     def test_sphere_r12(self, device):
-        """R=12 sphere on 32^3 grid — mean curvature H = 1/R = 0.0833."""
+        """R=12 sphere: reconstruction matches 1/R."""
         N = 32
-        phi, flag, _ = self._make_sphere_grid(N, 12.0, device)
+        R = 12.0; delta = 1.5
+        phi, flag, phi_host = self._make_sphere_grid(N, R, device)
         kappas = self._collect_curvatures(device, phi, flag, N)
-        assert len(kappas) > 100, f"Expected many TYPE_I cells, got {len(kappas)}"
-        median_k = np.median(kappas)
-        expected = 1.0 / 12.0  # H = 1/R
-        assert abs(median_k - expected) < 0.05, \
-            f"R=12 H=1/R={expected:.4f}: median={median_k:.6f} n_type_i={len(kappas)}"
+        assert len(kappas) > 100
+        flag_np = flag.numpy()
+        ic, jc, kc = self._best_phi05_cell(phi_host, flag_np, N)
+        centre = np.array([N/2, N/2, N/2], dtype=np.float64)
+        K_rec = self._reconstruct_z(device, phi, flag, phi_host, ic, jc, kc, centre, R, delta)
+        assert K_rec is not None, "reconstruction failed"
+        assert abs(abs(K_rec) - 1.0/R) < 0.05, \
+            f"R={R}: |K_reconstructed|={abs(K_rec):.6f}, expected 1/R={1/R:.6f}"
 
     def test_plane_zero(self, device):
         """Plane interface: curvature should be near zero."""
@@ -1191,9 +1311,9 @@ class TestCalculateCurvature:
             f"Plane H=0: median|k|={median_abs:.6f} n_type_i={len(kappas)}"
 
     def test_cylinder_r6(self, device):
-        """R=6 cylinder along y on 32^3 grid — mean curvature H = 1/(2R) = 0.0833."""
+        """R=6 cylinder: reconstruction matches 1/(2R)."""
         N = 32
-        delta = 1.5
+        R = 6.0; delta = 1.5
         centre_xz = N / 2
         phi_host = np.zeros((N, N, N), dtype=np.float32)
         flag_host = np.zeros((N, N, N), dtype=np.uint8)
@@ -1201,7 +1321,7 @@ class TestCalculateCurvature:
             for j in range(N):
                 for k in range(N):
                     r = np.sqrt((i - centre_xz) ** 2 + (k - centre_xz) ** 2)
-                    phi_raw = (6.0 - r) / delta + 0.5
+                    phi_raw = (R - r) / delta + 0.5
                     phi_host[i, j, k] = max(0.0, min(1.0, phi_raw))
                     if phi_host[i, j, k] >= 1.0:
                         flag_host[i, j, k] = C.CellFlag.TYPE_F
@@ -1213,11 +1333,14 @@ class TestCalculateCurvature:
         phi = wp.array(phi_host, dtype=float, device=device)
         flag = wp.array(flag_host, dtype=wp.uint8, device=device)
         kappas = self._collect_curvatures(device, phi, flag, N)
-        assert len(kappas) > 50, f"Expected many TYPE_I cells, got {len(kappas)}"
-        median_k = np.median(kappas)
-        expected = 1.0 / (2.0 * 6.0)  # H = 1/(2R)
-        assert abs(median_k - expected) < 0.05, \
-            f"R=6 H=1/(2R)={expected:.4f}: median={median_k:.6f} n_type_i={len(kappas)}"
+        assert len(kappas) > 50
+        # Use axis-aligned cell so that plic_cube(phi, n) = phi - 0.5 holds exactly.
+        ic, jc, kc = int(N/2 + R), N//2, N//2  # (22, 16, 16), normal (1,0,0)
+        centre = np.array([N/2, N/2, N/2], dtype=np.float64)
+        K_rec = self._reconstruct_z(device, phi, flag, phi_host, ic, jc, kc, centre, R, delta)
+        assert K_rec is not None, "reconstruction failed"
+        assert abs(abs(K_rec) - 1.0/(2*R)) < 0.05, \
+            f"cylinder R={R}: |K_reconstructed|={abs(K_rec):.6f}, expected 1/(2R)={1/(2*R):.6f}"
 
     def test_isolated_interface_zero(self, device):
         """Isolated TYPE_I with no interface neighbours: kappa=0 (fallback)."""

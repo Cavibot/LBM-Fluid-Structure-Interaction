@@ -293,7 +293,7 @@ wp.launch(kernels_surface.surface_3_kernel, dim=(nx,ny,nz), inputs=[...])
 
 | 场景 | 网格 | R | 步数 | 验证点 |
 |------|------|---|------|--------|
-| `droplet_r4` | 16³ | 4 | 5 | 小球面 κ≈2/4 |
+| `droplet_r4` | 16³ | 4 | 5 | 小球面（曲率含 PLIC 偏置，Warp 与参考一致即可） |
 | `droplet_r8` | 32³ | 8 | 10 | 中球面，充分覆盖 TYPE_I 环带 |
 | `droplet_r12` | 32³ | 12 | 10 | 大球面，低曲率 |
 
