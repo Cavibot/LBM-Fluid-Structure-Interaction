@@ -1162,6 +1162,179 @@ def stream_collide_bvh_kernel(
 
     mass[i, j, k] = massn
 
+    # ---- Read OLD moments from f_mom (ref lines 862-866) ----
+    # The reference uses pre-collision moments for curvature and gas equilibrium,
+    # NOT the post-streaming pop-summed values.
+    rho_old = f_mom[0 * stride + cur_idx]
+    ux_old = f_mom[1 * stride + cur_idx]
+    uy_old = f_mom[2 * stride + cur_idx]
+    uz_old = f_mom[3 * stride + cur_idx]
+    inv_rho_old = 1.0 / rho_old if rho_old > 0.0 else 1.0
+
+    # ---- Load body force at this cell ----
+    fx = force_x[i, j, k]
+    fy = force_y[i, j, k]
+    fz = force_z[i, j, k]
+
+    # =====================================================================
+    # Phase C: Free-surface interface handling (TYPE_I only)
+    # =====================================================================
+    # Reference: ``mrLbmSolverGpu3D.cu:862-910``
+    if flagsn_su == C.TYPE_I:
+        # ---- Recalculate centre phi from current mass (ref line 867) ----
+        # "don't load phi[n] from memory, instead recalculate it with mass
+        #  corrected by excess mass"
+        phi_self = calculate_phi(rho_old, massn, C.CellFlag.TYPE_I)
+
+        # ---- Gas pressure ρ_k from bubble ----
+        tag = tag_matrix[i, j, k]
+        rho_k = 1.0  # default gas density
+        if tag > 0:
+            # bubble_rho is double; cast to float for arithmetic
+            rho_k = float(bubble_rho[tag - 1])
+
+        # ---- Surface tension modulation (ref lines 880-888) ----
+        sigma_k = surface_tension
+        if tag > 0:
+            # For large bubbles (air layer): use init_volume (ref line 880)
+            init_bv = float(bubble_init_volume[tag - 1])
+            if init_bv > 5000000.0:
+                sigma_k = 1.0e-6
+            # For small bubbles: additional preconditions (ref lines 885-888)
+            bv = float(bubble_volume[tag - 1])
+            if disjoin_force[i, j, k] <= 0.0:
+                if sigma_k > 1.0e-3:
+                    if bv < 64.0:
+                        sigma_k = 2.0e-4
+
+        # ---- PLIC curvature ----
+        # Centre phi is mass-corrected (ref line 867); neighbours read from grid.
+        curv = calculate_curvature_from_grid(
+            phi, flag, cx, cy, cz, opposite, i, j, k, nx, ny, nz, px, py, pz,
+            phi_self)
+
+        # Compute Laplace pressure, guarding against zero surface tension
+        if sigma_k == 0.0:
+            rho_laplace = 0.0
+        else:
+            rho_laplace = sigma_k * curv
+        disjoint_term = disjoin_factor * disjoin_force[i, j, k]
+        gas_pressure = rho_k - rho_laplace - disjoint_term
+
+        # ---- Correct velocity for Guo forcing at interface (ref lines 900-908) ----
+        # Half-force correction applied before the equilibrium reconstruction
+        uxn_corrected = ux_old + 0.5 * fx * inv_rho_old
+        uyn_corrected = uy_old + 0.5 * fy * inv_rho_old
+        uzn_corrected = uz_old + 0.5 * fz * inv_rho_old
+
+        # Clamp velocity magnitude to 0.4 (ref line 908)
+        vel_mag_sq = (
+            uxn_corrected * uxn_corrected
+            + uyn_corrected * uyn_corrected
+            + uzn_corrected * uzn_corrected
+        )
+        if vel_mag_sq > 0.16:  # 0.4^2
+            scale = 0.4 / wp.sqrt(vel_mag_sq)
+            uxn_corrected = uxn_corrected * scale
+            uyn_corrected = uyn_corrected * scale
+            uzn_corrected = uzn_corrected * scale
+
+        # ---- Mass exchange: compute Δmass (Phase D, ref lines 926-929) ----
+        # MUST run BEFORE the gas BC, because it uses the ORIGINAL
+        # f_streamed values to compute mass flux (ref lines 926-929 vs 930-934).
+        # phi_self was already recalculated at the top of Phase C (ref line 867).
+        mass_exchange = float(0.0)
+        for di in range(1, 27):
+            mni = i - cx[di]
+            mnj = j - cy[di]
+            mnk = k - cz[di]
+
+            # Periodic wrap
+            if px == 1:
+                if mni < 0: mni += nx
+                elif mni >= nx: mni -= nx
+            if py == 1:
+                if mnj < 0: mnj += ny
+                elif mnj >= ny: mnj -= ny
+            if pz == 1:
+                if mnk < 0: mnk += nz
+                elif mnk >= nz: mnk -= nz
+
+            if mni < 0 or mni >= nx or mnj < 0 or mnj >= ny or mnk < 0 or mnk >= nz:
+                continue
+
+            mnflag_su = int(flag[mni, mnj, mnk]) & C.TYPE_SU_MASK
+            if mnflag_su == C.TYPE_F or mnflag_su == C.TYPE_I:
+                nphi = phi[mni, mnj, mnk]
+                opp_di = int(opposite[di])
+                dflux = f_streamed[di] - fon[opp_di]
+                if mnflag_su == C.TYPE_F:
+                    mass_exchange += dflux
+                else:  # TYPE_I
+                    mass_exchange += 0.5 * (nphi + phi_self) * dflux
+
+        # Accumulate massex from neighbours (ref lines 808-818)
+        massn_accum = massn + mass_exchange
+        for di in range(1, 27):
+            eni = i - cx[di]
+            enj = j - cy[di]
+            enk = k - cz[di]
+            if px == 1:
+                if eni < 0: eni += nx
+                elif eni >= nx: eni -= nx
+            if py == 1:
+                if enj < 0: enj += ny
+                elif enj >= ny: enj -= ny
+            if pz == 1:
+                if enk < 0: enk += nz
+                elif enk >= nz: enk -= nz
+            if eni >= 0 and eni < nx and enj >= 0 and enj < ny and enk >= 0 and enk < nz:
+                massn_accum += massex[eni, enj, enk]
+
+        mass[i, j, k] = massn_accum
+        phi[i, j, k] = calculate_phi(rho_old, massn_accum, C.CellFlag.TYPE_I)
+
+        # ---- Gas boundary condition: free-surface bounce-back (ref lines 930-934) ----
+        # For each direction di (1..26), if the neighbour at direction di is gas (TYPE_G),
+        # replace f_streamed[di] with the reference formula:
+        #   fhn[i] = feg[opp(i)] - fon[opp(i)] + feg[i]
+        # where opp(i) = opposite[i], feg[*] = gas equilibrium.
+        for di in range(1, 27):
+            opp = opposite[di]
+            ni = i - cx[di]
+            nj = j - cy[di]
+            nk = k - cz[di]
+
+            # Periodic wrap
+            if px == 1:
+                if ni < 0: ni += nx
+                elif ni >= nx: ni -= nx
+            if py == 1:
+                if nj < 0: nj += ny
+                elif nj >= ny: nj -= ny
+            if pz == 1:
+                if nk < 0: nk += nz
+                elif nk >= nz: nk -= nz
+
+            if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+                continue
+
+            nflag_int2 = int(flag[ni, nj, nk])
+            nflag_su2 = nflag_int2 & C.TYPE_SU_MASK
+            if nflag_su2 == C.TYPE_G:
+                # ---- Reference free-surface gas BC (mrLbmSolverGpu3D.cu:930-934) ----
+                # feg[*] is HOME-stored; fon is HOME-stored (after -= w3d fix).
+                # The formula ensures the incoming distribution from the gas side
+                # reflects the gas pressure while correctly subtracting the
+                # outgoing flux toward the gas.
+                feg_di = calculate_f_eq_d3q27(
+                    gas_pressure, uxn_corrected, uyn_corrected, uzn_corrected, di,
+                )
+                feg_opp = calculate_f_eq_d3q27(
+                    gas_pressure, uxn_corrected, uyn_corrected, uzn_corrected, opp,
+                )
+                f_streamed[di] = feg_opp - fon[opp] + feg_di
+
     # =====================================================================
     # Phase B: Restore full populations and compute post-streaming moments
     # =====================================================================
@@ -1177,10 +1350,6 @@ def stream_collide_bvh_kernel(
     for di in range(27):
         pop[di] = f_streamed[di] + w3d[di]
 
-    # ---- Load body force at this cell ----
-    fx = force_x[i, j, k]
-    fy = force_y[i, j, k]
-    fz = force_z[i, j, k]
 
     # ---- Compute density from pop (ref line 948) ----
     rho_new = float(0.0)
@@ -1232,175 +1401,6 @@ def stream_collide_bvh_kernel(
         piyy_pop += pi * cy_i * cy_i
         piyz_pop += pi * cy_i * cz_i
         pizz_pop += pi * cz_i * cz_i
-
-    # =====================================================================
-    # Phase C: Free-surface interface handling (TYPE_I only)
-    # =====================================================================
-    # Reference: ``mrLbmSolverGpu3D.cu:862-910``
-    if flagsn_su == C.TYPE_I:
-        # ---- Recalculate centre phi from current mass (ref line 867) ----
-        # "don't load phi[n] from memory, instead recalculate it with mass
-        #  corrected by excess mass"
-        phi_self = calculate_phi(rho_new, massn, C.CellFlag.TYPE_I)
-
-        # ---- Gas pressure ρ_k from bubble ----
-        tag = tag_matrix[i, j, k]
-        rho_k = 1.0  # default gas density
-        if tag > 0:
-            # bubble_rho is double; cast to float for arithmetic
-            rho_k = float(bubble_rho[tag - 1])
-
-        # ---- Surface tension modulation (ref lines 880-888) ----
-        sigma_k = surface_tension
-        if tag > 0:
-            # For large bubbles (air layer): use init_volume (ref line 880)
-            init_bv = float(bubble_init_volume[tag - 1])
-            if init_bv > 5000000.0:
-                sigma_k = 1.0e-6
-            # For small bubbles: additional preconditions (ref lines 885-888)
-            bv = float(bubble_volume[tag - 1])
-            if disjoin_force[i, j, k] <= 0.0:
-                if sigma_k > 1.0e-3:
-                    if bv < 64.0:
-                        sigma_k = 2.0e-4
-
-        # ---- PLIC curvature ----
-        # Centre phi is mass-corrected (ref line 867); neighbours read from grid.
-        curv = calculate_curvature_from_grid(
-            phi, flag, cx, cy, cz, opposite, i, j, k, nx, ny, nz, px, py, pz,
-            phi_self)
-
-        # Compute Laplace pressure, guarding against zero surface tension
-        if sigma_k == 0.0:
-            rho_laplace = 0.0
-        else:
-            rho_laplace = sigma_k * curv
-        disjoint_term = disjoin_factor * disjoin_force[i, j, k]
-        gas_pressure = rho_k - rho_laplace - disjoint_term
-
-        # ---- Correct velocity for Guo forcing at interface (ref lines 900-908) ----
-        # Half-force correction applied before the equilibrium reconstruction
-        uxn_corrected = ux_new + 0.5 * fx * inv_rho
-        uyn_corrected = uy_new + 0.5 * fy * inv_rho
-        uzn_corrected = uz_new + 0.5 * fz * inv_rho
-
-        # Clamp velocity magnitude to 0.4 (ref line 908)
-        vel_mag_sq = (
-            uxn_corrected * uxn_corrected
-            + uyn_corrected * uyn_corrected
-            + uzn_corrected * uzn_corrected
-        )
-        if vel_mag_sq > 0.16:  # 0.4^2
-            scale = 0.4 / wp.sqrt(vel_mag_sq)
-            uxn_corrected = uxn_corrected * scale
-            uyn_corrected = uyn_corrected * scale
-            uzn_corrected = uzn_corrected * scale
-
-        # ---- Gas boundary condition: free-surface bounce-back (ref lines 930-934) ----
-        # For each direction di (1..26), if the neighbour at direction di is gas (TYPE_G),
-        # replace f_streamed[di] with the reference formula:
-        #   fhn[i] = feg[opp(i)] - fon[opp(i)] + feg[i]
-        # where opp(i) = opposite[i], feg[*] = gas equilibrium.
-        for di in range(1, 27):
-            opp = opposite[di]
-            ni = i - cx[di]
-            nj = j - cy[di]
-            nk = k - cz[di]
-
-            # Periodic wrap
-            if px == 1:
-                if ni < 0: ni += nx
-                elif ni >= nx: ni -= nx
-            if py == 1:
-                if nj < 0: nj += ny
-                elif nj >= ny: nj -= ny
-            if pz == 1:
-                if nk < 0: nk += nz
-                elif nk >= nz: nk -= nz
-
-            if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
-                continue
-
-            nflag_int2 = int(flag[ni, nj, nk])
-            nflag_su2 = nflag_int2 & C.TYPE_SU_MASK
-            if nflag_su2 == C.TYPE_G:
-                # ---- Reference free-surface gas BC (mrLbmSolverGpu3D.cu:930-934) ----
-                # feg[*] is HOME-stored; fon is HOME-stored (after -= w3d fix).
-                # The formula ensures the incoming distribution from the gas side
-                # reflects the gas pressure while correctly subtracting the
-                # outgoing flux toward the gas.
-                feg_di = calculate_f_eq_d3q27(
-                    gas_pressure, uxn_corrected, uyn_corrected, uzn_corrected, di,
-                )
-                feg_opp = calculate_f_eq_d3q27(
-                    gas_pressure, uxn_corrected, uyn_corrected, uzn_corrected, opp,
-                )
-                f_streamed[di] = feg_opp - fon[opp] + feg_di
-
-        # ---- Mass exchange: compute Δmass (Phase D, ref lines 926-929) ----
-        # For TYPE_I cells: accumulate mass flux across interface.
-        # Δmass = Σ [0.5*(phi_self + phi_neighbour) * (fhn[di] - fon[opp])]
-        # for all fluid/interface neighbours.
-        # phi_self was already recalculated at the top of Phase C (ref line 867).
-        mass_exchange = float(0.0)
-        for di in range(1, 27):
-            mni = i - cx[di]
-            mnj = j - cy[di]
-            mnk = k - cz[di]
-
-            # Periodic wrap
-            if px == 1:
-                if mni < 0: mni += nx
-                elif mni >= nx: mni -= nx
-            if py == 1:
-                if mnj < 0: mnj += ny
-                elif mnj >= ny: mnj -= ny
-            if pz == 1:
-                if mnk < 0: mnk += nz
-                elif mnk >= nz: mnk -= nz
-
-            if mni < 0 or mni >= nx or mnj < 0 or mnj >= ny or mnk < 0 or mnk >= nz:
-                continue
-
-            mnflag_su = int(flag[mni, mnj, mnk]) & C.TYPE_SU_MASK
-            if mnflag_su == C.TYPE_F or mnflag_su == C.TYPE_I:
-                nphi = phi[mni, mnj, mnk]
-                opp_di = int(opposite[di])
-                dflux = f_streamed[di] - fon[opp_di]
-                if mnflag_su == C.TYPE_F:
-                    mass_exchange += dflux
-                else:  # TYPE_I
-                    mass_exchange += 0.5 * (nphi + phi_self) * dflux
-
-        # Accumulate massex from neighbours (ref lines 808-818)
-        massn_accum = massn + mass_exchange
-        for di in range(1, 27):
-            eni = i - cx[di]
-            enj = j - cy[di]
-            enk = k - cz[di]
-            if px == 1:
-                if eni < 0: eni += nx
-                elif eni >= nx: eni -= nx
-            if py == 1:
-                if enj < 0: enj += ny
-                elif enj >= ny: enj -= ny
-            if pz == 1:
-                if enk < 0: enk += nz
-                elif enk >= nz: enk -= nz
-            if eni >= 0 and eni < nx and enj >= 0 and enj < ny and enk >= 0 and enk < nz:
-                massn_accum += massex[eni, enj, enk]
-
-        mass[i, j, k] = massn_accum
-        phi[i, j, k] = calculate_phi(rho_new, massn_accum, C.CellFlag.TYPE_I)
-
-    elif flagsn_su == C.TYPE_F:
-        # ---- Mass exchange for TYPE_F (ref lines 821-825) ----
-        mass_exchange_f = float(0.0)
-        for di in range(1, 27):
-            mass_exchange_f += f_streamed[di] - fon[di]
-        massn = massn + mass_exchange_f
-        mass[i, j, k] = massn
-        phi[i, j, k] = 1.0
 
     # =====================================================================
     # TYPE_NO_F / TYPE_NO_G flag transitions (ref lines 974-998)

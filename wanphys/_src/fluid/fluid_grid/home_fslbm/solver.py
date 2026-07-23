@@ -154,6 +154,7 @@ class HomeFslbmSolver(FluidGridSolverBase):
         wp.copy(state_out.force_y, state_in.force_y)
         wp.copy(state_out.force_z, state_in.force_z)
         wp.copy(state_out.delta_phi, state_in.delta_phi)
+        wp.copy(state_out.f_mom_post, state_in.f_mom_post)
 
         # ---- Copy solid coupling fields ----
         wp.copy(state_out.solid_phi, state_in.solid_phi)
