@@ -5,6 +5,7 @@ WanPhys-specific implementation notes and migration guides.
 ```{toctree}
 :maxdepth: 1
 
+LATEST HOME-FREE VOF 双球近期工作总结 <LATEST_home_vof_two_spheres_progress_zh>
 LBM 术语与领域语言 <domain_glossary_zh>
 LBM HOME/HOME-FREE 扩展路线图 <lbm_home_roadmap_zh>
 LBM HOME-FREE 单格找平极限 <lbm_home_fslbm_one_cell_limit_zh>

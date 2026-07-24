@@ -1,10 +1,10 @@
 # LBM 模块文件说明
 
-> 文档版本：2026-07-10  
+> 文档版本：2026-07-24  
 > 路径根目录：`wanphys/_src/fluid/fluid_grid/lbm/`  
-> 关联文档：[LBM HOME/HOME-FREE 扩展路线图](lbm_home_roadmap_zh.md)
+> 关联文档：[路线图](lbm_home_roadmap_zh.md)、[LATEST 双球进度](LATEST_home_vof_two_spheres_progress_zh.md)
 
-本文档说明 LBM 子模块的**目录结构、各文件职责、依赖关系与调用入口**，便于分工开发与后续 G2–G4 扩展。
+本文档说明 LBM 子模块的**目录结构、各文件职责、依赖关系与调用入口**，便于分工开发与后续扩展。
 
 ---
 
@@ -20,25 +20,38 @@ wanphys/_src/fluid/fluid_grid/lbm/
 ├── constants.py             # 边界/SC 常量；格子几何再导出
 ├── kernels.py               # Warp GPU 核（D3Q19 分布型）
 │
-├── core/                    # [G1] 共享原语层
-│   ├── __init__.py
-│   ├── lattice.py           # LatticeSpec、D3Q19、NUM_DIRS
+├── core/                    # 共享原语层
+│   ├── lattice.py           # LatticeSpec、D3Q19/D3Q27、NUM_DIRS
+│   ├── hermite.py           # Hermite 矩 / 重构
+│   ├── moments.py           # HOME collide
 │   └── pipeline.py          # StepStats、LbmStepControl
 │
-├── phases/                  # [G1] 相界面插件层
-│   ├── __init__.py
-│   └── shan_chen.py         # ShanChenPhase（扩散界面 SC）
+├── phases/                  # 相界面
+│   ├── shan_chen.py
+│   └── vof_plic.py          # PLIC κ（HOME FS Laplace）
 │
-└── benchmark/               # [G1] 基准与指标层
-    ├── __init__.py
-    ├── metrics.py           # PerfMetrics、ValidationMetrics
-    └── registry.py          # 变体注册 V0–V3
+├── backends/moment/home_fp32_ref/   # 当前主线：矩编码 HOME-FREE VOF
+│   ├── __init__.py
+│   ├── step.py / bc.py      # H1–H2 矩步进 / 域 BC
+│   ├── vof_step.py          # H4 numpy 参考 VOF
+│   ├── vof_warp.py          # H6 fused GPU + alloc/seed/step
+│   ├── bridge.py            # H5 LbmSolver 挂钩
+│   ├── quant.py             # 可选 16-bit 持久矩
+│   ├── height_eq*.py        # 晚期池面 φ→φ*
+│   ├── surface_policy.py    # late-pool 控制器
+│   └── sphere_buoyancy_warp.py
+│
+└── benchmark/
+    ├── metrics.py
+    └── registry.py
 
 wanphys/_src/fluid/fluid_grid/coupling/
-└── grid_lbm_rigid_coupling.py   # LBM ↔ 刚体耦合（未改动）
+└── grid_lbm_rigid_coupling.py
 
 newton/tests/
-└── test_lbm_g1_infrastructure.py  # G1 基础设施单测
+├── test_lbm_g1_infrastructure.py
+├── test_lbm_home_*.py                 # Hermite / step / BC / VOF / solver hook
+└── test_lbm_home_vof_conservation.py  # 水质量 / 动量正确性
 ```
 
 **分层对应**（见路线图 §4）：
@@ -366,12 +379,21 @@ benchmark/registry ──► VariantSpec (metadata only)
 |------|------|
 | `newton/tests/test_lbm_g1_infrastructure.py` | lattice、model、SC phase、StepStats、registry |
 | `newton/tests/test_lbm_dambreak_examples.py` | 既有 dam-break 冒烟（依赖 examples 包） |
+| `newton/tests/test_lbm_home_hermite.py` | Hermite 矩 / 重构 |
+| `newton/tests/test_lbm_home_step.py` | 周期盒 ρ / 静流体；Warp↔numpy |
+| `newton/tests/test_lbm_home_bc.py` | 墙 Eq.24、域 BC |
+| `newton/tests/test_lbm_home_vof.py` | H4 numpy VOF 冒烟、φ 粗守恒 |
+| `newton/tests/test_lbm_home_solver_hook.py` | `lbm_backend=home_fp32` 域步进冒烟 |
+| `newton/tests/test_lbm_home_vof_conservation.py` | **水质量 / 体积 / 动量**：numpy+GPU、gravity、`--moment-quant`、height-eq |
+
+**水质量库存**（守恒套件）：`Σ mass`（液 ≈ ρ，IF = φρ）；动量 `Σ mass·u`。细节与容差见 [LATEST §8](LATEST_home_vof_two_spheres_progress_zh.md)。
 
 **运行**：
 
 ```bash
 cd LBM-Fluid-Structure-Interaction
 uv run python -m unittest newton.tests.test_lbm_g1_infrastructure -v
+uv run --extra examples python -m unittest newton.tests.test_lbm_home_vof_conservation -v
 ```
 
 ---
@@ -421,6 +443,7 @@ val = collect_validation_metrics(domain.state, step_index=100)
 
 | 文档 | 内容 |
 |------|------|
+| [LATEST_home_vof_two_spheres_progress_zh.md](LATEST_home_vof_two_spheres_progress_zh.md) | 当前双球主线进度（含守恒测试） |
 | [lbm_home_roadmap_zh.md](lbm_home_roadmap_zh.md) | 总体路线图、分工、变体矩阵 |
 | [lbm_core_audit_zh.md](lbm_core_audit_zh.md) | 既有实现审计（含已知 Guo/SC 问题） |
 | [lbm_rigid_coupling_guide_zh.md](lbm_rigid_coupling_guide_zh.md) | 刚体耦合使用 |
