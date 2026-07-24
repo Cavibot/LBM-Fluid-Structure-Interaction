@@ -744,3 +744,208 @@ class TestRegressionSurface:
             setup_fn=_setup_sphere_droplet,
             setup_kwargs={"R": 8.0},
         )
+
+# ============================================================================
+# Diagnostic: step-by-step comparison for droplet_r8
+# ============================================================================
+
+
+def _load_surface_golden_path(scene_dir):
+    """Load surface golden data from an explicit path (supports subdirectories)."""
+    import numpy as np
+    from pathlib import Path
+    sd = Path(scene_dir)
+    return {
+        "f_mom_post": np.loadtxt(sd / "f_mom_post.txt", dtype=np.float32),
+        "flag":       np.loadtxt(sd / "flag.txt", dtype=np.int32),
+        "mass":       np.loadtxt(sd / "mass.txt", dtype=np.float32),
+        "phi":        np.loadtxt(sd / "phi.txt", dtype=np.float32),
+        "tag_matrix": np.loadtxt(sd / "tag_matrix.txt", dtype=np.int32),
+    }
+
+
+def _first_diff_report(golden, warped, field_name, N, max_cells=10):
+    """Print the first *max_cells* cells where golden != warped.
+
+    Uses the same tolerance as _compare_float_field / _compare_f_mom_post.
+    """
+    rtol = 1e-4
+    atol = 1e-6
+
+    g = golden.reshape(N, N, N)
+    w = warped.reshape(N, N, N)
+
+    abs_diff = np.abs(g.astype(np.float64) - w.astype(np.float64))
+    max_val = np.maximum(np.abs(g.astype(np.float64)),
+                         np.abs(w.astype(np.float64)))
+    max_val[max_val == 0.0] = 1e-30
+    threshold = atol + rtol * max_val
+    mask = abs_diff > threshold
+
+    diff_count = int(np.sum(mask))
+    if diff_count == 0:
+        print(f"  [{field_name}] all {N**3} cells match (rtol={rtol}, atol={atol})")
+        return 0
+
+    pct = 100.0 * diff_count / (N ** 3)
+    print(f"  [{field_name}] {diff_count}/{N**3} cells differ ({pct:.4f}%)")
+    idx = np.where(mask)
+    for n in range(min(max_cells, len(idx[0]))):
+        ii, jj, kk = idx[0][n], idx[1][n], idx[2][n]
+        gv = g[ii, jj, kk]
+        wv = w[ii, jj, kk]
+        ad = abs_diff[ii, jj, kk]
+        print(f"    ({ii:2d},{jj:2d},{kk:2d}) "
+              f"golden={gv:.8e}  warp={wv:.8e}  "
+              f"abs={ad:.2e}")
+    return diff_count
+
+
+def _check_diag_step(_warp, scene_name, N, steps, setup_fn, setup_kwargs):
+    """Run *steps* and compare against golden at that step.
+
+    Returns True if all fields match.
+    """
+    import warp as wp
+    from wanphys._src.fluid.fluid_grid.home_fslbm.model import HomeFslbmModel
+    from wanphys._src.fluid.fluid_grid.home_fslbm.solver import HomeFslbmSolver
+    from wanphys._src.fluid.fluid_grid.home_fslbm.domain import HomeFslbmDomain
+    from pathlib import Path
+
+    model = HomeFslbmModel(
+        fluid_grid_res=(N, N, N),
+        fluid_grid_cell_size=1.0,
+        omega=OMEGA_REF,
+        gravity_z=0.0,
+        turbulence_radius=3,
+    )
+    solver = HomeFslbmSolver(model)
+    domain = HomeFslbmDomain(model, solver=solver)
+    domain.create_state()
+
+    setup_fn(domain, N, **setup_kwargs)
+    _set_boundary_walls(domain.state, N)
+
+    for _ in range(steps):
+        domain.step(dt=1.0)
+
+    state = domain.state
+
+    golden_dir = Path(__file__).parent / "golden_data" / scene_name / f"step_{steps}"
+    if not golden_dir.exists():
+        raise FileNotFoundError(
+            f"Golden data not found at {golden_dir}. "
+            f"Run the updated export_solver_golden.cpp first."
+        )
+    golden = _load_surface_golden_path(golden_dir)
+    stride = N * N * N
+
+    # Reorder golden data
+    g_fmom = _reorder_f_mom_post(golden["f_mom_post"], N)
+    g_flag = _reorder_scalar_field(golden["flag"], N).reshape(N, N, N).astype(np.uint8)
+    g_mass = _reorder_scalar_field(golden["mass"], N).reshape(N, N, N)
+    g_phi = _reorder_scalar_field(golden["phi"], N).reshape(N, N, N)
+
+    print(f"\n========== step {steps} comparison ==========")
+
+    errors = 0
+
+    # flag (bit-exact, ignoring boundary faces)
+    w_flag = state.flag.numpy().reshape(N, N, N)
+    diff_mask = g_flag != w_flag
+    total_diffs = int(np.sum(diff_mask))
+    if total_diffs > 0:
+        on_boundary = np.zeros((N, N, N), dtype=bool)
+        on_boundary[0, :, :] = True; on_boundary[-1, :, :] = True
+        on_boundary[:, 0, :] = True; on_boundary[:, -1, :] = True
+        on_boundary[:, :, 0] = True; on_boundary[:, :, -1] = True
+        interior = int(np.sum(diff_mask & ~on_boundary))
+        if interior > 0:
+            idx = np.where(diff_mask & ~on_boundary)
+            details = "; ".join(
+                f"({idx[0][i]},{idx[1][i]},{idx[2][i]}) "
+                f"ref={g_flag[idx][i]:#x} warp={w_flag[idx][i]:#x}"
+                for i in range(min(5, len(idx[0])))
+            )
+            print(f"  [flag] {interior} interior cells differ (first: {details})")
+            errors += 1
+        else:
+            print(f"  [flag] {total_diffs} boundary-face mismatches (expected)")
+    else:
+        print(f"  [flag] all match")
+
+    # mass, phi
+    errors += _first_diff_report(g_mass, state.mass.numpy(), "mass", N)
+    errors += _first_diff_report(g_phi, state.phi.numpy(), "phi", N)
+
+    # f_mom_post
+    w_fmom = state.f_mom_post.numpy().flatten()
+    g_fmom_flat = np.asarray(g_fmom, dtype=np.float32).ravel()
+    w_fmom_flat = np.asarray(w_fmom, dtype=np.float32).ravel()
+    abs_diff = np.abs(
+        g_fmom_flat.astype(np.float64) - w_fmom_flat.astype(np.float64)
+    )
+    max_val = np.maximum(
+        np.abs(g_fmom_flat.astype(np.float64)),
+        np.abs(w_fmom_flat.astype(np.float64)),
+    )
+    max_val[max_val == 0.0] = 1e-30
+    thresh = 1e-6 + 1e-4 * max_val
+    n_mm = int(np.sum(abs_diff > thresh))
+    if n_mm > 0:
+        pct = 100.0 * n_mm / len(g_fmom_flat)
+        rel_err = abs_diff / max_val
+        max_rel = float(np.max(rel_err))
+        print(f"  [f_mom_post] {n_mm}/{len(g_fmom_flat)} ({pct:.2f}%) "
+              f"differ, max rel err={max_rel:.2e}")
+        # Show first 5 differing moment elements
+        bad = np.where(abs_diff > thresh)[0]
+        for n in range(min(5, len(bad))):
+            bi = bad[n]
+            mom = bi // stride
+            cell = bi % stride
+            i = cell // (N * N)
+            j = (cell // N) % N
+            k = cell % N
+            print(f"    mom[{mom}] cell({i},{j},{k}) "
+                  f"golden={g_fmom_flat[bi]:.8e} warp={w_fmom_flat[bi]:.8e} "
+                  f"abs={abs_diff[bi]:.3e} rel={rel_err[bi]:.3e}")
+        errors += 1
+    else:
+        print(f"  [f_mom_post] all match")
+
+    return errors == 0
+
+
+class TestDiagnosticDropletR8:
+    """Step-by-step diagnostic for droplet_r8 (32^3).
+
+    Requires golden data generated by the updated export_solver_golden.cpp
+    (gen_droplet_r8_diag) placed under golden_data/droplet_r8_diag/.
+    """
+
+    @pytest.fixture(scope="class")
+    def _warp(self):
+        import warp as wp
+        return wp
+
+    def test_step0_initial(self, _warp):
+        """Compare Warp initial state vs golden step 0."""
+        assert _check_diag_step(
+            _warp, "droplet_r8_diag", N=32, steps=0,
+            setup_fn=_setup_sphere_droplet, setup_kwargs={"R": 8.0},
+        )
+
+    def test_step1_single(self, _warp):
+        """Compare Warp after 1 step vs golden step 1."""
+        assert _check_diag_step(
+            _warp, "droplet_r8_diag", N=32, steps=1,
+            setup_fn=_setup_sphere_droplet, setup_kwargs={"R": 8.0},
+        )
+
+    def test_step2(self, _warp):
+        """Compare Warp after 2 steps vs golden step 2."""
+        assert _check_diag_step(
+            _warp, "droplet_r8_diag", N=32, steps=2,
+            setup_fn=_setup_sphere_droplet, setup_kwargs={"R": 8.0},
+        )

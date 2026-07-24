@@ -1223,9 +1223,9 @@ def stream_collide_bvh_kernel(
 
         # ---- Correct velocity for Guo forcing at interface (ref lines 900-908) ----
         # Half-force correction applied before the equilibrium reconstruction
-        uxn_corrected = ux_old + 0.5 * fx * inv_rho_old
-        uyn_corrected = uy_old + 0.5 * fy * inv_rho_old
-        uzn_corrected = uz_old + 0.5 * fz * inv_rho_old
+        uxn_corrected = ux_old + 0.5 * fx
+        uyn_corrected = uy_old + 0.5 * fy
+        uzn_corrected = uz_old + 0.5 * fz
 
         # Clamp velocity magnitude to 0.4 (ref line 908)
         vel_mag_sq = (
@@ -1273,23 +1273,9 @@ def stream_collide_bvh_kernel(
                 else:  # TYPE_I
                     mass_exchange += 0.5 * (nphi + phi_self) * dflux
 
-        # Accumulate massex from neighbours (ref lines 808-818)
+        # mass = original + sum(massex) + mass_exchange
+        # (massex already accumulated at lines 1143-1157; ref adds it only once)
         massn_accum = massn + mass_exchange
-        for di in range(1, 27):
-            eni = i - cx[di]
-            enj = j - cy[di]
-            enk = k - cz[di]
-            if px == 1:
-                if eni < 0: eni += nx
-                elif eni >= nx: eni -= nx
-            if py == 1:
-                if enj < 0: enj += ny
-                elif enj >= ny: enj -= ny
-            if pz == 1:
-                if enk < 0: enk += nz
-                elif enk >= nz: enk -= nz
-            if eni >= 0 and eni < nx and enj >= 0 and enj < ny and enk >= 0 and enk < nz:
-                massn_accum += massex[eni, enj, enk]
 
         mass[i, j, k] = massn_accum
         phi[i, j, k] = calculate_phi(rho_old, massn_accum, C.CellFlag.TYPE_I)
