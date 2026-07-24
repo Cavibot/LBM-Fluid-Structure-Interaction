@@ -4,7 +4,7 @@
 > 标记：`LATEST` — 当前主线进度快照（相对路线图 / 分专题文档）  
 > 适用范围：`lbm_backend='home_fp32'` + `phase_mode=vof_sharp` + 双球 FSI  
 > 主算例：`wanphys/examples/lbm/fluid_grid_lbm_dambreak_vof_two_spheres.py`  
-> 相关：[`height_eq` 总结](lbm_home_vof_height_eq_summary_zh.md)、[单格极限](lbm_home_fslbm_one_cell_limit_zh.md)、[路线图](lbm_home_roadmap_zh.md)
+> 相关：[流固算法详解](lbm_home_vof_fsi_algorithm_zh.md)、[`height_eq` 总结](lbm_home_vof_height_eq_summary_zh.md)、[单格极限](lbm_home_fslbm_one_cell_limit_zh.md)、[路线图](lbm_home_roadmap_zh.md)、[模块文件](lbm_module_files_zh.md)
 
 本文汇总截至写作日在 **溃坝双球** 上的工程结论：液面整形、球–液耦合抖动、16-bit 矩量化持久存储、刚体碰撞开销，以及与 `公式修订版` 论文的对齐关系。
 

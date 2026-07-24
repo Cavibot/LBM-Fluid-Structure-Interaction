@@ -444,6 +444,7 @@ val = collect_validation_metrics(domain.state, step_index=100)
 | 文档 | 内容 |
 |------|------|
 | [LATEST_home_vof_two_spheres_progress_zh.md](LATEST_home_vof_two_spheres_progress_zh.md) | 当前双球主线进度（含守恒测试） |
+| [lbm_home_vof_fsi_algorithm_zh.md](lbm_home_vof_fsi_algorithm_zh.md) | HOME-FREE VOF 流固耦合算法（子步、动壁、力） |
 | [lbm_home_roadmap_zh.md](lbm_home_roadmap_zh.md) | 总体路线图、分工、变体矩阵 |
 | [lbm_core_audit_zh.md](lbm_core_audit_zh.md) | 既有实现审计（含已知 Guo/SC 问题） |
 | [lbm_rigid_coupling_guide_zh.md](lbm_rigid_coupling_guide_zh.md) | 刚体耦合使用 |
