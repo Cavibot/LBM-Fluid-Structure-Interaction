@@ -27,9 +27,11 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.bc import (
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.quant import (
     load_home_moments_u16,
 )
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.ic import (
+    seed_dam_break_column,
+)
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.vof_step import (
     HomeVofState,
-    seed_dam_break_column,
 )
 from wanphys._src.fluid.fluid_grid.lbm.core.hermite import home_reconstruct_f_i
 from wanphys._src.fluid.fluid_grid.lbm.core.lattice import LatticeSpec, get_lattice_spec
@@ -3137,8 +3139,14 @@ def step_home_vof_gpu(
     bubble_eddy_atm_vol: float = 5.0e6,
     moment_quant: bool = False,
     moment_quant_dither: bool = True,
+    use_cuda_graph: bool = False,
 ) -> None:
-    """One HOME-FREE VOF step (fused + surface_1/2/3 + optional film / bubbles)."""
+    """One HOME-FREE VOF step (fused + surface_1/2/3 + optional film / bubbles).
+
+    When ``use_cuda_graph`` is True and the step is graph-eligible (no bubbles,
+    film drain, or κ path), Warp captures the GPU launch sequence. Python
+    buffer swaps stay outside the graph so ping-pong remains correct.
+    """
     del eps_phi, rho_liquid
     from wanphys._src.fluid.fluid_grid.lbm.phases import vof_plic
     from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref import quant as home_quant
@@ -3152,182 +3160,226 @@ def step_home_vof_gpu(
         # Seed/upload left floats only — establish quant SoT once.
         home_quant.pack_moments_from_float(buf, dither=False)
 
-    if not bubble_pressure:
-        buf.gas_rho.fill_(float(rho_g0))
-
     use_disjoint = bool(bubble_disjoint) and bool(bubble_pressure)
     use_small = bool(bubble_small_sigma) and bool(bubble_pressure)
     use_eddy = bool(bubble_eddy) and bool(bubble_pressure)
+    use_q_in = 1 if (persistent and getattr(buf, "moment_quant_ready", False)) else 0
 
-    if use_disjoint:
-        wp.launch(
-            bubble_calculate_disjoint_kernel,
-            dim=dim,
-            inputs=[
-                buf.cell_type, buf.phi, buf.bubble_tag, buf.disjoin_force,
-                nx, ny, nz,
-            ],
-            device=buf.device,
-        )
-    else:
-        buf.disjoin_force.zero_()
+    # Graph-eligible: fixed control flow, no Python κ ping-pong / host CCL.
+    graph_ok = (
+        bool(use_cuda_graph)
+        and not bool(bubble_pressure)
+        and not bool(wall_film_drain)
+        and g == 0.0
+        and not bool(use_disjoint)
+    )
 
-    if g != 0.0:
-        wp.launch(
-            vof_plic.vof_compute_kappa_kernel,
-            dim=dim,
-            inputs=[
-                buf.phi, buf.cell_type, buf.solid_phi, buf.kappa,
-                0, 0, 0, nx, ny, nz,
-            ],
-            device=buf.device,
-        )
-        for _ in range(max(int(kappa_smooth), 0)):
+    def _gpu_core() -> None:
+        if not bubble_pressure:
+            buf.gas_rho.fill_(float(rho_g0))
+
+        if use_disjoint:
             wp.launch(
-                vof_plic.vof_smooth_kappa_kernel,
+                bubble_calculate_disjoint_kernel,
                 dim=dim,
                 inputs=[
-                    buf.kappa, buf.cell_type, buf.solid_phi, buf.kappa_tmp,
+                    buf.cell_type, buf.phi, buf.bubble_tag, buf.disjoin_force,
+                    nx, ny, nz,
+                ],
+                device=buf.device,
+            )
+        else:
+            buf.disjoin_force.zero_()
+
+        if g != 0.0:
+            wp.launch(
+                vof_plic.vof_compute_kappa_kernel,
+                dim=dim,
+                inputs=[
+                    buf.phi, buf.cell_type, buf.solid_phi, buf.kappa,
                     0, 0, 0, nx, ny, nz,
                 ],
                 device=buf.device,
             )
-            buf.kappa, buf.kappa_tmp = buf.kappa_tmp, buf.kappa
-        if float(wall_wetting) != 0.0:
+            for _ in range(max(int(kappa_smooth), 0)):
+                wp.launch(
+                    vof_plic.vof_smooth_kappa_kernel,
+                    dim=dim,
+                    inputs=[
+                        buf.kappa, buf.cell_type, buf.solid_phi, buf.kappa_tmp,
+                        0, 0, 0, nx, ny, nz,
+                    ],
+                    device=buf.device,
+                )
+                buf.kappa, buf.kappa_tmp = buf.kappa_tmp, buf.kappa
+            if float(wall_wetting) != 0.0:
+                wp.launch(
+                    home_vof_wall_wetting_kappa_kernel,
+                    dim=dim,
+                    inputs=[
+                        buf.kappa, buf.cell_type, float(wall_wetting), nx, ny, nz,
+                    ],
+                    device=buf.device,
+                )
+        else:
+            buf.kappa.zero_()
+
+        wp.launch(
+            home_vof_fused_kernel,
+            dim=dim,
+            inputs=[
+                buf.rho, buf.ux, buf.uy, buf.uz,
+                buf.sxx, buf.syy, buf.szz, buf.sxy, buf.sxz, buf.syz,
+                buf.mass, buf.massex, buf.phi, buf.cell_type,
+                buf.solid_phi, buf.solid_ux, buf.solid_uy, buf.solid_uz,
+                buf.rho_b, buf.ux_b, buf.uy_b, buf.uz_b,
+                buf.sxx_b, buf.syy_b, buf.szz_b, buf.sxy_b, buf.sxz_b, buf.syz_b,
+                buf.mass_b, buf.cell_tmp,
+                buf.cx, buf.cy, buf.cz, buf.w, buf.opp,
+                buf.face_kind, buf.face_ux, buf.face_uy, buf.face_uz,
+                buf.kappa, buf.gas_rho,
+                buf.disjoin_force, buf.bubble_tag, buf.bubble_volume_gpu,
+                g,
+                1 if use_disjoint else 0,
+                float(bubble_disjoint_factor),
+                1 if use_small else 0,
+                float(bubble_small_vol),
+                float(bubble_small_six_sigma),
+                1 if use_eddy else 0,
+                float(bubble_eddy_atm_vol),
+                MAX_BUBBLES,
+                buf.num_dirs, float(tau), float(fx), float(fy), float(fz),
+                1 if home_fill_empty else 0,
+                1 if home_wall_eq else 0,
+                use_q_in,
+                buf.moment_q,
+                float(home_quant.RHO_MIN),
+                float(home_quant.RHO_MAX),
+                float(home_quant.U_MIN),
+                float(home_quant.U_MAX),
+                float(home_quant.SNEQ_MIN),
+                float(home_quant.SNEQ_MAX),
+                nx, ny, nz,
+            ],
+            device=buf.device,
+        )
+        # Surfaces / mask on fused *outputs* (no Python swap yet — graph-safe).
+        flags = buf.cell_tmp
+        rho_n, ux_n, uy_n, uz_n = buf.rho_b, buf.ux_b, buf.uy_b, buf.uz_b
+        sxx_n, syy_n, szz_n = buf.sxx_b, buf.syy_b, buf.szz_b
+        sxy_n, sxz_n, syz_n = buf.sxy_b, buf.sxz_b, buf.syz_b
+        mass_n = buf.mass_b
+
+        wp.launch(
+            home_vof_surface1_kernel,
+            dim=dim,
+            inputs=[flags, nx, ny, nz],
+            device=buf.device,
+        )
+        wp.launch(
+            home_vof_surface2_kernel,
+            dim=dim,
+            inputs=[
+                flags,
+                rho_n, ux_n, uy_n, uz_n,
+                sxx_n, syy_n, szz_n, sxy_n, sxz_n, syz_n,
+                mass_n, nx, ny, nz,
+            ],
+            device=buf.device,
+        )
+        buf.massex.zero_()
+        if bubble_pressure:
+            buf.bubble_split_flag.zero_()
+        wp.launch(
+            home_vof_surface3_kernel,
+            dim=dim,
+            inputs=[
+                flags, buf.cell_type,
+                rho_n, mass_n, buf.massex, buf.phi,
+                buf.delta_phi,
+                1 if bubble_pressure else 0,
+                buf.bubble_split_flag,
+                1 if bubble_pressure else 0,
+                nx, ny, nz,
+            ],
+            device=buf.device,
+        )
+        if seal_fg:
             wp.launch(
-                home_vof_wall_wetting_kappa_kernel,
+                home_vof_seal_fg_kernel,
                 dim=dim,
                 inputs=[
-                    buf.kappa, buf.cell_type, float(wall_wetting), nx, ny, nz,
+                    buf.cell_type, rho_n, mass_n, buf.phi,
+                    buf.delta_phi, 1 if bubble_pressure else 0,
+                    nx, ny, nz,
                 ],
                 device=buf.device,
             )
+        if wall_film_drain:
+            wp.launch(
+                home_vof_wall_film_drain_kernel,
+                dim=dim,
+                inputs=[
+                    buf.cell_type, rho_n, mass_n, buf.massex, buf.phi,
+                    ux_n, uy_n, uz_n,
+                    float(wall_film_phi_max), float(wall_film_u_max),
+                    1 if wall_film_edge_only else 0,
+                    nx, ny, nz,
+                ],
+                device=buf.device,
+            )
+            wp.launch(
+                home_vof_salvage_mass_on_gas_kernel,
+                dim=dim,
+                inputs=[buf.cell_type, rho_n, mass_n, buf.phi],
+                device=buf.device,
+            )
+
+        wp.launch(
+            home_vof_apply_solid_mask_kernel,
+            dim=dim,
+            inputs=[
+                buf.solid_phi,
+                rho_n, ux_n, uy_n, uz_n,
+                sxx_n, syy_n, szz_n, sxy_n, sxz_n, syz_n,
+                mass_n, buf.phi, buf.cell_type,
+            ],
+            device=buf.device,
+        )
+
+    if graph_ok:
+        key = (
+            int(buf.rho.ptr),
+            int(buf.rho_b.ptr),
+            int(buf.mass.ptr),
+            int(buf.mass_b.ptr),
+            int(buf.cell_tmp.ptr),
+            int(seal_fg),
+            int(home_wall_eq),
+            int(home_fill_empty),
+            int(use_q_in),
+            float(tau),
+            float(fx),
+            float(fy),
+            float(fz),
+            float(rho_g0),
+        )
+        graphs = getattr(buf, "_step_cuda_graphs", None)
+        if graphs is None:
+            graphs = {}
+            buf._step_cuda_graphs = graphs
+        if key not in graphs:
+            wp.synchronize_device(buf.device)
+            with wp.ScopedCapture(device=buf.device) as capture:
+                _gpu_core()
+            graphs[key] = capture.graph
+        wp.capture_launch(graphs[key])
     else:
-        buf.kappa.zero_()
+        _gpu_core()
 
-    use_q_in = 1 if (persistent and getattr(buf, "moment_quant_ready", False)) else 0
-    wp.launch(
-        home_vof_fused_kernel,
-        dim=dim,
-        inputs=[
-            buf.rho, buf.ux, buf.uy, buf.uz,
-            buf.sxx, buf.syy, buf.szz, buf.sxy, buf.sxz, buf.syz,
-            buf.mass, buf.massex, buf.phi, buf.cell_type,
-            buf.solid_phi, buf.solid_ux, buf.solid_uy, buf.solid_uz,
-            buf.rho_b, buf.ux_b, buf.uy_b, buf.uz_b,
-            buf.sxx_b, buf.syy_b, buf.szz_b, buf.sxy_b, buf.sxz_b, buf.syz_b,
-            buf.mass_b, buf.cell_tmp,
-            buf.cx, buf.cy, buf.cz, buf.w, buf.opp,
-            buf.face_kind, buf.face_ux, buf.face_uy, buf.face_uz,
-            buf.kappa, buf.gas_rho,
-            buf.disjoin_force, buf.bubble_tag, buf.bubble_volume_gpu,
-            g,
-            1 if use_disjoint else 0,
-            float(bubble_disjoint_factor),
-            1 if use_small else 0,
-            float(bubble_small_vol),
-            float(bubble_small_six_sigma),
-            1 if use_eddy else 0,
-            float(bubble_eddy_atm_vol),
-            MAX_BUBBLES,
-            buf.num_dirs, float(tau), float(fx), float(fy), float(fz),
-            1 if home_fill_empty else 0,
-            1 if home_wall_eq else 0,
-            use_q_in,
-            buf.moment_q,
-            float(home_quant.RHO_MIN),
-            float(home_quant.RHO_MAX),
-            float(home_quant.U_MIN),
-            float(home_quant.U_MAX),
-            float(home_quant.SNEQ_MIN),
-            float(home_quant.SNEQ_MAX),
-            nx, ny, nz,
-        ],
-        device=buf.device,
-    )
+    # Promote fused outputs to primary (outside graph).
     buf.swap_moment_buffers()
-    # Fused wrote flags into cell_tmp; swap so surface* mutate that buffer as cell_tmp2
-    # (pointer ping-pong — no N³ int32 copy).
     buf.swap_cell_tmp_buffers()
-    wp.launch(
-        home_vof_surface1_kernel,
-        dim=dim,
-        inputs=[buf.cell_tmp2, nx, ny, nz],
-        device=buf.device,
-    )
-    wp.launch(
-        home_vof_surface2_kernel,
-        dim=dim,
-        inputs=[
-            buf.cell_tmp2,
-            buf.rho, buf.ux, buf.uy, buf.uz,
-            buf.sxx, buf.syy, buf.szz, buf.sxy, buf.sxz, buf.syz,
-            buf.mass, nx, ny, nz,
-        ],
-        device=buf.device,
-    )
-    buf.massex.zero_()
-    # Split flag cleared each step; surface3 may set it (Home report_split).
-    if bubble_pressure:
-        buf.bubble_split_flag.zero_()
-    wp.launch(
-        home_vof_surface3_kernel,
-        dim=dim,
-        inputs=[
-            buf.cell_tmp2, buf.cell_type,
-            buf.rho, buf.mass, buf.massex, buf.phi,
-            buf.delta_phi,
-            1 if bubble_pressure else 0,
-            buf.bubble_split_flag,
-            1 if bubble_pressure else 0,
-            nx, ny, nz,
-        ],
-        device=buf.device,
-    )
-    if seal_fg:
-        wp.launch(
-            home_vof_seal_fg_kernel,
-            dim=dim,
-            inputs=[
-                buf.cell_type, buf.rho, buf.mass, buf.phi,
-                buf.delta_phi, 1 if bubble_pressure else 0,
-                nx, ny, nz,
-            ],
-            device=buf.device,
-        )
-    # Optional rim-film drain via massex (surface3 inventory path) + salvage.
-    if wall_film_drain:
-        wp.launch(
-            home_vof_wall_film_drain_kernel,
-            dim=dim,
-            inputs=[
-                buf.cell_type, buf.rho, buf.mass, buf.massex, buf.phi,
-                buf.ux, buf.uy, buf.uz,
-                float(wall_film_phi_max), float(wall_film_u_max),
-                1 if wall_film_edge_only else 0,
-                nx, ny, nz,
-            ],
-            device=buf.device,
-        )
-        wp.launch(
-            home_vof_salvage_mass_on_gas_kernel,
-            dim=dim,
-            inputs=[buf.cell_type, buf.rho, buf.mass, buf.phi],
-            device=buf.device,
-        )
-
-    # Keep rasterized solids empty after surface topology (Home TYPE_S).
-    wp.launch(
-        home_vof_apply_solid_mask_kernel,
-        dim=dim,
-        inputs=[
-            buf.solid_phi,
-            buf.rho, buf.ux, buf.uy, buf.uz,
-            buf.sxx, buf.syy, buf.szz, buf.sxy, buf.sxz, buf.syz,
-            buf.mass, buf.phi, buf.cell_type,
-        ],
-        device=buf.device,
-    )
 
     if bubble_pressure:
         every = max(1, int(bubble_update_every))

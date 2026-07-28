@@ -184,10 +184,11 @@ def apply_guo_force_q_kernel(
     nz: int,
     stride: int,
 ) -> None:
-    """Guo body force: ``Δf = (1 - ω/2) · 3 · w · (c · F)``."""
+    """Post-stream body force with ``Σ c Δf = F`` (see ``apply_guo_force_kernel``)."""
     i, j, k = wp.tid()
     idx = i * ny * nz + j * nz + k
-    factor = (1.0 - omega * 0.5) * 3.0
+    _ = omega
+    factor = 3.0
     for d in range(num_dirs):
         cx = float(cx_arr[d])
         cy = float(cy_arr[d])

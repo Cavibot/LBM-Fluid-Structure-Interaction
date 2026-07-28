@@ -1,23 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU empirical sphere buoyancy / drag — **showcase-only**, not core FSI.
+"""Opt-in φ-volume Archimedes buoyancy (example / plugin path).
 
-**Not** part of the default HOME-FREE VOF step or ``GridLbmRigidCoupling``
-(ME) path. Examples opt in via
-``wanphys.examples.lbm._home_vof_empirical_sphere_fsi`` behind
-``--showcase-fsi`` / ``--empirical-fsi``. Do not call from coupling / bridge.
+Integrates liquid φ over a spherical shell just outside the rigid SDF (interior
+cells are gas-masked).  Force is buoyancy-only by default (no push / drag).
 
-Samples fluid on device from ``body_q`` / macros and writes forces into a
-persistent ``spatial_vector`` buffer for ``RigidState.apply_body_forces``.
-Hot path avoids host sync; optional ``sync_submerged`` pulls scalars for logs.
-
-Near the free surface, raw shell wet counts chatter (wet/dry sample flips).
-Forces use an EMA-smoothed submerged fraction so spheres do not bob and dig
-meniscus pits that ``height_eq`` intentionally leaves alone (α→0 near rigid).
+Not part of the default HOME-FREE step or ``GridLbmRigidCoupling``.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import warp as wp
@@ -25,14 +19,30 @@ import warp as wp
 CELL_GAS: int = 0
 
 
+def fibonacci_shell_offsets(
+    n: int = 48,
+    *,
+    radii: tuple[float, ...] = (1.05, 1.15),
+) -> tuple[tuple[float, float, float], ...]:
+    """Unit-sphere Fibonacci directions scaled by each radius in ``radii``."""
+    out: list[tuple[float, float, float]] = []
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    for radius in radii:
+        for i in range(max(1, int(n))):
+            y = 1.0 - (2.0 * i + 1.0) / float(n)
+            r_xy = math.sqrt(max(0.0, 1.0 - y * y))
+            theta = golden * float(i)
+            x = math.cos(theta) * r_xy
+            z = math.sin(theta) * r_xy
+            out.append((radius * x, radius * y, radius * z))
+    return tuple(out)
+
+
 @wp.kernel
-def sample_spheres_shell_wet_kernel(
+def sample_phi_shell_volume_kernel(
     phi: wp.array3d(dtype=float),
     cell: wp.array3d(dtype=wp.int32),
     solid: wp.array3d(dtype=float),
-    ux: wp.array3d(dtype=float),
-    uy: wp.array3d(dtype=float),
-    uz: wp.array3d(dtype=float),
     offsets: wp.array(dtype=wp.vec3),
     body_q: wp.array(dtype=wp.transform),
     body_ids: wp.array(dtype=wp.int32),
@@ -42,11 +52,8 @@ def sample_spheres_shell_wet_kernel(
     ny: int,
     nz: int,
     phi_wet: float,
-    out_water: wp.array(dtype=wp.int32),
+    out_phi_sum: wp.array(dtype=float),
     out_valid: wp.array(dtype=wp.int32),
-    out_vx: wp.array(dtype=float),
-    out_vy: wp.array(dtype=float),
-    out_vz: wp.array(dtype=float),
 ) -> None:
     sid, bid = wp.tid()
     body = int(body_ids[bid])
@@ -75,32 +82,20 @@ def sample_spheres_shell_wet_kernel(
     wp.atomic_add(out_valid, bid, 1)
     if int(cell[i, j, k]) == CELL_GAS:
         return
-    if phi[i, j, k] <= phi_wet:
+    p = phi[i, j, k]
+    if p <= phi_wet:
         return
-    wp.atomic_add(out_water, bid, 1)
-    wp.atomic_add(out_vx, bid, ux[i, j, k])
-    wp.atomic_add(out_vy, bid, uy[i, j, k])
-    wp.atomic_add(out_vz, bid, uz[i, j, k])
+    wp.atomic_add(out_phi_sum, bid, p)
 
 
 @wp.kernel
-def assemble_sphere_buoyancy_forces_kernel(
-    water: wp.array(dtype=wp.int32),
+def assemble_phi_volume_buoyancy_kernel(
+    phi_sum: wp.array(dtype=float),
     valid: wp.array(dtype=wp.int32),
-    vx: wp.array(dtype=float),
-    vy: wp.array(dtype=float),
-    vz: wp.array(dtype=float),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    body_ids: wp.array(dtype=wp.int32),
-    density: wp.array(dtype=float),
     volume: float,
     rho_liquid: float,
     gravity_abs: float,
     buoyancy_scale: float,
-    push_rate: float,
-    drag_xy: float,
-    drag_z: float,
-    vel_scale: float,
     sub_ema: wp.array(dtype=float),
     ema_alpha: float,
     dsub_cap: float,
@@ -108,12 +103,14 @@ def assemble_sphere_buoyancy_forces_kernel(
     out_submerged: wp.array(dtype=float),
 ) -> None:
     bid = wp.tid()
-    body = int(body_ids[bid])
     n_valid = int(valid[bid])
-    n_water = int(water[bid])
     submerged_raw = float(0.0)
     if n_valid > 0:
-        submerged_raw = float(n_water) / float(n_valid)
+        submerged_raw = phi_sum[bid] / float(n_valid)
+        if submerged_raw > 1.0:
+            submerged_raw = 1.0
+        if submerged_raw < 0.0:
+            submerged_raw = 0.0
 
     prev = sub_ema[bid]
     submerged = submerged_raw
@@ -121,52 +118,27 @@ def assemble_sphere_buoyancy_forces_kernel(
         blended = (1.0 - ema_alpha) * prev + ema_alpha * submerged_raw
         dsub = blended - prev
         if dsub > dsub_cap:
-            dsub = dsub_cap
-        if dsub < -dsub_cap:
-            dsub = -dsub_cap
-        submerged = prev + dsub
+            blended = prev + dsub_cap
+        elif dsub < -dsub_cap:
+            blended = prev - dsub_cap
+        submerged = blended
     sub_ema[bid] = submerged
     out_submerged[bid] = submerged
 
-    qd = body_qd[body]
-    bv_x = qd[0]
-    bv_y = qd[1]
-    bv_z = qd[2]
-
-    fv_x = float(0.0)
-    fv_y = float(0.0)
-    fv_z = float(0.0)
-    if n_water > 0:
-        inv_w = 1.0 / float(n_water)
-        fv_x = vx[bid] * inv_w * vel_scale
-        fv_y = vy[bid] * inv_w * vel_scale
-        fv_z = vz[bid] * inv_w * vel_scale
-
-    mass = density[bid] * volume
-    buoyancy_z = buoyancy_scale * rho_liquid * volume * gravity_abs * submerged
-    push = push_rate * mass * submerged
-    fx = push * (fv_x - bv_x) - drag_xy * mass * submerged * bv_x
-    fy = push * (fv_y - bv_y) - drag_xy * mass * submerged * bv_y
-    fz = (
-        buoyancy_z
-        + 0.35 * push * (fv_z - bv_z)
-        - drag_z * mass * submerged * bv_z
-    )
+    fz = buoyancy_scale * submerged * rho_liquid * volume * gravity_abs
     out_forces[bid] = wp.spatial_vector(
-        wp.vec3(fx, fy, fz),
+        wp.vec3(0.0, 0.0, fz),
         wp.vec3(0.0, 0.0, 0.0),
     )
 
 
-def ensure_buoyancy_scratch(
+def ensure_phi_volume_scratch(
     *,
     device: wp.context.Device | str,
     offsets_xyz: tuple[tuple[float, float, float], ...],
     body_ids: tuple[int, ...],
-    densities: tuple[float, ...],
     scratch: dict | None,
 ) -> dict:
-    """Allocate / reuse persistent GPU buffers for multi-sphere buoyancy."""
     n_bodies = len(body_ids)
     if (
         scratch is not None
@@ -183,29 +155,20 @@ def ensure_buoyancy_scratch(
         "body_ids_host": tuple(int(b) for b in body_ids),
         "offsets": wp.array(vecs, dtype=wp.vec3, device=device),
         "body_ids": wp.array([int(b) for b in body_ids], dtype=wp.int32, device=device),
-        "density": wp.array([float(d) for d in densities], dtype=float, device=device),
-        "water": wp.zeros(n_bodies, dtype=wp.int32, device=device),
+        "phi_sum": wp.zeros(n_bodies, dtype=float, device=device),
         "valid": wp.zeros(n_bodies, dtype=wp.int32, device=device),
-        "vx": wp.zeros(n_bodies, dtype=float, device=device),
-        "vy": wp.zeros(n_bodies, dtype=float, device=device),
-        "vz": wp.zeros(n_bodies, dtype=float, device=device),
         "forces": wp.zeros(n_bodies, dtype=wp.spatial_vector, device=device),
         "submerged": wp.zeros(n_bodies, dtype=float, device=device),
-        # -1 = uninitialized; assemble seeds from first raw sample.
         "sub_ema": wp.full(n_bodies, -1.0, dtype=float, device=device),
     }
 
 
-def apply_sphere_buoyancy_forces_gpu(
+def apply_phi_volume_buoyancy_gpu(
     *,
     phi: wp.array,
     cell: wp.array,
     solid: wp.array,
-    ux: wp.array,
-    uy: wp.array,
-    uz: wp.array,
     body_q: wp.array,
-    body_qd: wp.array,
     body_f_apply,
     radius: float,
     dh: float,
@@ -216,35 +179,25 @@ def apply_sphere_buoyancy_forces_gpu(
     volume: float,
     rho_liquid: float,
     gravity_abs: float,
-    buoyancy_scale: float,
-    push_rate: float,
-    drag_xy: float,
-    drag_z: float,
-    vel_scale: float,
-    phi_wet: float = 0.25,
-    ema_alpha: float = 0.12,
-    dsub_cap: float = 0.06,
+    buoyancy_scale: float = 1.0,
+    phi_wet: float = 0.05,
+    ema_alpha: float = 0.08,
+    dsub_cap: float = 0.04,
     sync_submerged: bool = False,
 ) -> dict[int, float]:
-    """Sample shells + assemble forces on GPU; optionally sync submerged fractions."""
+    """Sample φ on a dense shell and apply Archimedes force (no push/drag)."""
     n_off = int(scratch["n_off"])
     n_bodies = int(scratch["n_bodies"])
-    scratch["water"].zero_()
+    scratch["phi_sum"].zero_()
     scratch["valid"].zero_()
-    scratch["vx"].zero_()
-    scratch["vy"].zero_()
-    scratch["vz"].zero_()
 
     wp.launch(
-        sample_spheres_shell_wet_kernel,
+        sample_phi_shell_volume_kernel,
         dim=(n_off, n_bodies),
         inputs=[
             phi,
             cell,
             solid,
-            ux,
-            uy,
-            uz,
             scratch["offsets"],
             body_q,
             scratch["body_ids"],
@@ -254,36 +207,23 @@ def apply_sphere_buoyancy_forces_gpu(
             int(ny),
             int(nz),
             float(phi_wet),
-            scratch["water"],
+            scratch["phi_sum"],
             scratch["valid"],
-            scratch["vx"],
-            scratch["vy"],
-            scratch["vz"],
         ],
     )
     wp.launch(
-        assemble_sphere_buoyancy_forces_kernel,
+        assemble_phi_volume_buoyancy_kernel,
         dim=n_bodies,
         inputs=[
-            scratch["water"],
+            scratch["phi_sum"],
             scratch["valid"],
-            scratch["vx"],
-            scratch["vy"],
-            scratch["vz"],
-            body_qd,
-            scratch["body_ids"],
-            scratch["density"],
             float(volume),
             float(rho_liquid),
             float(gravity_abs),
             float(buoyancy_scale),
-            float(push_rate),
-            float(drag_xy),
-            float(drag_z),
-            float(vel_scale),
             scratch["sub_ema"],
-            float(np.clip(ema_alpha, 0.01, 1.0)),
-            float(max(dsub_cap, 1.0e-4)),
+            float(ema_alpha),
+            float(dsub_cap),
             scratch["forces"],
             scratch["submerged"],
         ],
@@ -293,5 +233,5 @@ def apply_sphere_buoyancy_forces_gpu(
     if not sync_submerged:
         return {}
     sub = scratch["submerged"].numpy()
-    ids = scratch["body_ids_host"]
+    ids = scratch["body_ids"].numpy()
     return {int(ids[i]): float(sub[i]) for i in range(n_bodies)}

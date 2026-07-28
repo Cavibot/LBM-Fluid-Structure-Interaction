@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Correctness tests: HOME-FREE VOF liquid mass / momentum conservation.
+"""Correctness tests: HOME-FREE VOF liquid mass / momentum / KE diagnostics.
 
 Inventory definitions (HOME-FREE / Körner)::
 
@@ -9,10 +9,11 @@ Inventory definitions (HOME-FREE / Körner)::
                   (liquid: mass ≈ ρ; interface: mass = φ ρ)
     water_vol   = Σ φ           over fluid cells (volume-fraction proxy)
     momentum    = Σ mass · u    over fluid cells (mass-weighted)
+    KE          = ½ Σ mass |u|² over fluid cells (lattice units)
 
 Closed walls + no film drain: water_mass should stay nearly constant.
-Momentum is *not* conserved against walls or body force; those cases only
-check rest-state or force-free periodic bounds.
+Momentum / mechanical energy are *not* conserved against walls or body force;
+those cases check rest-state quiescence, mass hold under gravity, and bounded KE.
 """
 
 from __future__ import annotations
@@ -53,6 +54,8 @@ class _Conserved:
     px: float
     py: float
     pz: float
+    ke: float
+    u_max: float
     n_liquid: int
     n_interface: int
 
@@ -81,11 +84,17 @@ def _inventory_host(
         fluid = fluid & (solid >= 0.0)
     m = mass.astype(np.float64)
     mask = fluid
+    ux64 = ux.astype(np.float64)
+    uy64 = uy.astype(np.float64)
+    uz64 = uz.astype(np.float64)
     wmass = float(m[mask].sum())
     wvol = float(phi.astype(np.float64)[mask].sum())
-    px = float((m * ux.astype(np.float64))[mask].sum())
-    py = float((m * uy.astype(np.float64))[mask].sum())
-    pz = float((m * uz.astype(np.float64))[mask].sum())
+    px = float((m * ux64)[mask].sum())
+    py = float((m * uy64)[mask].sum())
+    pz = float((m * uz64)[mask].sum())
+    speed2 = ux64 * ux64 + uy64 * uy64 + uz64 * uz64
+    ke = 0.5 * float((m * speed2)[mask].sum())
+    u_max = float(np.sqrt(speed2[mask]).max()) if np.any(mask) else 0.0
     if solid is not None:
         liq = (cell == CELL_LIQUID) & (solid >= 0.0)
         itf = (cell == CELL_INTERFACE) & (solid >= 0.0)
@@ -98,6 +107,8 @@ def _inventory_host(
         px=px,
         py=py,
         pz=pz,
+        ke=ke,
+        u_max=u_max,
         n_liquid=int(liq.sum()),
         n_interface=int(itf.sum()),
     )
@@ -243,6 +254,77 @@ class TestHomeVofMassNumpy(unittest.TestCase):
         self.assertLess(float(np.mean(out.moments.uz[wet])), 0.05)
 
 
+class TestHomeVofPureDamBreakMomentumEnergy(unittest.TestCase):
+    """Pure dam-break (no rigid): mass + momentum / KE diagnostics.
+
+    Closed walls + gravity ⇒ total momentum / mechanical energy are **not**
+    conserved. We check water-mass inventory, LBM stability (|u|), and that
+    KE / |P| stay finite (gravity injects downward momentum early).
+    """
+
+    def test_dambreak_no_gravity_mass_and_quiescent_ke(self) -> None:
+        """Rest seed + no body force: mass holds; KE and |P| stay tiny."""
+        buf = _make_gpu_dambreak(32)
+        inv0 = _inventory_gpu(buf)
+        _step_gpu(buf, steps=80, fz=0.0, tau=0.55)
+        inv1 = _inventory_gpu(buf)
+        self.assertLess(
+            _rel_err(inv1.water_mass, inv0.water_mass),
+            0.025,
+            msg=f"mass {inv0.water_mass:.6g} → {inv1.water_mass:.6g}",
+        )
+        scale = max(inv1.water_mass, 1.0)
+        self.assertLess(abs(inv1.px) / scale, 8.0e-3)
+        self.assertLess(abs(inv1.py) / scale, 8.0e-3)
+        self.assertLess(abs(inv1.pz) / scale, 8.0e-3)
+        self.assertLess(inv1.ke / scale, 1.0e-4)
+        self.assertLess(inv1.u_max, 0.05)
+
+    def test_dambreak_with_gravity_mass_momentum_ke(self) -> None:
+        """Classic column collapse: mass ≈ conserved; KE peaks; |u| stable."""
+        buf = _make_gpu_dambreak(32)
+        inv0 = _inventory_gpu(buf)
+        self.assertGreater(inv0.water_mass, 50.0)
+        self.assertLess(inv0.ke, 1.0)  # seeded at rest
+
+        ke_peak = inv0.ke
+        p_abs_peak = abs(inv0.px) + abs(inv0.py) + abs(inv0.pz)
+        pz_min = inv0.pz
+        for chunk in range(8):
+            _step_gpu(buf, steps=20, fz=-0.0004, tau=0.55, gamma=0.0)
+            inv = _inventory_gpu(buf)
+            self.assertTrue(np.isfinite(inv.ke))
+            self.assertTrue(np.isfinite(inv.px + inv.py + inv.pz))
+            self.assertLess(inv.u_max, 0.40, msg=f"chunk={chunk} u_max={inv.u_max}")
+            ke_peak = max(ke_peak, inv.ke)
+            p_abs_peak = max(p_abs_peak, abs(inv.px) + abs(inv.py) + abs(inv.pz))
+            pz_min = min(pz_min, inv.pz)
+
+        inv1 = _inventory_gpu(buf)
+        self.assertLess(
+            _rel_err(inv1.water_mass, inv0.water_mass),
+            0.04,
+            msg=f"mass {inv0.water_mass:.6g} → {inv1.water_mass:.6g}",
+        )
+        # Gravity / collapse should produce motion and downward momentum.
+        self.assertGreater(ke_peak, inv0.ke + 1.0e-3)
+        self.assertLess(pz_min, inv0.pz - 1.0e-2)
+        self.assertLess(ke_peak, 5.0e4)
+        self.assertLess(p_abs_peak, 5.0e3)
+        self.assertGreater(inv1.n_liquid + inv1.n_interface, 0)
+
+    def test_dambreak_gamma_mass_and_bounded_ke(self) -> None:
+        """Mild surface tension: still mass-stable and KE-bounded."""
+        buf = _make_gpu_dambreak(28)
+        inv0 = _inventory_gpu(buf)
+        _step_gpu(buf, steps=100, fz=-0.0003, tau=0.55, gamma=1.5e-3)
+        inv1 = _inventory_gpu(buf)
+        self.assertLess(_rel_err(inv1.water_mass, inv0.water_mass), 0.05)
+        self.assertLess(inv1.u_max, 0.40)
+        self.assertLess(inv1.ke, 5.0e4)
+        self.assertTrue(np.isfinite(inv1.ke))
+
+
 class TestHomeVofMassGpu(unittest.TestCase):
     """Production GPU fused path."""
 
@@ -376,6 +458,73 @@ class TestHomeVofFiniteNoNan(unittest.TestCase):
             self.assertTrue(np.isfinite(arr).all(), msg=name)
         inv = _inventory_gpu(buf)
         self.assertGreater(inv.water_mass, 1.0)
+
+
+class TestHomeVofGenericDefaults(unittest.TestCase):
+    """P0: heuristic flags stay off on the generic model factory."""
+
+    def test_make_home_vof_model_heuristics_off(self) -> None:
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.generic import (
+            make_home_vof_model,
+        )
+
+        model = make_home_vof_model(
+            fluid_grid_res=(8, 8, 8),
+            fluid_grid_cell_size=0.02,
+            gravity_z=-0.001,
+        )
+        self.assertEqual(model.lbm_backend, "home_fp32")
+        self.assertEqual(model.phase_mode, "vof_sharp")
+        self.assertFalse(model.vof_height_eq)
+        self.assertFalse(model.vof_wall_film_drain)
+        self.assertFalse(model.vof_quiet_fill)
+        self.assertFalse(model.vof_orphan_reabsorb)
+        self.assertFalse(model.vof_bubble_pressure)
+        self.assertFalse(model.vof_bubble_disjoint)
+        self.assertFalse(model.vof_home_fill_empty)
+        self.assertFalse(model.vof_home_wall_eq)
+        self.assertFalse(model.vof_home_moment_quant)
+
+    def test_lbm_model_orphan_default_off(self) -> None:
+        from wanphys._src.fluid.fluid_grid.lbm import LbmModel
+
+        model = LbmModel(
+            fluid_grid_res=(8, 8, 8),
+            fluid_grid_cell_size=0.02,
+            phase_mode="vof_sharp",
+            lbm_backend="home_fp32",
+            G=0.0,
+        )
+        self.assertFalse(model.vof_orphan_reabsorb)
+        self.assertFalse(model.vof_height_eq)
+        self.assertFalse(model.vof_wall_film_drain)
+        self.assertFalse(model.vof_bubble_pressure)
+
+
+class TestHomeVofSolidMaskInventory(unittest.TestCase):
+    """Static solid stamp: fluid inventory only outside solid_phi < 0."""
+
+    def test_static_solid_block_excluded_from_water_mass(self) -> None:
+        buf = _make_gpu_dambreak(20)
+        inv0 = _inventory_gpu(buf)
+        solid = buf.solid_phi.numpy().copy()
+        # Stamp a block of solid into the liquid column (x < dam).
+        solid[2:6, 2:8, 2:8] = -1.0
+        buf.solid_phi.assign(wp.array(solid, dtype=float, device=buf.device))
+        wp.synchronize_device(buf.device)
+        # One step applies solid_mask → gas inside solid.
+        _step_gpu(buf, steps=1, fz=0.0)
+        inv1 = _inventory_gpu(buf)
+        self.assertLess(inv1.water_mass, inv0.water_mass)
+        self.assertGreater(inv1.water_mass, 1.0)
+        # Further steps without moving solid: mass should hold (soft).
+        _step_gpu(buf, steps=25, fz=-0.0002)
+        inv2 = _inventory_gpu(buf)
+        self.assertLess(
+            _rel_err(inv2.water_mass, inv1.water_mass),
+            0.04,
+            msg=f"after mask {inv1.water_mass:.6g} → {inv2.water_mass:.6g}",
+        )
 
 
 if __name__ == "__main__":

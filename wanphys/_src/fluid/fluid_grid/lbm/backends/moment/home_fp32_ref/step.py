@@ -10,8 +10,9 @@ collide (HOME-FREE Eq. 18–21).
 H1: fully periodic ``step_periodic_*``.
 H2: ``step_domain_numpy`` with HOME Eq. 24 walls, solid mask, Zou–He faces.
 
-Numpy reference is the source of truth for unit tests; Warp kernel covers the
-periodic path. Not wired into ``LbmSolver`` yet.
+Numpy reference is the source of truth for unit tests; Warp covers the
+periodic path. Domain walls + Zou–He enter ``LbmSolver`` via
+``HomeFp32Bridge`` (``phase_mode='none'`` or free-surface branch).
 """
 
 from __future__ import annotations

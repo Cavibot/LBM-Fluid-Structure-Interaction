@@ -3,7 +3,7 @@
 > 文档版本：2026-07-20  
 > 适用范围：`wanphys` `lbm_backend='home_fp32'`（`home_fp32_ref`）  
 > 实现：`wanphys/_src/fluid/fluid_grid/lbm/backends/moment/home_fp32_ref/height_eq.py`  
-> 接线：`bridge.py` → `HomeFp32VofBridge.apply_height_equation`；`LbmModel.vof_height_eq*`  
+> 接线：`bridge.py` → `HomeFp32Bridge.apply_height_equation`；`LbmModel.vof_height_eq*`  
 > 算例：`wanphys/examples/lbm/fluid_grid_lbm_dambreak_vof.py --backend home --n 48 --height-eq`  
 > 相关文档：[近静置找平试验](lbm_home_vof_quiet_level_summary_zh.md)、[单格找平极限](lbm_home_fslbm_one_cell_limit_zh.md)
 

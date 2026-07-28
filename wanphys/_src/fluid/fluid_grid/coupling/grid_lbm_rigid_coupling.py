@@ -1,18 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""One-way rigid-to-fluid coupling for the D3Q19 LBM solver.
+"""Rigid↔LBM fluid coupling (SDF walls + fluid→rigid feedback).
 
-The rigid body SDF is rasterised into ``solid_phi`` and the body surface
-velocity is converted from world units to LBM lattice wall velocity before
-being stamped into ``vel_solid_u/v/w`` each step.  The LBM solver reads
-these fields to apply moving-wall bounce-back boundary conditions.
+Core path each substep: raster SDF + MAC wall velocity → HOME sync + moving
+walls (default Eq.24) → solid mask → fluid→rigid force via reconstructed-link
+momentum exchange (``LbmFeedbackMode.MOMENTUM_EXCHANGE``) → optional rigid step.
+
+Empirical buoyancy / push / drag plugins live in examples only and must not be
+wired into this coupling object.
 """
 
 from __future__ import annotations
 
 import math
 import warnings
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -27,22 +30,55 @@ if TYPE_CHECKING:
     from wanphys._src.rigid import RigidDomain, RigidState
 
 
+class LbmFeedbackMode(str, Enum):
+    """Fluid→rigid force policy for :class:`GridLbmRigidCoupling`.
+
+    Kept on the coupling object (not inside fused VOF kernels).
+    """
+
+    NONE = "none"
+    """No LBM→rigid force accumulation (raster / wall BC still run)."""
+
+    APPROX = "approx"
+    """Legacy / diagnostic: macro relative-normal face flux (not the physical main path)."""
+
+    MOMENTUM_EXCHANGE = "momentum_exchange"
+    """Core path: distribution ME when ``f`` exists; ``home_fp32`` reconstructed-link ME."""
+
+
+def recommended_me_force_scale(dh: float, dt: float) -> float:
+    """Lattice→world force scale for link / distribution momentum exchange.
+
+    ME kernels already multiply by cell volume ``dh³``. With reference density
+    ``ρ₀ = 1``, the remaining conversion from lattice momentum-per-step into
+    Newton-like force units used by ``RigidDomain`` is ``(dh / dt)²``.
+
+    Examples should prefer this helper over a magic constant; callers may still
+    override ``force_scale`` for calibration.
+    """
+    dh_f = max(float(dh), 1.0e-12)
+    dt_f = max(float(dt), 1.0e-12)
+    return (dh_f / dt_f) ** 2
+
+
 _SHAPE_MAP = {
     "sphere": ck._SHAPE_SPHERE,
     "box": ck._SHAPE_BOX,
     "capsule": ck._SHAPE_CAPSULE,
     "mesh": ck._SHAPE_MESH,
+    "cylinder": ck._SHAPE_CYLINDER,
 }
 
 
 class GridLbmRigidCoupling(CompositeSimulation):
-    """One-way rigid-to-LBM-fluid coupling.
+    """SDF raster + moving-wall LBM coupling with fluid→rigid ME feedback.
 
     Each timestep the rigid bodies are rasterised as an SDF into the
     LBM ``solid_phi`` field and world body surface velocities are converted
     to LBM lattice wall velocities before being embedded into
-    ``vel_solid_u/v/w``.  The LBM solver then applies moving-wall bounce-back
-    to enforce the no-slip condition at moving boundaries.
+    ``vel_solid_u/v/w``.  The LBM solver then applies moving-wall BCs.
+    When two-way feedback is enabled, the default policy accumulates
+    reconstructed-link (or distribution) momentum exchange into ``body_f``.
 
     Parameters
     ----------
@@ -56,6 +92,7 @@ class GridLbmRigidCoupling(CompositeSimulation):
     _BOX = "box"
     _CAPSULE = "capsule"
     _MESH = "mesh"
+    _CYLINDER = "cylinder"
 
     def __init__(
         self,
@@ -69,7 +106,7 @@ class GridLbmRigidCoupling(CompositeSimulation):
         self._advance_rigid = True
         self._two_way_feedback_enabled: bool = False
         self._feedback_force_scale: float = 1.0
-        self._feedback_mode: str = "approx"  # "approx" | "momentum_exchange"
+        self._feedback_mode: str = LbmFeedbackMode.MOMENTUM_EXCHANGE.value
         self._wall_velocity_warning_threshold: float = 0.125
         self._wall_velocity_warning_emitted: bool = False
         self._wall_velocity_warning_check_interval: int = 30
@@ -96,6 +133,7 @@ class GridLbmRigidCoupling(CompositeSimulation):
         self._repair_uncovered_density_floor: float = 1.0e-6
         self._repair_uncovered_density_ceiling: float = 10.0
         self._repair_uncovered_velocity_limit: float = 0.2
+        self._solid_narrowband_cells: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -155,6 +193,18 @@ class GridLbmRigidCoupling(CompositeSimulation):
         )
         self._body_params_dirty = True
 
+    def add_body_cylinder(self, body_idx: int, radius: float, half_height: float) -> None:
+        """Finite cylinder along body-local Z (flat caps → ``solid_phi``)."""
+        self._bodies.append(
+            {
+                "body_idx": body_idx,
+                "shape": self._CYLINDER,
+                "radius": float(radius),
+                "half_height": float(half_height),
+            }
+        )
+        self._body_params_dirty = True
+
     def set_rigid_dynamics_enabled(self, enabled: bool) -> None:
         self._advance_rigid = bool(enabled)
 
@@ -164,27 +214,43 @@ class GridLbmRigidCoupling(CompositeSimulation):
         self._wall_velocity_warning_emitted: bool = False
 
     def set_two_way_feedback_enabled(self, enabled: bool, force_scale: float = 1.0) -> None:
-        """Enable approximate LBM fluid-to-rigid feedback.
+        """Enable fluid→rigid force accumulation into ``rigid_state.body_f``.
 
-        The first two coupling phases are one-way by default.  When enabled,
-        a post-step boundary scan accumulates macro-velocity momentum feedback
-        into ``rigid_state.body_f`` before the optional rigid-body step.
+        Raster / wall BCs always run. When enabled, a post-step scan accumulates
+        forces according to :attr:`feedback_mode` (default
+        :attr:`LbmFeedbackMode.MOMENTUM_EXCHANGE`) before the optional rigid step.
+
+        Prefer :func:`recommended_me_force_scale` for ``force_scale`` on the ME path.
         """
         self._two_way_feedback_enabled: bool = bool(enabled)
         self._feedback_force_scale: float = float(force_scale)
 
-    def set_feedback_mode(self, mode: str) -> None:
-        """Set the feedback force computation mode.
+    def set_feedback_mode(self, mode: str | LbmFeedbackMode) -> None:
+        """Set fluid→rigid force policy (:class:`LbmFeedbackMode`).
 
-        Args:
-            mode: ``"approx"`` for macro-velocity approximation (legacy),
-                  ``"momentum_exchange"`` for strict distribution-based
-                  momentum-exchange (Ladd 1994).
+        ``none`` skips LBM force accumulation (raster + walls still run).
+        ``momentum_exchange`` (default) uses live ``f`` on dist backends, or
+        reconstructed-link ME on ``home_fp32``.
+        ``approx`` is legacy / diagnostic macro face flux only.
         """
-        if mode not in ("approx", "momentum_exchange"):
-            raise ValueError(f"Unsupported feedback_mode: {mode!r}. "
-                             f"Expected 'approx' or 'momentum_exchange'.")
-        self._feedback_mode: str = mode
+        if isinstance(mode, LbmFeedbackMode):
+            mode_s = mode.value
+        else:
+            mode_s = str(mode)
+        allowed = {m.value for m in LbmFeedbackMode}
+        if mode_s not in allowed:
+            raise ValueError(
+                f"Unsupported feedback_mode: {mode!r}. Expected one of {sorted(allowed)}."
+            )
+        self._feedback_mode = mode_s
+
+    @property
+    def feedback_mode(self) -> str:
+        return str(self._feedback_mode)
+
+    def set_solid_narrowband(self, cells: float = 4.0) -> None:
+        """Skip SDF eval far from bodies (``0`` disables; units = lattice cells)."""
+        self._solid_narrowband_cells = max(0.0, float(cells))
 
     def set_uncovered_cell_repair_enabled(
         self,
@@ -235,7 +301,7 @@ class GridLbmRigidCoupling(CompositeSimulation):
             hy: float = float(half_extents[1])
             hz: float = float(half_extents[2])
             return math.sqrt(hx * hx + hy * hy + hz * hz)
-        if shape == self._CAPSULE:
+        if shape == self._CAPSULE or shape == self._CYLINDER:
             radius: float = abs(float(entry.get("radius", 0.0)))
             half_height: float = abs(float(entry.get("half_height", 0.0)))
             return radius + half_height
@@ -323,8 +389,12 @@ class GridLbmRigidCoupling(CompositeSimulation):
                 box_half_extents.append(wp.vec3(h[0], h[1], h[2]))
             else:
                 box_half_extents.append(wp.vec3(0.0, 0.0, 0.0))
-            capsule_radius.append(entry.get("radius", 0.0) if s == self._CAPSULE else 0.0)
-            capsule_half_height.append(entry.get("half_height", 0.0) if s == self._CAPSULE else 0.0)
+            if s in (self._CAPSULE, self._CYLINDER):
+                capsule_radius.append(entry.get("radius", 0.0))
+                capsule_half_height.append(entry.get("half_height", 0.0))
+            else:
+                capsule_radius.append(0.0)
+                capsule_half_height.append(0.0)
             mesh_handle.append(wp.uint64(entry.get("mesh_id", 0)) if s == self._MESH else wp.uint64(0))
             mesh_scale.append(entry.get("scale", 1.0) if s == self._MESH else 1.0)
 
@@ -404,26 +474,51 @@ class GridLbmRigidCoupling(CompositeSimulation):
             fluid_state.vel_solid_v.zero_()
             fluid_state.vel_solid_w.zero_()
         else:
-            wp.launch(
-                ck.rasterize_all_body_sdf_warp,
-                dim=(nx, ny, nz),
-                inputs=[
-                    fluid_state.solid_phi,
-                    fluid_state.solid_body_id,
-                    dh,
-                    rigid_state.body_q,
-                    len(self._bodies),
-                    self._coupling_to_newton,
-                    self._body_shape_type,
-                    self._body_sphere_radius,
-                    self._body_box_half_extents,
-                    self._body_capsule_radius,
-                    self._body_capsule_half_height,
-                    self._body_mesh_handle,
-                    self._body_mesh_scale,
-                    self._body_mesh_max_dist,
-                ],
-            )
+            nb_cells = float(getattr(self, "_solid_narrowband_cells", 0.0))
+            if nb_cells > 0.0 and self._body_radius_bound is not None:
+                wp.launch(
+                    ck.rasterize_all_body_sdf_warp_narrowband,
+                    dim=(nx, ny, nz),
+                    inputs=[
+                        fluid_state.solid_phi,
+                        fluid_state.solid_body_id,
+                        dh,
+                        rigid_state.body_q,
+                        len(self._bodies),
+                        self._coupling_to_newton,
+                        self._body_shape_type,
+                        self._body_sphere_radius,
+                        self._body_box_half_extents,
+                        self._body_capsule_radius,
+                        self._body_capsule_half_height,
+                        self._body_mesh_handle,
+                        self._body_mesh_scale,
+                        self._body_mesh_max_dist,
+                        self._body_radius_bound,
+                        nb_cells * dh_float,
+                    ],
+                )
+            else:
+                wp.launch(
+                    ck.rasterize_all_body_sdf_warp,
+                    dim=(nx, ny, nz),
+                    inputs=[
+                        fluid_state.solid_phi,
+                        fluid_state.solid_body_id,
+                        dh,
+                        rigid_state.body_q,
+                        len(self._bodies),
+                        self._coupling_to_newton,
+                        self._body_shape_type,
+                        self._body_sphere_radius,
+                        self._body_box_half_extents,
+                        self._body_capsule_radius,
+                        self._body_capsule_half_height,
+                        self._body_mesh_handle,
+                        self._body_mesh_scale,
+                        self._body_mesh_max_dist,
+                    ],
+                )
 
             if repair_uncovered_cells and previous_solid_phi is not None:
                 stride: int = nx * ny * nz
@@ -482,6 +577,7 @@ class GridLbmRigidCoupling(CompositeSimulation):
         # 5. Optionally accumulate LBM fluid-to-rigid feedback.
         if (
             self._two_way_feedback_enabled
+            and self._feedback_mode != LbmFeedbackMode.NONE.value
             and self._body_shape_type is not None
             and len(self._bodies) > 0
             and rigid_state.body_f is not None
@@ -496,10 +592,29 @@ class GridLbmRigidCoupling(CompositeSimulation):
                     rigid_state.body_f.numpy(), dtype=np.float64
                 ).copy()
 
-            if self._feedback_mode == "momentum_exchange":
-                # HOME-FREE moment path zeros ``f``; fall back to macro feedback.
-                use_me = str(getattr(model, "lbm_backend", "dist")).lower() != "home_fp32"
-                if use_me:
+            if self._feedback_mode == LbmFeedbackMode.MOMENTUM_EXCHANGE.value:
+                backend = str(getattr(model, "lbm_backend", "dist")).lower()
+                if backend == "home_fp32":
+                    home = getattr(self._fluid_domain.solver, "_home_fp32", None)
+                    if home is not None and home.enabled:
+                        home.accumulate_reconstructed_link_me(
+                            solid_body_id=fluid_state_after.solid_body_id,
+                            body_q=rigid_state.body_q,
+                            body_com=rigid_backend.body_com,
+                            body_f=rigid_state.body_f,
+                            dh=dh,
+                            force_scale=self._feedback_force_scale,
+                        )
+                    else:
+                        if not getattr(self, "_home_fp32_me_missing_warned", False):
+                            warnings.warn(
+                                "home_fp32 reconstructed-link ME requested but "
+                                "HomeFp32Bridge is unavailable; skipping feedback.",
+                                RuntimeWarning,
+                                stacklevel=2,
+                            )
+                            self._home_fp32_me_missing_warned = True
+                else:
                     # Strict momentum-exchange: use f_post (after step) and f_pre (before step)
                     f_post_stream: wp.array = fluid_state_after.f  # _state_in.f after swap
                     f_pre_stream: wp.array = self._fluid_domain._state_out.f  # _state_out.f after swap
@@ -523,41 +638,8 @@ class GridLbmRigidCoupling(CompositeSimulation):
                             self._feedback_force_scale,
                         ],
                     )
-                else:
-                    if not getattr(self, "_home_fp32_feedback_fallback_warned", False):
-                        warnings.warn(
-                            "home_fp32 has no distribution ``f``; "
-                            "using approx macro-velocity LBM→rigid feedback "
-                            "instead of momentum_exchange.",
-                            RuntimeWarning,
-                            stacklevel=2,
-                        )
-                        self._home_fp32_feedback_fallback_warned = True
-                    wp.launch(
-                        ck.accumulate_lbm_boundary_feedback_all_bodies,
-                        dim=(nx, ny, nz),
-                        inputs=[
-                            fluid_state_after.density,
-                            fluid_state_after.velocity_x,
-                            fluid_state_after.velocity_y,
-                            fluid_state_after.velocity_z,
-                            fluid_state_after.solid_phi,
-                            fluid_state_after.solid_body_id,
-                            fluid_state_after.vel_solid_u,
-                            fluid_state_after.vel_solid_v,
-                            fluid_state_after.vel_solid_w,
-                            dh,
-                            nx,
-                            ny,
-                            nz,
-                            rigid_state.body_q,
-                            rigid_backend.body_com,
-                            rigid_state.body_f,
-                            self._feedback_force_scale,
-                        ],
-                    )
             else:
-                # Legacy macro-velocity approximation
+                # Legacy / diagnostic macro-velocity approximation (not the core path).
                 wp.launch(
                     ck.accumulate_lbm_boundary_feedback_all_bodies,
                     dim=(nx, ny, nz),

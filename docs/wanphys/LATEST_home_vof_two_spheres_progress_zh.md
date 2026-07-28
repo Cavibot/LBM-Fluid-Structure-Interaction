@@ -1,10 +1,10 @@
 # LATEST HOME-FREE VOF 双球：近期工作总结
 
-> 文档版本：2026-07-24  
+> 文档版本：2026-07-28  
 > 标记：`LATEST` — 当前主线进度快照（相对路线图 / 分专题文档）  
 > 适用范围：`lbm_backend='home_fp32'` + `phase_mode=vof_sharp` + 双球 FSI  
 > 主算例：`wanphys/examples/lbm/fluid_grid_lbm_dambreak_vof_two_spheres.py`  
-> 相关：[流固算法详解](lbm_home_vof_fsi_algorithm_zh.md)、[`height_eq` 总结](lbm_home_vof_height_eq_summary_zh.md)、[单格极限](lbm_home_fslbm_one_cell_limit_zh.md)、[路线图](lbm_home_roadmap_zh.md)、[模块文件](lbm_module_files_zh.md)
+> 相关：[流固算法详解](lbm_home_vof_fsi_algorithm_zh.md)（含 §12 OpenHOMELBM 对照）、[`height_eq` 总结](lbm_home_vof_height_eq_summary_zh.md)、[单格极限](lbm_home_fslbm_one_cell_limit_zh.md)、[路线图](lbm_home_roadmap_zh.md)、[模块文件](lbm_module_files_zh.md)
 
 本文汇总截至写作日在 **溃坝双球** 上的工程结论：液面整形、球–液耦合抖动、16-bit 矩量化持久存储、刚体碰撞开销，以及与 `公式修订版` 论文的对齐关系。
 
@@ -12,7 +12,7 @@
 
 ## 1. 当前主线一句话
 
-**HOME-FREE VOF（GPU fused）+ `solid_phi` 栅格 FSI + 可选 `--height-eq` + 可选 `--moment-quant`（混合精度持久矩）**；FPS 余量主要在 **流体步进** 与 **刚体 collide+XPBD**，不在论文式 8³ tile / 纯流体 50% 量化。
+**HOME-FREE VOF（GPU fused）+ `solid_phi` 栅格 FSI（默认 Eq.24 + 重构链路 ME）+ 可选 `--showcase-fsi` 经验插件 + 可选 `--height-eq` / `--moment-quant`**；FPS 余量主要在 **流体步进** 与 **刚体 collide+XPBD**。
 
 ---
 
@@ -160,6 +160,19 @@ S_{\alpha\beta}^{\mathrm{neq}} = S_{\alpha\beta} - u_\alpha u_\beta
 
 闭墙 + 无 film-drain：水质量应近似守恒。墙面 BB / 重力下动量**不**守恒——对应用例只查静池 \|P\| 或「有重力时质量仍保」。
 
+**小球 FSI（r=0.08）动量 / 动能：** `newton/tests/test_lbm_home_vof_sphere_momentum_energy.py`
+
+| 量 | 定义 |
+|----|------|
+| 水质量 / 流体动量 / KE_fluid | 同左，固体外；KE = ½ Σ mass\|u\|²（格子单位） |
+| KE_rigid | ½ m\|v\|² + ½ ω·I·ω（世界单位；与流体 KE **不可直接相加守恒**） |
+
+断言：静池静默、溃坝+approx/ME 质量≲8% 且 \|u\|_max/KE 有界、经验浮力仅查有限+质量。
+
+```bash
+uv run --extra examples python -m unittest newton.tests.test_lbm_home_vof_sphere_momentum_energy -v
+```
+
 | 类 | 断言要点 |
 |----|----------|
 | `TestHomeVofMassNumpy` | 参考步进：闭墙 ± 重力，质量相对漂移 ≲ 2–3% |
@@ -194,4 +207,9 @@ uv run --extra examples python -m unittest newton.tests.test_lbm_home_vof_conser
 - [x] 碰撞：可视 mesh 不再强制 `has_meshes`；剪墙–墙 pair  
 - [x] 剖面澄清：XPBD 在 GPU；collide 曾被算进「XPBD」桶  
 - [x] 水质量 / 动量正确性测试套件 + 文档入口  
+- [x] P0 通用性：`make_home_vof_model`、orphan 默认关、经验浮力算例插件、单球算例  
+- [x] P1：IC/BC 工厂、`add_body_cylinder`、`LbmFeedbackMode`、池+圆柱 smoke  
+- [x] P2：重构链路 ME、φ 体积浮力插件、SDF 窄带、`vof_home_cuda_graph`  
+- [x] L0：Martin–Moyce 床层浪头 + gate align + Re 标定 + `run_martin_moyce_compare`  
+- [x] FSI 默认切换：coupling 默认 ME + `recommended_me_force_scale`；双球/单球默认无经验；`--showcase-fsi` / `--empirical-fsi` 恢复观感插件  
 - [ ] 论文分裂固体核 / tile / 纯 50% quant（明确不在当前 VOF 双球主线）

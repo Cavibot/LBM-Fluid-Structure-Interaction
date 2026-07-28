@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Headless HOME-LBM fp32 lid-driven cavity smoke (H2).
+"""Headless HOME-LBM fp32 lid-driven cavity smoke.
 
 Uses moment-encoded reconstruct-stream + collide with HOME Eq. 24 moving
-top wall. Not wired into ``LbmSolver`` / viewer yet.
+top wall (numpy path). For solver integration use
+``make_home_model(phase_mode='none')`` + Zou–He lid BC.
 
 Run:
     uv run python -m wanphys.examples.lbm.fluid_grid_lbm_home_cavity

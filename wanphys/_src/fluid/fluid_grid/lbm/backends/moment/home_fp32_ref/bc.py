@@ -107,6 +107,70 @@ class HomeDomainBC:
             zmax=side_z,
         )
 
+    @staticmethod
+    def open_top(*, u_lid: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> HomeDomainBC:
+        """Closed side/bottom walls; soft Zou–He lid at ``zmax`` (atmosphere).
+
+        Useful for pools / pouring where the top should not bounce-back as a
+        hard wall. ``u_lid`` is the prescribed lid velocity (usually zero).
+        """
+        wall = HomeFaceBC(kind=HomeFaceKind.WALL)
+        lid = HomeFaceBC(
+            kind=HomeFaceKind.ZOU_HE,
+            ux=float(u_lid[0]),
+            uy=float(u_lid[1]),
+            uz=float(u_lid[2]),
+        )
+        return HomeDomainBC(
+            xmin=wall,
+            xmax=wall,
+            ymin=wall,
+            ymax=wall,
+            zmin=wall,
+            zmax=lid,
+        )
+
+
+def apply_home_domain_bc_to_model(model: object, domain_bc: HomeDomainBC) -> None:
+    """Write ``HomeDomainBC`` into ``LbmModel.bc_types`` / velocity / periodic.
+
+    Call before ``HomeFp32Bridge`` allocates GPU faces (or re-init bridge BC).
+    Mapping: WALL→bounce-back(0), ZOU_HE→velocity inlet(1), PERIODIC→3.
+    """
+    from wanphys._src.fluid.fluid_grid.lbm.constants import (
+        BC_BOUNCE_BACK,
+        BC_PERIODIC,
+        BC_VELOCITY_INLET,
+    )
+
+    faces = (
+        domain_bc.xmin,
+        domain_bc.xmax,
+        domain_bc.ymin,
+        domain_bc.ymax,
+        domain_bc.zmin,
+        domain_bc.zmax,
+    )
+    types: list[int] = []
+    vels: list[tuple[float, float, float]] = []
+    for f in faces:
+        if f.kind == HomeFaceKind.PERIODIC:
+            types.append(BC_PERIODIC)
+            vels.append((0.0, 0.0, 0.0))
+        elif f.kind == HomeFaceKind.ZOU_HE:
+            types.append(BC_VELOCITY_INLET)
+            vels.append((float(f.ux), float(f.uy), float(f.uz)))
+        else:
+            types.append(BC_BOUNCE_BACK)
+            vels.append((float(f.ux), float(f.uy), float(f.uz)))
+    model.bc_types = tuple(types)  # type: ignore[attr-defined]
+    model.bc_velocity = tuple(vels)  # type: ignore[attr-defined]
+    model.bc_periodic = (
+        types[0] == BC_PERIODIC and types[1] == BC_PERIODIC,
+        types[2] == BC_PERIODIC and types[3] == BC_PERIODIC,
+        types[4] == BC_PERIODIC and types[5] == BC_PERIODIC,
+    )
+
 
 def solid_moments_eq24(
     rho_x: float,

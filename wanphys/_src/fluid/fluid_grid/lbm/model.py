@@ -151,8 +151,18 @@ class LbmModel(FluidGridModelBase):
     """
     vof_home_moment_quant_dither: bool = True
     """Spatial dither when packing quantized moments."""
-    vof_orphan_reabsorb: bool = True
-    """When quiet-level is armed, reabsorb disconnected airborne liquid blobs."""
+    vof_home_cuda_graph: bool = False
+    """Opt-in Warp CUDA graph for the HOME-FREE GPU core (no bubble/film/κ).
+
+    Captures fused+surface+mask launches; Python buffer swaps stay outside.
+    Requires a CUDA device; ignored / falls back when the step is ineligible.
+    """
+    vof_orphan_reabsorb: bool = False
+    """Opt-in: when late-pool quiet-level is armed, reabsorb airborne blobs.
+
+    Default **off** for generic HOME-FREE VOF. Enable only with an explicit
+    late-pool / quiet-fill controller — not part of the core free-surface step.
+    """
     vof_orphan_max_cells: int = 96
     """Orphan components with ≤ this many wet cells are folded into the pool."""
     vof_orphan_height_margin: int = 3
@@ -182,9 +192,10 @@ class LbmModel(FluidGridModelBase):
     lbm_backend: str = "dist"
     """Fluid advance backend: ``dist`` (distribution LBM) | ``home_fp32``.
 
-    ``home_fp32`` is the moment-encoded HOME-FREE VOF path (H4/H5, no quant).
-    Requires ``phase_mode='vof_sharp'``. Visualisation still uses ``LbmState``
-    macros (ρ,u,φ); distribution ``f`` is unused.
+    ``home_fp32`` is the moment-encoded HOME path (shared operators):
+    ``phase_mode='none'`` (full liquid) or ``phase_mode='vof_sharp'``
+    (free-surface branch). Visualisation uses ``LbmState`` macros (ρ,u,φ);
+    distribution ``f`` is unused.
     """
 
     # ---- Shan-Chen multiphase interaction --------------------------------
@@ -417,9 +428,11 @@ class LbmModel(FluidGridModelBase):
                 f"lbm_backend must be 'dist' or 'home_fp32', got {self.lbm_backend!r}"
             )
         object.__setattr__(self, "lbm_backend", backend)
-        if backend == "home_fp32" and mode != "vof_sharp":
+        if backend == "home_fp32" and mode not in ("none", "vof_sharp"):
             raise ValueError(
-                "lbm_backend='home_fp32' currently requires phase_mode='vof_sharp'"
+                "lbm_backend='home_fp32' requires phase_mode='none' (single-phase "
+                "HOME base) or 'vof_sharp' (free-surface branch); "
+                f"got phase_mode={self.phase_mode!r}"
             )
         if mode == "shan_chen" and float(self.G) == 0.0:
             raise ValueError("phase_mode='shan_chen' requires G != 0")

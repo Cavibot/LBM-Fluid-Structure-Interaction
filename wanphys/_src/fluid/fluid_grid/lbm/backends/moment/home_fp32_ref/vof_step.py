@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Moment-encoded HOME-FREE VOF stepper (H4, fp32, no quant).
+"""Moment-encoded HOME-FREE VOF stepper (numpy reference).
 
-Stores only ``(ρ,u,S)`` + ``φ`` + cell flags. One step mirrors HOME-FREE Alg. 1
-fluid core (without bubbles / cut-cell / foam)::
-
-  1. Körner mass exchange (Eq. 9–10) using Hermite-reconstructed ``f``
-  2. Reconstruct-stream with gas→interface Eq. 11 using ``\\bar f_ī`` (Eq. 16)
-  3. HOME moment collide (Eq. 18–21)
-  4. Fill/empty reclassification + closed interface layer
-
-Not wired into ``LbmSolver`` yet — distribution VOF remains the default path.
+Stores ``(ρ,u,S)`` + ``φ`` + cell flags. Mirrors HOME-FREE Alg. 1 fluid core
+(without bubbles / cut-cell / foam). GPU production path:
+``HomeFp32Bridge`` → ``step_home_vof_gpu``.
 """
 
 from __future__ import annotations
@@ -107,48 +101,17 @@ def seed_dam_break_column(
     dam_x: int,
     fill_z: int,
     rho_liquid: float = 1.0,
+    *,
+    interface_phi: float = 0.5,
 ) -> HomeVofState:
-    """Liquid column for x < dam_x and z < fill_z; mark free-surface interface."""
-    nx, ny, nz = shape
-    moments = HomeMomentArrays(
-        rho=np.zeros(shape, dtype=np.float64),
-        ux=np.zeros(shape, dtype=np.float64),
-        uy=np.zeros(shape, dtype=np.float64),
-        uz=np.zeros(shape, dtype=np.float64),
-        sxx=np.zeros(shape, dtype=np.float64),
-        syy=np.zeros(shape, dtype=np.float64),
-        szz=np.zeros(shape, dtype=np.float64),
-        sxy=np.zeros(shape, dtype=np.float64),
-        sxz=np.zeros(shape, dtype=np.float64),
-        syz=np.zeros(shape, dtype=np.float64),
+    """Back-compat wrapper — implementation lives in ``ic.seed_dam_break_column``."""
+    from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.ic import (
+        seed_dam_break_column as _seed,
     )
-    phi = np.zeros(shape, dtype=np.float64)
-    cell_type = np.zeros(shape, dtype=np.int32)
-    for i in range(nx):
-        for j in range(ny):
-            for k in range(nz):
-                if i < dam_x and k < fill_z:
-                    moments.rho[i, j, k] = rho_liquid
-                    phi[i, j, k] = 1.0
-                    cell_type[i, j, k] = CELL_LIQUID
-    # Mark liquid cells that touch gas as interface
-    for i in range(nx):
-        for j in range(ny):
-            for k in range(nz):
-                if cell_type[i, j, k] != CELL_LIQUID:
-                    continue
-                for di, dj, dk in (
-                    (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
-                ):
-                    ni, nj, nk = i + di, j + dj, k + dk
-                    if ni < 0 or nj < 0 or nk < 0 or ni >= nx or nj >= ny or nk >= nz:
-                        continue  # walls are not free surface
-                    if cell_type[ni, nj, nk] == CELL_GAS:
-                        cell_type[i, j, k] = CELL_INTERFACE
-                        break
-    # Interface fill level starts at 0.5 (mass = φρ); φ=1 would immediately trip IF.
-    phi[cell_type == CELL_INTERFACE] = 0.5
-    return HomeVofState(moments=moments, phi=phi, cell_type=cell_type)
+
+    return _seed(
+        shape, dam_x, fill_z, rho_liquid, interface_phi=interface_phi
+    )
 
 
 def _update_phi_korner(

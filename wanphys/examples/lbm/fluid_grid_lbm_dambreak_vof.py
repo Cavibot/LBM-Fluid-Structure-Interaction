@@ -8,7 +8,7 @@ Default: distribution LBM (``lbm_backend=dist``). Optional moment HOME-FREE (GPU
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof \\
         --backend home --n 48
 
-Default home path: pure HOME-FREE VOF (no host ``level ON``).
+Default home path: pure HOME-FREE VOF via ``make_home_vof_model`` (heuristics off).
 Opt-in: ``--height-eq`` (solver free-surface IF leveling; gradual),
 ``--late-pool``.
 
@@ -30,6 +30,9 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import LbmDomain, LbmModel
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.generic import (
+    make_home_vof_model,
+)
 from wanphys._src.fluid.fluid_grid.lbm.benchmark.metrics import (
     collect_interface_roughness,
 )
@@ -103,73 +106,60 @@ class VofDamBreak:
             tau = TAU
             gamma = VOF_GAMMA
             self._substeps = SIM_SUBSTEPS
-            wall_wetting = 0.0
-            wall_film = False
-            quiet_fill = False
+            self.model = LbmModel(
+                fluid_grid_res=(self._n, self._n, self._n),
+                fluid_grid_cell_size=DH,
+                lattice=LATTICE,
+                tau=tau,
+                G=0.0,
+                phase_mode="vof_sharp",
+                lbm_backend="dist",
+                vof_rho_gas=VOF_RHO_GAS,
+                vof_epsilon=VOF_EPSILON,
+                vof_gamma=gamma,
+                vof_kappa_smooth=VOF_KAPPA_SMOOTH,
+                lambda_trt=LAMBDA_TRT,
+                initial_density=RHO_LIQUID,
+                gravity_x=0.0,
+                gravity_y=0.0,
+                gravity_z=gravity,
+            )
             home_fill_empty = False
             home_wall_eq = False
             seal_fg = True
         else:
-            # Conservative late-pool params. g∝1/n keeps Fr similar across N.
-            # Baseline late-pool params. Strong wall κ wetting peels liquid off
-            # the walls into a frustum (四棱台); keep vof_wall_wetting=0.
-            # See docs/wanphys/lbm_home_fslbm_one_cell_limit_zh.md.
+            # Generic HOME-FREE VOF baseline (heuristics off). g∝1/n keeps Fr similar.
             gravity = -0.0020 * (float(n_ref) / float(self._n)) * self._g_scale
             tau = 0.51
-            # Home GPU def_6_sigma≈0.024 → γ≈0.004; baseline wanphys uses 1.5e-3.
             gamma = 4.0e-3 if self._home_faithful else 1.5e-3
-            # Stronger g → more violent bore; give a few extra substeps.
             self._substeps = max(SIM_SUBSTEPS, 12 if self._g_scale <= 1.5 else 16)
-            wall_wetting = 0.0
-            wall_film = False
-            quiet_fill = False  # armed later when |u| is small (unless faithful)
             home_fill_empty = self._home_faithful
             home_wall_eq = self._home_faithful
             seal_fg = not self._home_faithful
+            self.model = make_home_vof_model(
+                fluid_grid_res=(self._n, self._n, self._n),
+                fluid_grid_cell_size=DH,
+                lattice=LATTICE,
+                tau=tau,
+                gravity_z=gravity,
+                vof_gamma=gamma,
+                lambda_trt=LAMBDA_TRT,
+                initial_density=RHO_LIQUID,
+                vof_rho_gas=VOF_RHO_GAS,
+                vof_epsilon=VOF_EPSILON,
+                vof_kappa_smooth=VOF_KAPPA_SMOOTH,
+                vof_home_fill_empty=home_fill_empty,
+                vof_home_wall_eq=home_wall_eq,
+                vof_seal_fg=seal_fg,
+                vof_orphan_max_cells=max(96, self._n),
+                vof_bubble_pressure=self._bubble_pressure,
+                vof_bubble_disjoint=self._bubble_pressure,
+                vof_height_eq_rate=0.05,
+                vof_height_eq_u_max=0.05,
+                vof_height_eq_dh_cap=0.05,
+                vof_height_eq_every=12,
+            )
 
-        self.model = LbmModel(
-            fluid_grid_res=(self._n, self._n, self._n),
-            fluid_grid_cell_size=DH,
-            lattice=LATTICE,
-            tau=tau,
-            G=0.0,
-            phase_mode="vof_sharp",
-            lbm_backend=self._backend,
-            vof_rho_gas=VOF_RHO_GAS,
-            vof_epsilon=VOF_EPSILON,
-            vof_gamma=gamma,
-            vof_kappa_smooth=VOF_KAPPA_SMOOTH,
-            vof_wall_wetting=wall_wetting if self._backend == "home_fp32" else 0.0,
-            vof_wall_film_drain=wall_film if self._backend == "home_fp32" else False,
-            vof_wall_film_phi_max=0.95,
-            vof_wall_film_u_max=0.02,
-            vof_wall_film_edge_only=True,
-            vof_home_fill_empty=home_fill_empty,
-            vof_home_wall_eq=home_wall_eq,
-            vof_seal_fg=seal_fg,
-            vof_quiet_fill=False,
-            vof_quiet_fill_rate=0.35,
-            vof_quiet_fill_u_max=0.025,
-            vof_orphan_reabsorb=False,
-            vof_orphan_max_cells=max(96, self._n),
-            vof_orphan_height_margin=3,
-            vof_height_eq=False,
-            vof_height_eq_rate=0.05,
-            vof_height_eq_u_max=0.05,
-            vof_height_eq_dh_cap=0.05,
-            vof_height_eq_every=12,
-            vof_bubble_pressure=self._bubble_pressure,
-            # Disjoint only by default with --bubble-pressure.
-            # Eddy viscosity is very costly (6³ scan/cell) and over-damps the pool.
-            vof_bubble_disjoint=self._bubble_pressure,
-            vof_bubble_small_sigma=False,
-            vof_bubble_eddy=False,
-            lambda_trt=LAMBDA_TRT,
-            initial_density=RHO_LIQUID,
-            gravity_x=0.0,
-            gravity_y=0.0,
-            gravity_z=gravity,
-        )
         print(
             f"VOF Dam-Break: {self._n}^3, lattice={self.model.lattice}, "
             f"backend={self.model.lbm_backend}, tau={self.model.tau}, "
@@ -184,7 +174,8 @@ class VofDamBreak:
             f"bubble_pressure={self._bubble_pressure}, "
             f"height_eq={self._enable_height_eq} "
             f"(arm_t>={self._height_eq_arm_after_t}), "
-            f"late_pool={not self._disable_late_pool}"
+            f"late_pool={not self._disable_late_pool}, "
+            f"orphan={self.model.vof_orphan_reabsorb}"
         )
 
         self.domain = LbmDomain(self.model)
@@ -277,7 +268,7 @@ class VofDamBreak:
         t0 = time.perf_counter()
         home = self.domain.solver._home_fp32
         # Arm solver free-surface leveling after splash (flag on LbmModel;
-        # operator runs inside HomeFp32VofBridge.step each lattice step).
+        # operator runs inside HomeFp32Bridge.step each lattice step).
         if (
             self._enable_height_eq
             and home is not None

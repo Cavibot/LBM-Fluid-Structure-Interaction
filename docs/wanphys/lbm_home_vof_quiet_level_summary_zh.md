@@ -79,8 +79,8 @@ t ≥ HEIGHT_MAP_START_T 且 |u| < vof_quiet_fill_u_max
 |-------------|------|------|
 | `level_surface_high_to_low` | `vof_warp.py` | 守恒：剥高填低 |
 | `topup_surface_with_budget` | `vof_warp.py` | 发明 ≤ `budget`（`inf` → 实际用大 cap） |
-| `HomeFp32VofBridge.level_high_to_low` | `bridge.py` | 对外封装 |
-| `HomeFp32VofBridge.topup_with_budget` | `bridge.py` | 对外封装；`budget=inf` 表示不截断 |
+| `HomeFp32Bridge.level_high_to_low` | `bridge.py` | 对外封装 |
+| `HomeFp32Bridge.topup_with_budget` | `bridge.py` | 对外封装；`budget=inf` 表示不截断 |
 
 模型侧：`vof_quiet_fill`、`vof_quiet_fill_rate`、`vof_quiet_fill_u_max`。  
 润湿 / 薄膜：`vof_wall_wetting=0`、`vof_wall_film_drain=False`。

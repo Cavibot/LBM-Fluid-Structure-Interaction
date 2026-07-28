@@ -211,6 +211,7 @@ _SHAPE_SPHERE = 0
 _SHAPE_BOX = 1
 _SHAPE_CAPSULE = 2
 _SHAPE_MESH = 3
+_SHAPE_CYLINDER = 4
 
 
 @wp.func
@@ -238,6 +239,18 @@ def sdf_capsule(center: wp.vec3, radius: float, half_height: float, rot: wp.quat
     ba = seg_b - seg_a
     h = wp.clamp(wp.dot(pa, ba) / wp.dot(ba, ba), 0.0, 1.0)
     return wp.length(pa - ba * h) - radius
+
+
+@wp.func
+def sdf_cylinder(center: wp.vec3, radius: float, half_height: float, rot: wp.quat, p: wp.vec3) -> float:
+    """Finite cylinder along body-local Z (flat caps)."""
+    inv_rot = wp.quat_inverse(rot)
+    p_local = wp.quat_rotate(inv_rot, p - center)
+    xy = wp.length(wp.vec2(p_local[0], p_local[1]))
+    d = wp.vec2(xy - radius, wp.abs(p_local[2]) - half_height)
+    outside = wp.length(wp.vec2(wp.max(d[0], 0.0), wp.max(d[1], 0.0)))
+    inside = wp.min(wp.max(d[0], d[1]), 0.0)
+    return outside + inside
 
 
 @wp.func
@@ -320,6 +333,63 @@ def rasterize_all_body_sdf_warp(
             dist = sdf_box(pos, body_box_half_extents[b], rot, p)
         elif shape == _SHAPE_CAPSULE:
             dist = sdf_capsule(pos, body_capsule_radius[b], body_capsule_half_height[b], rot, p)
+        elif shape == _SHAPE_CYLINDER:
+            dist = sdf_cylinder(pos, body_capsule_radius[b], body_capsule_half_height[b], rot, p)
+        elif shape == _SHAPE_MESH:
+            dist = sdf_mesh(body_mesh_handle[b], pos, rot, body_mesh_scale[b], body_mesh_max_dist[b], p)
+
+        if dist < best_dist:
+            best_dist = dist
+            best_id = body_id
+
+    solid_phi[i, j, k] = best_dist
+    solid_body_id[i, j, k] = wp.int32(best_id)
+
+
+@wp.kernel
+def rasterize_all_body_sdf_warp_narrowband(
+    solid_phi: wp.array3d(dtype=float),
+    solid_body_id: wp.array3d(dtype=wp.int32),
+    dh: float,
+    body_q: wp.array(dtype=wp.transform),
+    body_count: int,
+    coupling_to_newton: wp.array(dtype=wp.int32),
+    body_shape_type: wp.array(dtype=wp.int32),
+    body_sphere_radius: wp.array(dtype=float),
+    body_box_half_extents: wp.array(dtype=wp.vec3),
+    body_capsule_radius: wp.array(dtype=float),
+    body_capsule_half_height: wp.array(dtype=float),
+    body_mesh_handle: wp.array(dtype=wp.uint64),
+    body_mesh_scale: wp.array(dtype=float),
+    body_mesh_max_dist: wp.array(dtype=float),
+    body_radius_bound: wp.array(dtype=float),
+    narrowband_margin: float,
+):
+    """Like ``rasterize_all_body_sdf_warp`` but skip SDF far from each body AABB."""
+    i, j, k = wp.tid()
+    p = wp.vec3((float(i) + 0.5) * dh, (float(j) + 0.5) * dh, (float(k) + 0.5) * dh)
+
+    best_dist = float(1000.0)
+    best_id = int(-1)
+
+    for b in range(body_count):
+        body_id = int(coupling_to_newton[b])
+        pos = wp.transform_get_translation(body_q[body_id])
+        # Conservative spherical cull before expensive SDF / mesh query.
+        if wp.length(p - pos) > body_radius_bound[b] + narrowband_margin:
+            continue
+        rot = wp.transform_get_rotation(body_q[body_id])
+        shape = body_shape_type[b]
+        dist = float(1000.0)
+
+        if shape == _SHAPE_SPHERE:
+            dist = sdf_sphere(pos, body_sphere_radius[b], p)
+        elif shape == _SHAPE_BOX:
+            dist = sdf_box(pos, body_box_half_extents[b], rot, p)
+        elif shape == _SHAPE_CAPSULE:
+            dist = sdf_capsule(pos, body_capsule_radius[b], body_capsule_half_height[b], rot, p)
+        elif shape == _SHAPE_CYLINDER:
+            dist = sdf_cylinder(pos, body_capsule_radius[b], body_capsule_half_height[b], rot, p)
         elif shape == _SHAPE_MESH:
             dist = sdf_mesh(body_mesh_handle[b], pos, rot, body_mesh_scale[b], body_mesh_max_dist[b], p)
 

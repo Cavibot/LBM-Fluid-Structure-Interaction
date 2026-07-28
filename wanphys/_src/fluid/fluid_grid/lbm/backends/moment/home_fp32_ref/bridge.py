@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bridge: moment HOME-FREE VOF ↔ distribution ``LbmState`` (H5/H6).
+"""Bridge: moment HOME ↔ distribution ``LbmState`` (shared base + FS branch).
 
-Owns GPU-resident HOME-FREE buffers (H6 Warp). Each step syncs ρ,u,φ,cell_type
-onto ``LbmState`` for visualisation. Distribution ``f`` is unused.
+Owns GPU-resident HOME buffers. ``phase_mode='none'`` runs the same fused
+operators with free-surface policy off (full liquid); ``vof_sharp`` enables
+mass/φ / fill-empty / optional surface cosmetics.
 """
 
 from __future__ import annotations
@@ -23,14 +24,21 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.vof_warp im
     flatten_top_interface_layer,
     level_surface_high_to_low,
     reabsorb_orphan_liquid,
-    seed_home_vof_gpu,
     set_face_bc_gpu,
     step_home_vof_gpu,
     sync_solids_from_lbm_state,
     topup_surface_with_budget,
     upload_home_vof_state,
 )
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.ic import (
+    seed_dam_break_column,
+    seed_droplet,
+    seed_full_liquid,
+    seed_pool,
+)
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.vof_step import (
+    CELL_GAS,
+    CELL_LIQUID,
     HomeVofState,
 )
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.step import (
@@ -75,8 +83,8 @@ def home_domain_bc_from_model(model: LbmModel) -> HomeDomainBC:
     )
 
 
-class HomeFp32VofBridge:
-    """GPU HOME-FREE VOF integrator synced to ``LbmState``."""
+class HomeFp32Bridge:
+    """GPU HOME integrator synced to ``LbmState`` (base + optional free-surface)."""
 
     def __init__(self, model: LbmModel) -> None:
         self.model = model
@@ -89,6 +97,11 @@ class HomeFp32VofBridge:
     @property
     def enabled(self) -> bool:
         return str(self.model.lbm_backend).lower() == "home_fp32"
+
+    @property
+    def free_surface(self) -> bool:
+        """True when the VOF / HOME-FREE free-surface branch is active."""
+        return str(self.model.phase_mode).lower() == "vof_sharp"
 
     @property
     def late_pool(self):
@@ -115,6 +128,7 @@ class HomeFp32VofBridge:
     def reset(self) -> None:
         self._gpu = None
         self._domain_bc = home_domain_bc_from_model(self.model)
+        self._face_bc_ready = False
         if self._late_pool is not None:
             self._late_pool.reset()
 
@@ -157,6 +171,26 @@ class HomeFp32VofBridge:
             )
         return self._gpu
 
+    def seed_full_liquid(
+        self,
+        state: LbmState,
+        rho_liquid: float | None = None,
+        *,
+        u0: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> None:
+        """Seed full-domain liquid (HOME base / ``phase_mode=none``)."""
+        rho0 = float(
+            self.model.initial_density if rho_liquid is None else rho_liquid
+        )
+        host = seed_full_liquid(
+            self._ensure_gpu().shape,
+            rho0,
+            ux0=float(u0[0]),
+            uy0=float(u0[1]),
+            uz0=float(u0[2]),
+        )
+        self.seed_host_state(state, host)
+
     def seed_dam_break(
         self,
         state: LbmState,
@@ -164,44 +198,126 @@ class HomeFp32VofBridge:
         fill_z: int,
         rho_liquid: float | None = None,
     ) -> None:
-        """Seed column on GPU and push macros onto ``state``."""
+        """Seed dam-break column on GPU and push macros onto ``state``."""
         rho0 = float(
             self.model.initial_density if rho_liquid is None else rho_liquid
         )
+        host = seed_dam_break_column(self._ensure_gpu().shape, dam_x, fill_z, rho0)
+        self.seed_host_state(state, host)
+
+    def seed_pool(
+        self,
+        state: LbmState,
+        fill_z: int,
+        rho_liquid: float | None = None,
+    ) -> None:
+        """Seed a still pool (``z < fill_z``) onto ``state``."""
+        rho0 = float(
+            self.model.initial_density if rho_liquid is None else rho_liquid
+        )
+        host = seed_pool(self._ensure_gpu().shape, fill_z, rho0)
+        self.seed_host_state(state, host)
+
+    def seed_droplet(
+        self,
+        state: LbmState,
+        center: tuple[float, float, float],
+        radius: float,
+        rho_liquid: float | None = None,
+    ) -> None:
+        """Seed a spherical droplet (lattice cell-center coords) onto ``state``."""
+        rho0 = float(
+            self.model.initial_density if rho_liquid is None else rho_liquid
+        )
+        host = seed_droplet(self._ensure_gpu().shape, center, radius, rho0)
+        self.seed_host_state(state, host)
+
+    def seed_host_state(self, state: LbmState, host: HomeVofState) -> None:
+        """Upload an arbitrary ``HomeVofState`` IC and sync macros to ``state``."""
         buf = self._ensure_gpu()
-        seed_home_vof_gpu(buf, dam_x=dam_x, fill_z=fill_z, rho_liquid=rho0)
+        upload_home_vof_state(buf, host)
         self.sync_to_state(state)
         state.f.zero_()
+
+    def refresh_domain_bc(self) -> None:
+        """Re-read ``LbmModel`` face BC into GPU buffers (after ``apply_home_domain_bc_to_model``)."""
+        self._domain_bc = home_domain_bc_from_model(self.model)
+        if self._gpu is not None:
+            set_face_bc_gpu(self._gpu, self._domain_bc)
+
+    def _host_from_macros(
+        self,
+        *,
+        rho: np.ndarray,
+        ux: np.ndarray,
+        uy: np.ndarray,
+        uz: np.ndarray,
+        phi: np.ndarray,
+        cell_type: np.ndarray,
+    ) -> HomeVofState:
+        """Build a host ``HomeVofState`` from macroscopic arrays."""
+        return HomeVofState(
+            moments=HomeMomentArrays(
+                rho=rho,
+                ux=ux,
+                uy=uy,
+                uz=uz,
+                sxx=ux * ux,
+                syy=uy * uy,
+                szz=uz * uz,
+                sxy=ux * uy,
+                sxz=ux * uz,
+                syz=uy * uz,
+            ),
+            phi=phi,
+            cell_type=cell_type,
+        )
 
     def ensure_from_state(self, state: LbmState) -> None:
         """If no GPU state yet, upload macros from ``LbmState``."""
         if self._gpu is not None:
             return
-        phi = state.phi.numpy().astype(np.float64)
-        ctype = state.cell_type.numpy().astype(np.int32)
+        shape = (int(self.model.nx), int(self.model.ny), int(self.model.nz))
         rho = state.density.numpy().astype(np.float64)
         ux = state.velocity_x.numpy().astype(np.float64)
         uy = state.velocity_y.numpy().astype(np.float64)
         uz = state.velocity_z.numpy().astype(np.float64)
-        gas = ctype == 0
+
+        if not self.free_surface:
+            rho0 = float(self.model.initial_density)
+            if float(np.max(np.abs(rho))) <= 1.0e-12:
+                host = seed_full_liquid(shape, rho0)
+            else:
+                host = self._host_from_macros(
+                    rho=rho,
+                    ux=ux,
+                    uy=uy,
+                    uz=uz,
+                    phi=np.ones(shape, dtype=np.float64),
+                    cell_type=np.full(shape, CELL_LIQUID, dtype=np.int32),
+                )
+            upload_home_vof_state(self._ensure_gpu(), host)
+            self.sync_to_state(state)
+            return
+
+        phi = state.phi.numpy().astype(np.float64)
+        ctype = state.cell_type.numpy().astype(np.int32)
+        gas = ctype == CELL_GAS
+        rho = rho.copy()
+        ux = ux.copy()
+        uy = uy.copy()
+        uz = uz.copy()
         rho[gas] = 0.0
         ux[gas] = 0.0
         uy[gas] = 0.0
         uz[gas] = 0.0
-        host = HomeVofState(
-            moments=HomeMomentArrays(
-                rho=rho, ux=ux, uy=uy, uz=uz,
-                sxx=ux * ux, syy=uy * uy, szz=uz * uz,
-                sxy=ux * uy, sxz=ux * uz, syz=uy * uz,
-            ),
-            phi=phi,
-            cell_type=ctype,
+        host = self._host_from_macros(
+            rho=rho, ux=ux, uy=uy, uz=uz, phi=phi, cell_type=ctype
         )
-        buf = self._ensure_gpu()
-        upload_home_vof_state(buf, host)
+        upload_home_vof_state(self._ensure_gpu(), host)
 
     def sync_to_state(self, state: LbmState) -> None:
-        """Copy GPU HOME-FREE fields onto ``LbmState`` macros."""
+        """Copy GPU HOME fields onto ``LbmState`` macros."""
         if self._gpu is None:
             return
         g = self._gpu
@@ -221,74 +337,103 @@ class HomeFp32VofBridge:
         wp.copy(state.phi, g.phi)
         wp.copy(state.cell_type, g.cell_type)
 
+    def _home_step_kwargs(self) -> dict:
+        """Keyword args for ``step_home_vof_gpu`` (FS policy gated by branch)."""
+        fs = self.free_surface
+        m = self.model
+        return {
+            "tau": float(m.tau),
+            "fx": float(m.gravity_x),
+            "fy": float(m.gravity_y),
+            "fz": float(m.gravity_z),
+            "rho_g0": float(m.vof_rho_gas),
+            "gamma": float(m.vof_gamma) if fs else 0.0,
+            "eps_phi": float(m.vof_epsilon),
+            "rho_liquid": float(m.initial_density),
+            "kappa_smooth": int(m.vof_kappa_smooth),
+            "wall_wetting": float(m.vof_wall_wetting) if fs else 0.0,
+            "wall_film_drain": bool(m.vof_wall_film_drain) if fs else False,
+            "wall_film_phi_max": float(m.vof_wall_film_phi_max),
+            "wall_film_u_max": float(m.vof_wall_film_u_max),
+            "wall_film_edge_only": bool(m.vof_wall_film_edge_only),
+            "home_fill_empty": bool(m.vof_home_fill_empty) if fs else False,
+            "home_wall_eq": bool(m.vof_home_wall_eq),
+            "seal_fg": bool(m.vof_seal_fg) if fs else False,
+            "bubble_pressure": bool(m.vof_bubble_pressure) if fs else False,
+            "bubble_atm_volume": float(m.vof_bubble_atm_volume),
+            "bubble_update_every": int(m.vof_bubble_update_every),
+            "bubble_disjoint": bool(m.vof_bubble_disjoint) if fs else False,
+            "bubble_disjoint_factor": float(m.vof_bubble_disjoint_factor),
+            "bubble_small_sigma": bool(m.vof_bubble_small_sigma) if fs else False,
+            "bubble_small_vol": float(m.vof_bubble_small_vol),
+            "bubble_small_six_sigma": float(m.vof_bubble_small_six_sigma),
+            "bubble_eddy": bool(m.vof_bubble_eddy) if fs else False,
+            "bubble_eddy_atm_vol": float(m.vof_bubble_eddy_atm_vol),
+            "moment_quant": bool(getattr(m, "vof_home_moment_quant", False)),
+            "moment_quant_dither": bool(
+                getattr(m, "vof_home_moment_quant_dither", True)
+            ),
+            "use_cuda_graph": bool(getattr(m, "vof_home_cuda_graph", False)),
+        }
+
     def step(self, state_out: LbmState, state_in: LbmState | None = None) -> None:
         """Advance one lattice step on GPU; write macros into ``state_out``.
 
-        When ``state_in`` is provided, rigid ``solid_phi`` / wall velocities are
-        synced from the LBM state before the HOME-FREE step (FSI path).
+        Same fused HOME operators for base and free-surface; FS policy flags
+        are forced off when ``phase_mode='none'``.
         """
         buf = self._ensure_gpu()
         if state_in is not None:
             sync_solids_from_lbm_state(buf, state_in)
-        # Domain BCs are static for this model — build GPU face tables once.
         if getattr(self, "_face_bc_ready", False) is False:
             self._domain_bc = home_domain_bc_from_model(self.model)
             set_face_bc_gpu(buf, self._domain_bc)
             self._face_bc_ready = True
-        step_home_vof_gpu(
-            buf,
-            tau=float(self.model.tau),
-            fx=float(self.model.gravity_x),
-            fy=float(self.model.gravity_y),
-            fz=float(self.model.gravity_z),
-            rho_g0=float(self.model.vof_rho_gas),
-            gamma=float(self.model.vof_gamma),
-            eps_phi=float(self.model.vof_epsilon),
-            rho_liquid=float(self.model.initial_density),
-            kappa_smooth=int(self.model.vof_kappa_smooth),
-            wall_wetting=float(self.model.vof_wall_wetting),
-            wall_film_drain=bool(self.model.vof_wall_film_drain),
-            wall_film_phi_max=float(self.model.vof_wall_film_phi_max),
-            wall_film_u_max=float(self.model.vof_wall_film_u_max),
-            wall_film_edge_only=bool(self.model.vof_wall_film_edge_only),
-            home_fill_empty=bool(self.model.vof_home_fill_empty),
-            home_wall_eq=bool(self.model.vof_home_wall_eq),
-            seal_fg=bool(self.model.vof_seal_fg),
-            bubble_pressure=bool(self.model.vof_bubble_pressure),
-            bubble_atm_volume=float(self.model.vof_bubble_atm_volume),
-            bubble_update_every=int(self.model.vof_bubble_update_every),
-            bubble_disjoint=bool(self.model.vof_bubble_disjoint),
-            bubble_disjoint_factor=float(self.model.vof_bubble_disjoint_factor),
-            bubble_small_sigma=bool(self.model.vof_bubble_small_sigma),
-            bubble_small_vol=float(self.model.vof_bubble_small_vol),
-            bubble_small_six_sigma=float(self.model.vof_bubble_small_six_sigma),
-            bubble_eddy=bool(self.model.vof_bubble_eddy),
-            bubble_eddy_atm_vol=float(self.model.vof_bubble_eddy_atm_vol),
-            moment_quant=bool(getattr(self.model, "vof_home_moment_quant", False)),
-            moment_quant_dither=bool(
-                getattr(self.model, "vof_home_moment_quant_dither", True)
-            ),
-        )
-        # Opt-in free-surface leveling (IF-only, gradual). Runs in the solver.
-        if bool(getattr(self.model, "vof_height_eq", False)):
+
+        step_home_vof_gpu(buf, **self._home_step_kwargs())
+        if self.free_surface and bool(getattr(self.model, "vof_height_eq", False)):
             every = max(1, int(getattr(self.model, "vof_height_eq_every", 8)))
             self._height_eq_counter += 1
             if self._height_eq_counter % every == 0:
-                # Pull tiny stats only occasionally (status logs); skip D2H most calls.
                 self._height_eq_stat_pulls = getattr(self, "_height_eq_stat_pulls", 0) + 1
                 sync_stats = self._height_eq_stat_pulls % 4 == 1
                 self._last_height_eq_stats = self.apply_height_equation(
                     state_out=None, sync_stats=sync_stats
                 )
         self.sync_to_state(state_out)
-        # HOME-FREE does not use distribution ``f``; skip the D3Q27×N³ zero.
-        # Keep solid fields on the output buffer for feedback / visualisation.
         if state_in is not None:
             wp.copy(state_out.solid_phi, state_in.solid_phi)
             wp.copy(state_out.solid_body_id, state_in.solid_body_id)
             wp.copy(state_out.vel_solid_u, state_in.vel_solid_u)
             wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
             wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
+
+    def accumulate_reconstructed_link_me(
+        self,
+        *,
+        solid_body_id: wp.array,
+        body_q: wp.array,
+        body_com: wp.array,
+        body_f: wp.array,
+        dh: float,
+        force_scale: float = 1.0,
+    ) -> None:
+        """Opt-in Ladd-style ME from reconstructed wall populations (no live ``f``)."""
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.link_me_warp import (
+            launch_home_reconstructed_link_me,
+        )
+
+        buf = self._ensure_gpu()
+        launch_home_reconstructed_link_me(
+            buf=buf,
+            solid_body_id=solid_body_id,
+            body_q=body_q,
+            body_com=body_com,
+            body_f=body_f,
+            dh=float(dh),
+            force_scale=float(force_scale),
+            home_wall_eq=bool(self.model.vof_home_wall_eq),
+        )
 
     def apply_height_equation(
         self,
@@ -387,3 +532,7 @@ class HomeFp32VofBridge:
             kappa_dst.zero_()
             return
         wp.copy(kappa_dst, self._gpu.kappa)
+
+# Back-compat alias (prefer ``HomeFp32Bridge``).
+HomeFp32VofBridge = HomeFp32Bridge
+

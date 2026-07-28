@@ -1052,15 +1052,23 @@ def apply_guo_force_kernel(
     nz: int,
     stride: int,
 ) -> None:
-    """Add Guo forcing term to the pre-collision distributions (in-place).
+    """Add body-force correction to distributions (in-place).
 
-    ``Deltaf_d = (1 - omega/2) . w_d . 3 . (c_d . F)``   (simplified for body forces).
+    Applied **after** collide-stream in the single-phase solver.  Uses
 
-    Only directions with non-zero *c_d.F* are modified.
+        ``Deltaf_d = w_d · 3 · (c_d · F)``
+
+    so ``Σ_d c_d Deltaf_d = F`` (full lattice momentum per step).  The
+    classical Guo factor ``(1 − ω/2)`` belongs inside the collision step
+    together with the ``u → u + F/(2ρ)`` shift; applying it again here
+    under-drives channels by that factor (Poiseuille ``u_max`` too small).
+
+    ``omega`` is retained for ABI compatibility with callers; unused.
     """
     i, j, k = wp.tid()
     idx = i * ny * nz + j * nz + k
-    factor = (1.0 - omega * 0.5) * 3.0  # (1 - omega/2) x 3
+    _ = omega
+    factor = 3.0
 
     # --- face directions (w = 1/18) ---
     # d=1: +x

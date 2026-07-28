@@ -28,7 +28,7 @@ from wanphys._src.fluid.fluid_grid.lbm.benchmark.metrics import (
 
 if TYPE_CHECKING:
     from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.bridge import (
-        HomeFp32VofBridge,
+        HomeFp32Bridge,
     )
     from wanphys._src.fluid.fluid_grid.lbm.state import LbmState
 
@@ -64,7 +64,7 @@ class HomeVofLatePoolController:
 
     def __init__(
         self,
-        bridge: HomeFp32VofBridge,
+        bridge: HomeFp32Bridge,
         *,
         home_faithful: bool = False,
         arm_after_t: float = 10.0,

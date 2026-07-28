@@ -51,7 +51,11 @@ def collide_moments_numpy(
     tau
         Shear relaxation time τ (> 0.5).
     fx, fy, fz
-        Body force density F (lattice units), Guo-style half-force on ``u``.
+        Body force density F (lattice units). Guo half-shift on velocity:
+        ``u ← u* + F/(2ρ)``. Stress also carries Guo force couplings. For an
+        intended *acceleration* ``g`` (force per mass), pass ``F = 2 ρ g`` so
+        the net Δu per step is ``g``; ``LbmModel.gravity_*`` is currently fed
+        through as F with ρ≈1 ⇒ effective acceleration ≈ g/2 unless scaled.
     """
     if rho_s <= 0.0:
         return HomeMoments(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)

@@ -1,34 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""fp32 HOME-LBM reference backend (roadmap V2-ref / development path).
+"""fp32 HOME-LBM reference backend (shared base + free-surface branch).
 
-Increment status
-----------------
-**H0–H2:** Hermite, collide, domain BC (``step.py``, ``bc.py``).
-**H3:** Distribution VOF FS uses filtered ``\\bar f`` (``vof_home_fs_filter``).
-**H4:** Moment-encoded HOME-FREE VOF stepper (``vof_step.py``).
-**H5:** Optional ``LbmModel.lbm_backend='home_fp32'`` via ``bridge.py``.
-**H6 (done):** Warp GPU HOME-FREE VOF (``vof_warp.py``). Quant deferred.
-**H6.1:** Fused stream+mass+FS+collide; massex + IF/IG/GI surface (Home-FSLBM order).
-**H6.2:** PLIC κ → Eq.12 Laplace on home FS (mild γ).
-**H7:** bubble pressure — GPU CCL + Δφ volume; optional Home disjoint /
-    small-bubble σ / near-bubble eddy (``vof_bubble_*``).
-**H7.1:** FSI — sync ``LbmState.solid_phi`` / MAC wall vel into HOME-FREE;
-    fused kernel treats solids as moving walls; approx rigid feedback.
-**H7.2:** Late-pool surface policy extracted from examples
-    (``surface_policy.HomeVofLatePoolController``: quiet level / orphan / topup).
-**H7.3:** Opt-in ``vof_height_eq`` — gradual IF-φ leveling on the dominant free-surface plane.
-**H8 pending:** foam / dissolved-gas (§4.4); quant deferred.
-
-**Next:** foam / dissolved-gas (§4.4); quant deferred.
+``lbm_backend='home_fp32'`` via ``HomeFp32Bridge``:
+``phase_mode='none'`` | ``'vof_sharp'``. See ``NEXT_INCREMENT`` for roadmap tip.
 """
 
 from __future__ import annotations
 
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.bridge import (
+    HomeFp32Bridge,
     HomeFp32VofBridge,
     home_domain_bc_from_model,
+)
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.generic import (
+    generic_home_flags,
+    generic_home_vof_flags,
+    make_home_model,
+    make_home_vof_model,
 )
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.surface_policy import (
     HomeVofLatePoolController,
@@ -39,10 +29,18 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.bc import (
     HomeDomainBC,
     HomeFaceBC,
     HomeFaceKind,
+    apply_home_domain_bc_to_model,
     face_normal_inward,
     reconstruct_solid_f_i_numpy,
     solid_moments_eq24,
     zou_he_velocity_numpy,
+)
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.ic import (
+    mark_liquid_interfaces,
+    seed_dam_break_column,
+    seed_droplet,
+    seed_full_liquid,
+    seed_pool,
 )
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.step import (
     HomeMomentArrays,
@@ -56,7 +54,6 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.vof_step im
     CELL_INTERFACE,
     CELL_LIQUID,
     HomeVofState,
-    seed_dam_break_column,
     step_home_vof_numpy,
 )
 from wanphys._src.fluid.fluid_grid.lbm.core.hermite import (
@@ -79,6 +76,7 @@ __all__ = [
     "HomeDomainBC",
     "HomeFaceBC",
     "HomeFaceKind",
+    "HomeFp32Bridge",
     "HomeFp32VofBridge",
     "HomeMomentArrays",
     "HomeMoments",
@@ -87,18 +85,27 @@ __all__ = [
     "LatePoolEvent",
     "LatePoolFrameStats",
     "NEXT_INCREMENT",
+    "apply_home_domain_bc_to_model",
     "collide_moments_numpy",
     "equilibrium_s_from_u",
     "face_normal_inward",
+    "generic_home_flags",
+    "generic_home_vof_flags",
     "home_collide_moments",
     "home_domain_bc_from_model",
     "home_reconstruct_f_i",
+    "make_home_model",
+    "make_home_vof_model",
     "make_uniform_equilibrium",
+    "mark_liquid_interfaces",
     "moments_from_f_numpy",
     "reconstruct_f_i_numpy",
     "reconstruct_f_numpy",
     "reconstruct_solid_f_i_numpy",
     "seed_dam_break_column",
+    "seed_droplet",
+    "seed_full_liquid",
+    "seed_pool",
     "solid_moments_eq24",
     "step_domain_numpy",
     "step_home_vof_numpy",

@@ -16,7 +16,8 @@ from . import kernels
 from . import kernels_q
 from .core.pipeline import LbmStepControl, StepStats
 from .model import LbmModel
-from .backends.moment.home_fp32_ref.bridge import HomeFp32VofBridge
+from .backends.moment.home_fp32_ref.bridge import HomeFp32Bridge
+from .backends.moment.home_fp32_ref.vof_step import CELL_LIQUID
 from .phases.shan_chen import MacroscopicBuffers, ShanChenPhase
 from .phases.vof_sharp import VofSharpPhase
 from .state import LbmState
@@ -77,8 +78,8 @@ class LbmSolver(FluidGridSolverBase):
 
         self._shan_chen: ShanChenPhase = ShanChenPhase(model)
         self._vof_sharp: VofSharpPhase = VofSharpPhase(model)
-        self._home_fp32: HomeFp32VofBridge | None = (
-            HomeFp32VofBridge(model) if model.lbm_backend == "home_fp32" else None
+        self._home_fp32: HomeFp32Bridge | None = (
+            HomeFp32Bridge(model) if model.lbm_backend == "home_fp32" else None
         )
 
         # ---- Boundary condition arrays (synced from model) ------------------
@@ -545,9 +546,13 @@ class LbmSolver(FluidGridSolverBase):
         collect_stats: bool,
         t_step: float,
     ) -> StepStats | None:
-        """Moment-encoded HOME-FREE VOF step (``lbm_backend='home_fp32'``)."""
+        """Moment-encoded HOME step (``lbm_backend='home_fp32'``).
+
+        ``phase_mode='none'``: shared base operators, free-surface off.
+        ``phase_mode='vof_sharp'``: same operators + free-surface branch.
+        """
         assert self._home_fp32 is not None
-        # Solids are copied state_in→state_out once inside HomeFp32VofBridge.step
+        # Solids are copied state_in→state_out once inside HomeFp32Bridge.step
         # (after the fluid update). Do not duplicate that full-field copy here.
 
         t0 = time.perf_counter() if collect_stats else 0.0
@@ -663,3 +668,12 @@ class LbmSolver(FluidGridSolverBase):
         self._vof_sharp.reset()
         if self._home_fp32 is not None:
             self._home_fp32.reset()
+            if not self._home_fp32.free_surface:
+                self._home_fp32.seed_full_liquid(
+                    state, float(rho0), u0=(u0x, u0y, u0z)
+                )
+            else:
+                # VOF scenes normally call seed_dam_break / seed_pool; still
+                # push uniform macros so the first ensure_from_state is sane.
+                state.phi.fill_(1.0)
+                state.cell_type.fill_(CELL_LIQUID)

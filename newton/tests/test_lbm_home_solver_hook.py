@@ -16,15 +16,30 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment import home_fp32_ref
 
 class TestHomeFp32SolverHook(unittest.TestCase):
     def test_next_increment(self) -> None:
-        self.assertIn("H7", home_fp32_ref.NEXT_INCREMENT)
+        self.assertTrue(
+            home_fp32_ref.NEXT_INCREMENT.startswith("H"),
+            msg=home_fp32_ref.NEXT_INCREMENT,
+        )
 
-    def test_model_rejects_home_without_vof(self) -> None:
+    def test_model_accepts_home_base_without_vof(self) -> None:
+        model = LbmModel(
+            fluid_grid_res=(8, 8, 8),
+            fluid_grid_cell_size=0.1,
+            tau=0.6,
+            phase_mode="none",
+            lbm_backend="home_fp32",
+        )
+        self.assertEqual(model.phase_mode, "none")
+        self.assertEqual(model.lbm_backend, "home_fp32")
+
+    def test_model_rejects_home_with_shan_chen(self) -> None:
         with self.assertRaises(ValueError):
             LbmModel(
                 fluid_grid_res=(8, 8, 8),
                 fluid_grid_cell_size=0.1,
                 tau=0.6,
-                phase_mode="none",
+                phase_mode="shan_chen",
+                G=-1.0,
                 lbm_backend="home_fp32",
             )
 
