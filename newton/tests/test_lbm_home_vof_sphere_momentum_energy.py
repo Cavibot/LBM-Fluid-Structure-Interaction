@@ -248,7 +248,13 @@ class _SmallSphereScene:
         self.rigid.create_state()
         self.z0 = float(center[2])
 
-        me_scale = recommended_me_force_scale(self.dh, self.sim_dt)
+        me_scale = recommended_me_force_scale(
+            self.dh,
+            self.sim_dt,
+            rigid_g_abs=abs(float(gravity_rigid)) if gravity_rigid != 0.0 else 1.0,
+            lbm_g_abs=abs(float(gravity_lbm)) if gravity_lbm != 0.0 else 0.002,
+        )
+        self.model.vof_home_me_in_fused = True
         self.coupling = GridLbmRigidCoupling(self.fluid, self.rigid)
         self.coupling.add_body_sphere(self.sphere_id, radius=self.radius)
         self.coupling.set_rigid_dynamics_enabled(False)

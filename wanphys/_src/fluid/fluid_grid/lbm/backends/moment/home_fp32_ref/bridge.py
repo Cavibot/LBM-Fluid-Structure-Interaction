@@ -93,6 +93,35 @@ class HomeFp32Bridge:
         self._late_pool = None
         self._height_eq_counter = 0
         self._last_height_eq_stats: dict[str, float] = {}
+        self._fused_me: dict | None = None
+
+    def prepare_fused_link_me(
+        self,
+        *,
+        enabled: bool,
+        solid_body_id: wp.array | None = None,
+        body_q: wp.array | None = None,
+        body_com: wp.array | None = None,
+        body_f: wp.array | None = None,
+        dh: float = 1.0,
+        force_scale: float = 1.0,
+    ) -> None:
+        """Arm stream-time ME for the next :meth:`step` (cleared after the step)."""
+        if not enabled:
+            self._fused_me = None
+            return
+        self._fused_me = {
+            "solid_body_id": solid_body_id,
+            "body_q": body_q,
+            "body_com": body_com,
+            "body_f": body_f,
+            "dh": float(dh),
+            "force_scale": float(force_scale),
+        }
+
+    @property
+    def fused_link_me_armed(self) -> bool:
+        return self._fused_me is not None
 
     @property
     def enabled(self) -> bool:
@@ -341,7 +370,7 @@ class HomeFp32Bridge:
         """Keyword args for ``step_home_vof_gpu`` (FS policy gated by branch)."""
         fs = self.free_surface
         m = self.model
-        return {
+        kwargs = {
             "tau": float(m.tau),
             "fx": float(m.gravity_x),
             "fy": float(m.gravity_y),
@@ -374,7 +403,18 @@ class HomeFp32Bridge:
                 getattr(m, "vof_home_moment_quant_dither", True)
             ),
             "use_cuda_graph": bool(getattr(m, "vof_home_cuda_graph", False)),
+            "me_enable": False,
         }
+        me = self._fused_me
+        if me is not None and bool(getattr(m, "vof_home_me_in_fused", False)):
+            kwargs["me_enable"] = True
+            kwargs["solid_body_id"] = me["solid_body_id"]
+            kwargs["body_q"] = me["body_q"]
+            kwargs["body_com"] = me["body_com"]
+            kwargs["body_f"] = me["body_f"]
+            kwargs["me_dh"] = float(me["dh"])
+            kwargs["me_force_scale"] = float(me["force_scale"])
+        return kwargs
 
     def step(self, state_out: LbmState, state_in: LbmState | None = None) -> None:
         """Advance one lattice step on GPU; write macros into ``state_out``.
@@ -391,6 +431,7 @@ class HomeFp32Bridge:
             self._face_bc_ready = True
 
         step_home_vof_gpu(buf, **self._home_step_kwargs())
+        self._fused_me = None
         if self.free_surface and bool(getattr(self.model, "vof_height_eq", False)):
             every = max(1, int(getattr(self.model, "vof_height_eq_every", 8)))
             self._height_eq_counter += 1

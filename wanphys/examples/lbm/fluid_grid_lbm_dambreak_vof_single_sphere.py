@@ -3,9 +3,9 @@
 
 """HOME-FREE VOF dam-break with one rigid sphere (ME core + optional empirical FSI).
 
-Default: Eq.24 walls + reconstructed-link momentum exchange (no empirical plugin).
-``--empirical-fsi`` / ``--showcase-fsi`` enables the showcase buoyancy/push/drag
-plugin and eq-wall preference. Default floatation is weaker than the old demo look.
+Default: Eq.24 walls + reconstructed-link ME (pure research path).
+``--me-drag`` opts into mild submerged linear drag. ``--empirical-fsi`` /
+``--showcase-fsi`` enables the full showcase buoyancy/push/drag plugin.
 
 Run:
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_single_sphere \\
@@ -41,6 +41,7 @@ from wanphys._src.fluid.fluid_viewer import init as init_fluid_viewer
 from wanphys.examples.lbm._home_vof_empirical_sphere_fsi import (
     EmpiricalSphereFsiConfig,
     EmpiricalSphereFsiPlugin,
+    me_path_linear_drag_config,
 )
 from wanphys.rigid import RigidDomain, RigidModelBuilder, ShapeConfig
 
@@ -55,6 +56,9 @@ RIGID_GRAVITY_Z: float = -1.0
 SPHERE_RADIUS: float = 0.08
 SPHERE_DENSITY: float = 0.7
 WALL_THICKNESS_CELLS: float = 2.0
+ME_PATH_DRAG_XY: float = 0.75
+ME_PATH_DRAG_Z: float = 10.0
+SPHERE_FRICTION_MU: float = 0.18
 FRAME_DT: float = 1.0 / 60.0
 SIM_SUBSTEPS: int = 12
 GRAVITY_RAMP_STEPS: int = 40
@@ -70,12 +74,19 @@ class HomeVofDamBreakSingleSphere:
         feedback_force_scale: float | None = None,
         empirical_fsi: bool = False,
         enable_height_eq: bool = False,
+        me_in_fused: bool = True,
+        me_drag: bool = False,
+        me_drag_xy: float = ME_PATH_DRAG_XY,
+        me_drag_z: float = ME_PATH_DRAG_Z,
     ) -> None:
         self.viewer = viewer
         if isinstance(self.viewer, FluidViewerGL):
             self.viewer._paused = True
         self._n = int(n)
         self._empirical_fsi_enabled = bool(empirical_fsi)
+        self._me_drag = bool(me_drag) and not self._empirical_fsi_enabled
+        self._me_drag_xy = float(me_drag_xy)
+        self._me_drag_z = float(me_drag_z)
         self._enable_height_eq = bool(enable_height_eq)
         self._height_eq_armed = False
         self._height_eq_arm_after_t = 8.0
@@ -107,10 +118,16 @@ class HomeVofDamBreakSingleSphere:
         self._empirical: EmpiricalSphereFsiPlugin | None = None
 
         if feedback_force_scale is None:
-            feedback_scale = recommended_me_force_scale(DH, self.sim_dt)
+            feedback_scale = recommended_me_force_scale(
+                DH,
+                self.sim_dt,
+                rigid_g_abs=abs(RIGID_GRAVITY_Z),
+                lbm_g_abs=abs(gravity),
+            )
         else:
             feedback_scale = float(feedback_force_scale)
         self._feedback_force_scale = feedback_scale
+        self.model.vof_home_me_in_fused = bool(me_in_fused)
 
         self._init_fluid()
         self._init_rigid(feedback_force_scale=feedback_scale)
@@ -130,6 +147,8 @@ class HomeVofDamBreakSingleSphere:
         print(
             f"HOME-VOF single sphere: {self._n}^3, gz={gravity:.5f}, "
             f"feedback=ME, force_scale={self._feedback_force_scale:.4g}, "
+            f"me_in_fused={'on' if self.model.vof_home_me_in_fused else 'off'}, "
+            f"me_drag={'on' if self._me_drag else 'off'}, "
             f"showcase_fsi={'on' if self._empirical_fsi_enabled else 'off'}, "
             f"wall_eq={use_wall_eq}, height_eq={self._enable_height_eq}"
         )
@@ -168,7 +187,12 @@ class HomeVofDamBreakSingleSphere:
         add_wall("ymin", (world * 0.5, -wall_t * 0.5, world * 0.5), (world * 0.5, wall_t * 0.5, world * 0.5))
         add_wall("ymax", (world * 0.5, world + wall_t * 0.5, world * 0.5), (world * 0.5, wall_t * 0.5, world * 0.5))
 
-        cfg = ShapeConfig(density=SPHERE_DENSITY, is_visible=True, is_solid=True)
+        cfg = ShapeConfig(
+            density=SPHERE_DENSITY,
+            is_visible=True,
+            is_solid=True,
+            mu=SPHERE_FRICTION_MU,
+        )
         center = (world * 0.32, world * 0.5, z_floor)
         self.sphere_body_id = builder.add_body(position=center, label="sphere")
         builder.add_shape_sphere(self.sphere_body_id, radius=radius, cfg=cfg)
@@ -185,6 +209,16 @@ class HomeVofDamBreakSingleSphere:
         self.coupling.set_feedback_mode("momentum_exchange")
 
         if self._empirical_fsi_enabled:
+            cfg = EmpiricalSphereFsiConfig()
+        elif self._me_drag:
+            cfg = me_path_linear_drag_config(
+                drag_xy=self._me_drag_xy,
+                drag_z=self._me_drag_z,
+            )
+        else:
+            cfg = None
+
+        if cfg is not None:
             self._empirical = EmpiricalSphereFsiPlugin(
                 device=str(self.model._device),
                 body_ids=(self.sphere_body_id,),
@@ -197,7 +231,7 @@ class HomeVofDamBreakSingleSphere:
                 nx=self._n,
                 ny=self._n,
                 nz=self._n,
-                config=EmpiricalSphereFsiConfig(),
+                config=cfg,
             )
 
     def _ramp_gravity(self) -> None:
@@ -291,6 +325,20 @@ def main() -> None:
         action="store_true",
         help="Same as --empirical-fsi (showcase plugin + eq-wall).",
     )
+    parser.add_argument(
+        "--me-in-fused",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Accumulate ME inside fused solid pulls (default: on).",
+    )
+    parser.add_argument(
+        "--me-drag",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Opt-in submerged linear drag on ME path (default: off).",
+    )
+    parser.add_argument("--me-drag-xy", type=float, default=ME_PATH_DRAG_XY)
+    parser.add_argument("--me-drag-z", type=float, default=ME_PATH_DRAG_Z)
     parser.add_argument("--height-eq", action="store_true")
     viewer, args = init_fluid_viewer(parser)
     empirical = bool(args.empirical_fsi) or bool(args.showcase_fsi)
@@ -304,6 +352,10 @@ def main() -> None:
         ),
         empirical_fsi=empirical,
         enable_height_eq=bool(args.height_eq),
+        me_in_fused=bool(args.me_in_fused),
+        me_drag=bool(args.me_drag),
+        me_drag_xy=float(args.me_drag_xy),
+        me_drag_z=float(args.me_drag_z),
     )
     newton.examples.run(example, args)
 

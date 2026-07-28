@@ -58,6 +58,28 @@ class EmpiricalSphereFsiConfig:
     )
 
 
+def me_path_linear_drag_config(
+    *,
+    drag_xy: float = 0.75,
+    drag_z: float = 10.0,
+    ema_alpha: float = 0.05,
+    dsub_cap: float = 0.015,
+) -> EmpiricalSphereFsiConfig:
+    """Opt-in dissipation stabilizer for demos (no buoyancy / push).
+
+    Not part of the pure-ME research default. Enable via ``--me-drag``.
+    """
+    return EmpiricalSphereFsiConfig(
+        buoyancy_scale=0.0,
+        push_rate=0.0,
+        drag_xy=float(drag_xy),
+        drag_z=float(drag_z),
+        late_pool_push_scale=0.0,
+        ema_alpha=float(ema_alpha),
+        dsub_cap=float(dsub_cap),
+    )
+
+
 @dataclass
 class EmpiricalSphereFsiPlugin:
     """Stateful wrapper: scratch buffers + apply each substep."""

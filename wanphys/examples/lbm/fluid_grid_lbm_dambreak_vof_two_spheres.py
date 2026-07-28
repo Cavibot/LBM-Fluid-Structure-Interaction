@@ -4,12 +4,14 @@
 """HOME-FREE VOF dam-break with two dynamic rigid spheres (FSI).
 
 Default core path: ``make_home_vof_model`` → SDF raster → Eq.24 walls →
-reconstructed-link momentum exchange → rigid XPBD. No empirical buoyancy /
-push / drag.
+stream-time / reconstructed-link ME → rigid XPBD. Default ``force_scale`` uses
+``recommended_me_force_scale`` with split-g attenuation (not raw ``(dh/dt)²``).
+No empirical buoyancy / push / drag on the research default. Prefer ``--n 64``
+when possible (``R/dh`` larger → less voxel bounce).
 
-``--showcase-fsi`` restores the old look-and-feel plugin (empirical FSI +
-eq-wall preference). Default floatation amplitude is weaker than the old
-showcase; that is intentional.
+``--me-drag`` opts into mild submerged linear drag (stabilizer only; not pure ME).
+``--showcase-fsi`` restores the old look-and-feel plugin (empirical buoyancy /
+push / drag + eq-wall).
 
 Optional late-pool ``--height-eq`` (same IF ``φ→φ*`` regularizer as the
 single-phase dam-break example). Arms after ``t=8``; body-adjacent IF keeps a
@@ -17,13 +19,16 @@ soft floor weight so sphere menisci slowly heal instead of freezing as pits.
 
 Run:
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
-        --viewer gl --n 48
+        --viewer gl --n 64
 
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
-        --viewer gl --n 48 --showcase-fsi
+        --viewer gl --n 64 --showcase-fsi
 
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
-        --viewer gl --n 48 --height-eq
+        --viewer gl --n 64 --me-drag
+
+    uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
+        --viewer gl --n 64 --no-me-in-fused
 
 Sphere trajectories append to ``sphere_traj.csv`` (override with
 ``--sphere-log PATH``, disable with ``--sphere-log ""``). Buffered writes;
@@ -57,6 +62,7 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.generic imp
 from wanphys.examples.lbm._home_vof_empirical_sphere_fsi import (
     EmpiricalSphereFsiConfig,
     EmpiricalSphereFsiPlugin,
+    me_path_linear_drag_config,
 )
 from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRenderer
 from wanphys._src.fluid.fluid_viewer import init as init_fluid_viewer
@@ -99,6 +105,13 @@ WATER_HORIZONTAL_DRAG_RATE: float = 4.0
 WATER_VERTICAL_DRAG_RATE: float = 12.0
 FLUID_PUSH_RATE: float = 8.0
 LATE_POOL_PUSH_SCALE: float = 0.12
+# ME-path dissipation only (default on). Strong z, weak xy: kill bobbing
+# without pinning heavy spheres against the dam-break surge.
+ME_PATH_DRAG_XY: float = 0.75
+ME_PATH_DRAG_Z: float = 10.0
+# Sphere–sphere / sphere–wall Coulomb friction (default ShapeConfig mu=0.5
+# made the light sphere perch on the heavy one for many seconds).
+SPHERE_FRICTION_MU: float = 0.18
 SUB_EMA_ALPHA: float = 0.05
 SUB_DSUB_CAP: float = 0.015
 WALL_THICKNESS_CELLS: float = 2.0
@@ -241,6 +254,10 @@ class HomeVofDamBreakTwoSpheres:
         enable_height_eq: bool = False,
         enable_moment_quant: bool = False,
         showcase_fsi: bool = False,
+        me_in_fused: bool = True,
+        me_drag: bool = False,
+        me_drag_xy: float = ME_PATH_DRAG_XY,
+        me_drag_z: float = ME_PATH_DRAG_Z,
     ) -> None:
         self.viewer: Any = viewer
         if isinstance(self.viewer, FluidViewerGL):
@@ -248,6 +265,9 @@ class HomeVofDamBreakTwoSpheres:
 
         self._n = int(n)
         self._showcase_fsi = bool(showcase_fsi)
+        self._me_drag = bool(me_drag) and not self._showcase_fsi
+        self._me_drag_xy = float(me_drag_xy)
+        self._me_drag_z = float(me_drag_z)
         self._enable_height_eq = bool(enable_height_eq)
         self._enable_moment_quant = bool(enable_moment_quant)
         self._height_eq_armed = False
@@ -306,21 +326,44 @@ class HomeVofDamBreakTwoSpheres:
         self._last_submerged_by_body: dict[int, float] = {}
         self._last_extra_force_by_body: dict[int, tuple[float, float, float]] = {}
         self._empirical_fsi: EmpiricalSphereFsiPlugin | None = None
-        self._empirical_cfg = EmpiricalSphereFsiConfig(
-            buoyancy_scale=float(buoyancy_force_scale),
-            push_rate=FLUID_PUSH_RATE,
-            drag_xy=float(water_horizontal_drag_rate),
-            drag_z=float(water_vertical_drag_rate),
-            late_pool_push_scale=LATE_POOL_PUSH_SCALE,
-            ema_alpha=SUB_EMA_ALPHA,
-            dsub_cap=SUB_DSUB_CAP,
-        )
+        if self._showcase_fsi:
+            self._empirical_cfg = EmpiricalSphereFsiConfig(
+                buoyancy_scale=float(buoyancy_force_scale),
+                push_rate=FLUID_PUSH_RATE,
+                drag_xy=float(water_horizontal_drag_rate),
+                drag_z=float(water_vertical_drag_rate),
+                late_pool_push_scale=LATE_POOL_PUSH_SCALE,
+                ema_alpha=SUB_EMA_ALPHA,
+                dsub_cap=SUB_DSUB_CAP,
+            )
+        elif self._me_drag:
+            self._empirical_cfg = me_path_linear_drag_config(
+                drag_xy=self._me_drag_xy,
+                drag_z=self._me_drag_z,
+                ema_alpha=SUB_EMA_ALPHA,
+                dsub_cap=SUB_DSUB_CAP,
+            )
+        else:
+            self._empirical_cfg = EmpiricalSphereFsiConfig(
+                buoyancy_scale=0.0,
+                push_rate=0.0,
+                drag_xy=0.0,
+                drag_z=0.0,
+            )
 
         if feedback_force_scale is None:
-            feedback_scale = recommended_me_force_scale(DH, self.sim_dt)
+            feedback_scale = recommended_me_force_scale(
+                DH,
+                self.sim_dt,
+                rigid_g_abs=abs(RIGID_GRAVITY_Z),
+                lbm_g_abs=abs(gravity),
+            )
         else:
             feedback_scale = float(feedback_force_scale)
         self._feedback_force_scale = feedback_scale
+
+        # Core research path: stream-time ME inside fused solid pulls.
+        self.model.vof_home_me_in_fused = bool(me_in_fused)
 
         self._init_fluid()
         self._init_rigid_scene(feedback_force_scale=feedback_scale)
@@ -346,6 +389,8 @@ class HomeVofDamBreakTwoSpheres:
             f"HOME-VOF dam-break two spheres: {self._n}^3, tau={TAU}, "
             f"gz={gravity:.5f}, gamma={VOF_GAMMA}, substeps={self._substeps}, "
             f"feedback=ME, force_scale={self._feedback_force_scale:.4g}, "
+            f"me_in_fused={'on' if self.model.vof_home_me_in_fused else 'off'}, "
+            f"me_drag={'on' if self._me_drag else 'off'}, "
             f"showcase_fsi={'on' if self._showcase_fsi else 'off'}, "
             f"wall_eq={use_wall_eq}, "
             f"height_eq={self._enable_height_eq} "
@@ -443,11 +488,13 @@ class HomeVofDamBreakTwoSpheres:
             density=HEAVY_SPHERE_DENSITY,
             is_visible=not TEXTURED_SPHERE_VISUALS_ENABLED,
             is_solid=True,
+            mu=SPHERE_FRICTION_MU,
         )
         light_cfg = ShapeConfig(
             density=LIGHT_SPHERE_DENSITY,
             is_visible=not TEXTURED_SPHERE_VISUALS_ENABLED,
             is_solid=True,
+            mu=SPHERE_FRICTION_MU,
         )
         # Place just ahead of the dam front so the bore hits quickly.
         heavy_center = (world_x * 0.32, world_y * 0.38, z_floor)
@@ -484,15 +531,21 @@ class HomeVofDamBreakTwoSpheres:
             f"mode={self.coupling.feedback_mode}"
         )
         print(f"  showcase_fsi={'on' if self._showcase_fsi else 'off'}")
+        print(f"  me_drag={'on' if self._me_drag else 'off'}")
         if self._showcase_fsi:
             print(
                 f"  empirical_fsi buoyancy={self._empirical_cfg.buoyancy_scale}, "
                 f"drag_xy={self._empirical_cfg.drag_xy}, "
                 f"drag_z={self._empirical_cfg.drag_z} (showcase plugin)"
             )
+        elif self._me_drag:
+            print(
+                f"  me_path_drag drag_xy={self._empirical_cfg.drag_xy}, "
+                f"drag_z={self._empirical_cfg.drag_z} (no buoyancy/push)"
+            )
         print(f"  initial heavy={heavy_center}, light={light_center}")
 
-        if self._showcase_fsi:
+        if self._showcase_fsi or self._me_drag:
             self._empirical_fsi = EmpiricalSphereFsiPlugin(
                 device=str(self.model._device),
                 body_ids=(self.heavy_body_id, self.light_body_id),
@@ -752,8 +805,35 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Enable showcase empirical buoyancy/push/drag + eq-wall. "
-            "Default off: raster → Eq.24 → link ME → rigid only."
+            "Default off: raster → Eq.24 → link ME → optional ME-path drag → rigid."
         ),
+    )
+    parser.add_argument(
+        "--me-in-fused",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Accumulate ME inside fused solid pulls (default: on).",
+    )
+    parser.add_argument(
+        "--me-drag",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Opt-in submerged linear drag on ME path (no buoyancy/push). "
+            "Off by default for pure-ME research; ignored when --showcase-fsi is set."
+        ),
+    )
+    parser.add_argument(
+        "--me-drag-xy",
+        type=float,
+        default=ME_PATH_DRAG_XY,
+        help="ME-path horizontal drag rate (default 0.75).",
+    )
+    parser.add_argument(
+        "--me-drag-z",
+        type=float,
+        default=ME_PATH_DRAG_Z,
+        help="ME-path vertical drag rate (default 10).",
     )
     parser.add_argument(
         "--buoyancy-force-scale",
@@ -822,6 +902,10 @@ def main() -> None:
         enable_height_eq=bool(args.height_eq),
         enable_moment_quant=bool(args.moment_quant),
         showcase_fsi=bool(args.showcase_fsi),
+        me_in_fused=bool(args.me_in_fused),
+        me_drag=bool(args.me_drag),
+        me_drag_xy=float(args.me_drag_xy),
+        me_drag_z=float(args.me_drag_z),
     )
     try:
         newton.examples.run(example, args)

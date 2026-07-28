@@ -212,4 +212,5 @@ uv run --extra examples python -m unittest newton.tests.test_lbm_home_vof_conser
 - [x] P2：重构链路 ME、φ 体积浮力插件、SDF 窄带、`vof_home_cuda_graph`  
 - [x] L0：Martin–Moyce 床层浪头 + gate align + Re 标定 + `run_martin_moyce_compare`  
 - [x] FSI 默认切换：coupling 默认 ME + `recommended_me_force_scale`；双球/单球默认无经验；`--showcase-fsi` / `--empirical-fsi` 恢复观感插件  
+- [x] FSI 标度/同核：`recommended_me_force_scale` 按 split-g 衰减（~44 非 207）；`vof_home_me_in_fused` 流时 ME（默认开）  
 - [ ] 论文分裂固体核 / tile / 纯 50% quant（明确不在当前 VOF 双球主线）

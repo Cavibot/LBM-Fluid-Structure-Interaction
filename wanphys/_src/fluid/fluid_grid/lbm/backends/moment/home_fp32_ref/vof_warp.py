@@ -60,6 +60,27 @@ def _feq_w(
 
 
 @wp.func
+def _accumulate_fused_link_me(
+    body_id: int,
+    link_mid: wp.vec3,
+    c_dir: wp.vec3,
+    f_wall: float,
+    f_opp: float,
+    vol: float,
+    body_q: wp.array(dtype=wp.transform),
+    body_com: wp.array(dtype=wp.vec3),
+    body_f: wp.array(dtype=wp.spatial_vector),
+) -> None:
+    if body_id < 0:
+        return
+    df = -(f_wall + f_opp) * vol
+    delta_p = c_dir * df
+    com_world = wp.transform_point(body_q[body_id], body_com[body_id])
+    delta_tau = wp.cross(link_mid - com_world, delta_p)
+    wp.atomic_add(body_f, body_id, wp.spatial_vector(delta_p, delta_tau))
+
+
+@wp.func
 def _clamp_u(ux: float, uy: float, uz: float):
     u2 = ux * ux + uy * uy + uz * uz
     if u2 > 0.16:  # |u| > 0.4 like Home-FSLBM
@@ -219,6 +240,13 @@ def home_vof_fused_kernel(
     q_u_max: float,
     q_s_min: float,
     q_s_max: float,
+    me_enable: int,
+    solid_body_id: wp.array3d(dtype=wp.int32),
+    body_q: wp.array(dtype=wp.transform),
+    body_com: wp.array(dtype=wp.vec3),
+    body_f: wp.array(dtype=wp.spatial_vector),
+    me_dh: float,
+    me_force_scale: float,
     nx: int,
     ny: int,
     nz: int,
@@ -446,8 +474,10 @@ def home_vof_fused_kernel(
                     uzp = face_uz[5]
 
         # Moving / static rigid solid (rasterized solid_phi < 0).
+        is_rigid_solid = int(0)
         if is_wall == 0 and solid_phi[ni, nj, nk] < 0.0:
             is_wall = 1
+            is_rigid_solid = 1
             uxp = solid_ux[ni, nj, nk]
             uyp = solid_uy[ni, nj, nk]
             uzp = solid_uz[ni, nj, nk]
@@ -463,6 +493,21 @@ def home_vof_fused_kernel(
                 fhn = _solid_f_eq24(
                     rho_c, vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
                     uxp, uyp, uzp, cxi, cyi, czi, w,
+                )
+            # Stream-time link ME (optional): same f_wall / f_opp as this pull.
+            if me_enable != 0 and is_rigid_solid != 0:
+                bid = int(solid_body_id[ni, nj, nk])
+                vol = me_dh * me_dh * me_dh * me_force_scale
+                cell_center = wp.vec3(
+                    (float(i) + 0.5) * me_dh,
+                    (float(j) + 0.5) * me_dh,
+                    (float(k) + 0.5) * me_dh,
+                )
+                c_dir = wp.vec3(float(cxi), float(cyi), float(czi))
+                link_mid = cell_center - c_dir * (0.5 * me_dh)
+                _accumulate_fused_link_me(
+                    bid, link_mid, c_dir, fhn, fon_opp, vol,
+                    body_q, body_com, body_f,
                 )
         else:
             ntype = int(cell_type[ni, nj, nk])
@@ -3140,12 +3185,22 @@ def step_home_vof_gpu(
     moment_quant: bool = False,
     moment_quant_dither: bool = True,
     use_cuda_graph: bool = False,
+    me_enable: bool = False,
+    solid_body_id: wp.array | None = None,
+    body_q: wp.array | None = None,
+    body_com: wp.array | None = None,
+    body_f: wp.array | None = None,
+    me_dh: float = 1.0,
+    me_force_scale: float = 1.0,
 ) -> None:
     """One HOME-FREE VOF step (fused + surface_1/2/3 + optional film / bubbles).
 
     When ``use_cuda_graph`` is True and the step is graph-eligible (no bubbles,
     film drain, or κ path), Warp captures the GPU launch sequence. Python
     buffer swaps stay outside the graph so ping-pong remains correct.
+
+    Optional ``me_enable`` accumulates stream-time link ME into ``body_f`` inside
+    the fused solid-wall pull (skip the post-step ME scan when using this).
     """
     del eps_phi, rho_liquid
     from wanphys._src.fluid.fluid_grid.lbm.phases import vof_plic
@@ -3154,6 +3209,26 @@ def step_home_vof_gpu(
     nx, ny, nz = buf.shape
     dim = (nx, ny, nz)
     g = float(gamma)
+
+    # Stub ME buffers when disabled (Warp requires valid arrays).
+    me_on = bool(me_enable) and solid_body_id is not None and body_f is not None
+    if not me_on:
+        if not hasattr(buf, "_me_stub_body_id"):
+            buf._me_stub_body_id = wp.zeros((1, 1, 1), dtype=wp.int32, device=buf.device)
+            buf._me_stub_body_q = wp.zeros(1, dtype=wp.transform, device=buf.device)
+            buf._me_stub_body_com = wp.zeros(1, dtype=wp.vec3, device=buf.device)
+            buf._me_stub_body_f = wp.zeros(1, dtype=wp.spatial_vector, device=buf.device)
+        me_body_id = buf._me_stub_body_id
+        me_body_q = buf._me_stub_body_q
+        me_body_com = buf._me_stub_body_com
+        me_body_f = buf._me_stub_body_f
+        me_flag = 0
+    else:
+        me_body_id = solid_body_id
+        me_body_q = body_q
+        me_body_com = body_com
+        me_body_f = body_f
+        me_flag = 1
 
     persistent = bool(getattr(buf, "moment_quant_persistent", False)) and bool(moment_quant)
     if persistent and not getattr(buf, "moment_quant_ready", False):
@@ -3166,12 +3241,14 @@ def step_home_vof_gpu(
     use_q_in = 1 if (persistent and getattr(buf, "moment_quant_ready", False)) else 0
 
     # Graph-eligible: fixed control flow, no Python κ ping-pong / host CCL.
+    # In-fused ME uses external body buffers — keep out of graph for safety.
     graph_ok = (
         bool(use_cuda_graph)
         and not bool(bubble_pressure)
         and not bool(wall_film_drain)
         and g == 0.0
         and not bool(use_disjoint)
+        and me_flag == 0
     )
 
     def _gpu_core() -> None:
@@ -3259,6 +3336,13 @@ def step_home_vof_gpu(
                 float(home_quant.U_MAX),
                 float(home_quant.SNEQ_MIN),
                 float(home_quant.SNEQ_MAX),
+                me_flag,
+                me_body_id,
+                me_body_q,
+                me_body_com,
+                me_body_f,
+                float(me_dh),
+                float(me_force_scale),
                 nx, ny, nz,
             ],
             device=buf.device,

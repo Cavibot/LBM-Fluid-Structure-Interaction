@@ -58,6 +58,37 @@ class TestHomeReconstructedLinkMe(unittest.TestCase):
         self.assertEqual(bf.shape[0], 1)
         self.assertTrue(np.all(np.isfinite(bf)))
 
+    def test_me_in_fused_runs_on_home_fp32(self) -> None:
+        model = make_home_vof_model(
+            fluid_grid_res=(16, 16, 16),
+            fluid_grid_cell_size=0.05,
+            gravity_z=-1.0e-4,
+            vof_home_me_in_fused=True,
+        )
+        fluid = LbmDomain(model)
+        fluid.create_state()
+        home = fluid.solver._home_fp32
+        assert home is not None
+        home.seed_host_state(fluid.state, seed_pool((16, 16, 16), fill_z=8))
+
+        builder = RigidModelBuilder(gravity=0.0)
+        bid = builder.add_body(position=(0.4, 0.4, 0.25), label="s")
+        builder.add_shape_sphere(bid, radius=0.12)
+        rigid = RigidDomain(builder.finalize(device=model._device))
+        rigid.create_state()
+
+        coupling = GridLbmRigidCoupling(fluid, rigid)
+        coupling.add_body_sphere(bid, radius=0.12)
+        coupling.set_two_way_feedback_enabled(True, force_scale=40.0)
+        coupling.set_feedback_mode(LbmFeedbackMode.MOMENTUM_EXCHANGE)
+        coupling.set_rigid_dynamics_enabled(False)
+
+        for _ in range(3):
+            coupling.step(0.01)
+
+        bf = np.asarray(rigid.state.body_f.numpy(), dtype=np.float64)
+        self.assertTrue(np.all(np.isfinite(bf)))
+
 
 class TestPhiVolumeBuoyancyPlugin(unittest.TestCase):
     def test_fibonacci_offsets_and_apply(self) -> None:

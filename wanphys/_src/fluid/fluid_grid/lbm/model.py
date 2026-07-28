@@ -114,6 +114,12 @@ class LbmModel(FluidGridModelBase):
     """
     vof_home_wall_eq: bool = False
     """Wall pull uses Home ``f^eq(ρ, u_wall)`` instead of HOME Eq.24 stress retain."""
+    vof_home_me_in_fused: bool = False
+    """Accumulate reconstructed-link ME inside ``home_vof_fused_kernel`` solid pulls.
+
+    When True, coupling should clear ``body_f`` before the fluid step and skip the
+    post-step ME scan (same forces, stream-time populations).
+    """
     vof_seal_fg: bool = True
     """After surface_3, face-only liquid–gas seal → interface. Home relies on
     surface_1/2 only; set False for closer Home topology."""

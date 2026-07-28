@@ -46,19 +46,29 @@ class LbmFeedbackMode(str, Enum):
     """Core path: distribution ME when ``f`` exists; ``home_fp32`` reconstructed-link ME."""
 
 
-def recommended_me_force_scale(dh: float, dt: float) -> float:
-    """Lattice→world force scale for link / distribution momentum exchange.
+def recommended_me_force_scale(
+    dh: float,
+    dt: float,
+    *,
+    rigid_g_abs: float = 1.0,
+    lbm_g_abs: float = 0.002,
+) -> float:
+    """Lattice→rigid force scale for link ME (post-step or in-fused).
 
-    ME kernels already multiply by cell volume ``dh³``. With reference density
-    ``ρ₀ = 1``, the remaining conversion from lattice momentum-per-step into
-    Newton-like force units used by ``RigidDomain`` is ``(dh / dt)²``.
+    Kernels already multiply by cell volume ``dh³``. With a shared gravity scale,
+    Open-style conversion leaves ``(dh/dt)²``. WanPhys dam-break FSI intentionally
+    uses ``|g_rigid| ≫ |g_lbm|``, so the raw factor over-drives spheres (bounce).
 
-    Examples should prefer this helper over a magic constant; callers may still
-    override ``force_scale`` for calibration.
+    Attenuate by ``(|g_lbm|/|g_rigid|)^{1/4}`` and clamp to ``[20, 40]`` (raw ~207,
+    floor-slide ~6). Pair sphere demos with strong vertical / weak horizontal
+    ME-path drag so light floats on first surge without perpetual bobbing.
     """
     dh_f = max(float(dh), 1.0e-12)
     dt_f = max(float(dt), 1.0e-12)
-    return (dh_f / dt_f) ** 2
+    dimensional = (dh_f / dt_f) ** 2
+    split = max(float(lbm_g_abs), 1.0e-12) / max(float(rigid_g_abs), 1.0e-12)
+    attenuated = dimensional * (split**0.25)
+    return float(min(40.0, max(20.0, attenuated)))
 
 
 _SHAPE_MAP = {
@@ -570,17 +580,47 @@ class GridLbmRigidCoupling(CompositeSimulation):
                     ],
                 )
 
-        # 4. Advance fluid
+        # 4. Advance fluid (optional stream-time ME inside fused solid pulls).
+        use_fused_me = False
+        if (
+            self._two_way_feedback_enabled
+            and self._feedback_mode == LbmFeedbackMode.MOMENTUM_EXCHANGE.value
+            and self._body_shape_type is not None
+            and len(self._bodies) > 0
+            and rigid_state.body_f is not None
+        ):
+            backend = str(getattr(model, "lbm_backend", "dist")).lower()
+            home = getattr(self._fluid_domain.solver, "_home_fp32", None)
+            if (
+                backend == "home_fp32"
+                and home is not None
+                and home.enabled
+                and bool(getattr(model, "vof_home_me_in_fused", False))
+            ):
+                rigid_backend_pre = self._rigid_domain.model._newton_backend
+                rigid_state.clear_forces()
+                home.prepare_fused_link_me(
+                    enabled=True,
+                    solid_body_id=fluid_state.solid_body_id,
+                    body_q=rigid_state.body_q,
+                    body_com=rigid_backend_pre.body_com,
+                    body_f=rigid_state.body_f,
+                    dh=dh,
+                    force_scale=self._feedback_force_scale,
+                )
+                use_fused_me = True
+
         self._fluid_domain.step(dt)
         fluid_state_after: LbmState = self._fluid_domain._state_in
 
-        # 5. Optionally accumulate LBM fluid-to-rigid feedback.
+        # 5. Optionally accumulate LBM fluid-to-rigid feedback (post-step path).
         if (
             self._two_way_feedback_enabled
             and self._feedback_mode != LbmFeedbackMode.NONE.value
             and self._body_shape_type is not None
             and len(self._bodies) > 0
             and rigid_state.body_f is not None
+            and not use_fused_me
         ):
             rigid_backend: object = self._rigid_domain.model._newton_backend
             rigid_state.clear_forces()
@@ -670,6 +710,12 @@ class GridLbmRigidCoupling(CompositeSimulation):
                 )
                 self._last_lbm_feedback_wrench = (
                     post_feedback_wrench - pre_feedback_wrench
+                ).copy()
+        elif use_fused_me:
+            # Forces already in body_f from fused ME; optional wrench snapshot.
+            if self._last_lbm_feedback_wrench is not None:
+                self._last_lbm_feedback_wrench = np.asarray(
+                    rigid_state.body_f.numpy(), dtype=np.float64
                 ).copy()
         elif self._last_lbm_feedback_wrench is not None:
             self._last_lbm_feedback_wrench.fill(0.0)
