@@ -22,55 +22,64 @@ class TestPart2ForcePipeline(unittest.TestCase):
             ("home", "trt"),
             ("home", "nocm_mrt"),
         )
-        for encoding, collision in paths:
-            with self.subTest(encoding=encoding, collision=collision):
-                model = LbmModel(
-                    fluid_grid_res=(2, 2, 2),
-                    device="cpu",
+        for enforce_positivity in (False, True):
+            for encoding, collision in paths:
+                with self.subTest(
+                    enforce_positivity=enforce_positivity,
                     encoding=encoding,
                     collision=collision,
-                    gravity_x=gravity,
-                    tau=0.8,
-                    bc_periodic=(True, True, True),
-                )
-                domain = LbmDomain(model)
-                state = domain.create_state()
-                domain.solver.initialize_equilibrium(state, rho0=1.0)
-                domain.step(1.0)
-
-                np.testing.assert_allclose(
-                    domain.state.force_x.numpy(), gravity, atol=2.0e-8, rtol=2.0e-6
-                )
-                np.testing.assert_allclose(
-                    domain.state.velocity_x.numpy(),
-                    0.5 * gravity,
-                    atol=2.0e-8,
-                    rtol=2.0e-6,
-                )
-
-                if isinstance(domain.state, HomeLbmState):
-                    total_post_momentum = float(
-                        np.sum(domain.state.rho_u_x.numpy(), dtype=np.float64)
+                ):
+                    model = LbmModel(
+                        fluid_grid_res=(2, 2, 2),
+                        device="cpu",
+                        encoding=encoding,
+                        collision=collision,
+                        gravity_x=gravity,
+                        tau=0.8,
+                        bc_periodic=(True, True, True),
+                        enforce_population_positivity=enforce_positivity,
                     )
-                else:
-                    f = domain.state.f_post.numpy().reshape(19, -1)
-                    total_post_momentum = float(
-                        np.sum(
-                            f[1] - f[2] + f[7] - f[8] + f[9] - f[10]
-                            + f[11] - f[12] + f[13] - f[14],
-                            dtype=np.float64,
+                    domain = LbmDomain(model)
+                    state = domain.create_state()
+                    domain.solver.initialize_equilibrium(state, rho0=1.0)
+                    domain.step(1.0)
+
+                    np.testing.assert_allclose(
+                        domain.state.force_x.numpy(),
+                        gravity,
+                        atol=2.0e-8,
+                        rtol=2.0e-6,
+                    )
+                    np.testing.assert_allclose(
+                        domain.state.velocity_x.numpy(),
+                        0.5 * gravity,
+                        atol=2.0e-8,
+                        rtol=2.0e-6,
+                    )
+
+                    if isinstance(domain.state, HomeLbmState):
+                        total_post_momentum = float(
+                            np.sum(domain.state.rho_u_x.numpy(), dtype=np.float64)
                         )
+                    else:
+                        f = domain.state.f_post.numpy().reshape(19, -1)
+                        total_post_momentum = float(
+                            np.sum(
+                                f[1] - f[2] + f[7] - f[8] + f[9] - f[10]
+                                + f[11] - f[12] + f[13] - f[14],
+                                dtype=np.float64,
+                            )
+                        )
+                    # Full MRT paths reconstruct O(1) populations through a
+                    # float32 inverse moment transform before their O(1e-4)
+                    # momentum is differenced.  Allow the corresponding
+                    # cancellation floor while still resolving the injected F.
+                    np.testing.assert_allclose(
+                        total_post_momentum,
+                        8.0 * gravity,
+                        rtol=1.0e-3,
+                        atol=2.0e-7,
                     )
-                # Full MRT paths reconstruct O(1) populations through a
-                # float32 inverse moment transform before their O(1e-4)
-                # momentum is differenced.  Allow the corresponding
-                # cancellation floor while still resolving the injected F.
-                np.testing.assert_allclose(
-                    total_post_momentum,
-                    8.0 * gravity,
-                    rtol=1.0e-3,
-                    atol=2.0e-7,
-                )
 
     def test_explicit_none_rejects_nonzero_legacy_force_fields(self) -> None:
         with self.assertRaises(ValueError):

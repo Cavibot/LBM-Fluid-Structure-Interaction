@@ -524,24 +524,6 @@ class LbmSolver(FluidGridSolverBase):
             if isinstance(state_out, HomeLbmState):
                 for destination, source in zip(state_out.kinetic_fields, self._moments):
                     wp.copy(destination, source)
-            wp.launch(
-                forcing.hydro_closure_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    self._rho,
-                    self._jx,
-                    self._jy,
-                    self._jz,
-                    self._fx,
-                    self._fy,
-                    self._fz,
-                    self._ux,
-                    self._uy,
-                    self._uz,
-                    float(self.model.max_lattice_speed),
-                ],
-                device=self.device,
-            )
         elif isinstance(state_out, HomeLbmState) and output_f is not None:
             self._encode_populations_to_home(output_f, state_out)
 
