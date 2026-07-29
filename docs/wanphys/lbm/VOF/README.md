@@ -91,4 +91,4 @@ dam-break 示例的相关参数为：
 - [04-sequence-diagrams.md](04-sequence-diagrams.md)：算法时序；
 - [05-control-flow-diagrams.md](05-control-flow-diagrams.md)：控制流；
 - [06-development-roadmap.md](06-development-roadmap.md)：P0-P7 开发门禁；
-- `07-p0-baseline.md`：P0 冻结提交、环境与固定回归记录（完成验收后生成）。
+- [07-p0-baseline.md](07-p0-baseline.md)：P0 冻结提交、环境与固定回归记录。

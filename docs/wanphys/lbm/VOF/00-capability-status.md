@@ -2,7 +2,8 @@
 
 本文是当前 LBM/VOF 能力的状态入口，严格区分 Shan-Chen 调试观察与未来的守恒
 VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
-[06-development-roadmap.md](06-development-roadmap.md)。
+[06-development-roadmap.md](06-development-roadmap.md)。P0 当前为 `CPU_ACCEPTED`；
+冻结证据见 [07-p0-baseline.md](07-p0-baseline.md)，CUDA 尚未验收。
 
 ## 1. 状态含义
 

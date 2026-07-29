@@ -170,6 +170,9 @@ phi 与 mass 属于同一时间层
 
 ## 5. P0：基线与证据冻结
 
+状态：`CPU_ACCEPTED`。冻结环境、SHA、命令、结果与限制见
+[07-p0-baseline.md](07-p0-baseline.md)；CUDA 尚未验收。
+
 ### 5.1 阶段概要
 
 固定当前 SC-to-VOF debug observation 和原 LBM 的行为，避免正式 VOF 接入后无法
@@ -204,10 +207,10 @@ phi 与 mass 属于同一时间层
 ### 5.4 退出门禁
 
 ```text
-[ ] observation-only 与 authoritative 的命名和行为边界明确
-[ ] 旧 LBM 回归命令固定
-[ ] VOF 状态表建立
-[ ] 未实现正式模式 fail-fast
+[x] observation-only 与 authoritative 的命名和行为边界明确
+[x] 旧 LBM 回归命令固定
+[x] VOF 状态表建立
+[x] 未实现正式模式 fail-fast
 ```
 
 ## 6. P1：正式状态、配置与初始化
