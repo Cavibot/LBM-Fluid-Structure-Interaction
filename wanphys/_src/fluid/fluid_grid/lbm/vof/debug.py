@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Observation-only adapter from Shan-Chen density to reusable VOF state."""
+"""Observation-only adapter from Shan-Chen density to a VOF-shaped debug mock."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import warp as wp
 
 from .geometry import InterfaceGeometry
 from .kernels import classify_bounded_fill_fraction_kernel
-from .state import VofGridState
+from .state import DebugMockScToVofState
 
 
 @wp.kernel
@@ -24,8 +24,8 @@ def density_to_debug_fill_fraction_kernel(
     phi[i, j, k] = wp.clamp(value, 0.0, 1.0)
 
 
-class DebugVofObserver:
-    """Populate diagnostic VOF fields without feeding back into LBM physics."""
+class DebugMockScToVofObserver:
+    """Populate an isolated debug mock without feeding back into LBM physics."""
 
     def __init__(
         self,
@@ -44,11 +44,11 @@ class DebugVofObserver:
         self.geometry = InterfaceGeometry(shape, device, periodic)
         self._epoch = 0
 
-    def update(
+    def update_from_density(
         self,
         density: wp.array3d,
         solid_phi: wp.array3d,
-        vof: VofGridState,
+        debug_mock: DebugMockScToVofState,
         epoch: int | None = None,
     ) -> int:
         """Refresh one state and return the epoch assigned to it.
@@ -65,7 +65,7 @@ class DebugVofObserver:
             dim=self.shape,
             inputs=[
                 density,
-                vof.phi,
+                debug_mock.phi,
                 self.rho_gas,
                 self.inverse_density_span,
             ],
@@ -75,17 +75,20 @@ class DebugVofObserver:
             classify_bounded_fill_fraction_kernel,
             dim=self.shape,
             inputs=[
-                vof.phi,
+                debug_mock.phi,
                 solid_phi,
-                vof.cell_type,
+                debug_mock.cell_type,
                 self.epsilon,
                 1.0 - self.epsilon,
             ],
             device=self.device,
         )
-        vof.epoch = epoch
-        self.geometry.compute_normal(vof, solid_phi)
+        debug_mock.epoch = epoch
+        self.geometry.compute_normal(debug_mock, solid_phi)
         return epoch
 
 
-__all__ = ["DebugVofObserver", "density_to_debug_fill_fraction_kernel"]
+__all__ = [
+    "DebugMockScToVofObserver",
+    "density_to_debug_fill_fraction_kernel",
+]

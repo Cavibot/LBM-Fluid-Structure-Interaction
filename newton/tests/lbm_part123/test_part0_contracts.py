@@ -15,16 +15,18 @@ from wanphys._src.fluid.fluid_grid.lbm.constants import (
     BC_VELOCITY_INLET,
 )
 from wanphys._src.fluid.fluid_grid.lbm.contracts import (
+    BoundaryModel,
     CapabilityStatus,
     Collision,
     CollisionSpace,
     Encoding,
     ForceModel,
-    BoundaryModel,
+    InterfaceModel,
     boundary_capability_status,
     capability_status,
     collision_contract,
     normalize_collision,
+    normalize_interface_model,
     resolve_force_model,
 )
 from wanphys._src.fluid.fluid_grid.lbm.model import LbmModel
@@ -51,13 +53,22 @@ class TestPart0Contracts(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             collision_contract(Encoding.HOME, Collision.RAW_MRT)
 
-    def test_force_model_is_inferred_from_physical_parameters(self) -> None:
-        self.assertIs(resolve_force_model(None, (0.0, -1.0e-5, 0.0), 0.0), ForceModel.GRAVITY)
-        self.assertIs(resolve_force_model(None, (0.0, 0.0, 0.0), -4.0), ForceModel.SHAN_CHEN)
+    def test_force_model_is_derived_from_interface_and_gravity(self) -> None:
         self.assertIs(
-            resolve_force_model(None, (0.0, -1.0e-5, 0.0), -4.0),
+            resolve_force_model(InterfaceModel.OFF, (0.0, -1.0e-5, 0.0)),
+            ForceModel.GRAVITY,
+        )
+        self.assertIs(
+            resolve_force_model("shan_chen", (0.0, 0.0, 0.0)),
+            ForceModel.SHAN_CHEN,
+        )
+        self.assertIs(
+            resolve_force_model("shan_chen", (0.0, -1.0e-5, 0.0)),
             ForceModel.GRAVITY_SHAN_CHEN,
         )
+        self.assertIs(normalize_interface_model("off"), InterfaceModel.OFF)
+        with self.assertRaisesRegex(ValueError, "Unknown LBM interface_model"):
+            normalize_interface_model("legacy")
 
     def test_open_face_edges_and_corners_fall_back_as_complete_cells(self) -> None:
         resolution = resolve_boundary_faces(

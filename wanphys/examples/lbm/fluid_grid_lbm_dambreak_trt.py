@@ -1,17 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dam-break demo with selectable Encoding / Collision / Force axes.
+"""Dam-break demo with orthogonal encoding, collision, interface, and gravity axes.
 
 Default path matches the historical Reg-TRT + Shan-Chen dam-break:
 
-    -e f -c t -f gsc
+    -e f -c t -i sc --gravity
 
 Short CLI flags (aliases accepted):
 
     -e / --enc     f|fullf | h|home
     -c / --col     s|srt | t|trt | r|raw|raw_mrt | n|nocm|nocm_mrt
-    -f / --force   0|none | g|gravity | sc|shan_chen | gsc|gs|gravity+shan_chen
+    -i / --interface   0|off | sc|shan_chen
+    --gravity / --no-gravity
 
 Controls: [Space] pause/resume  [R] reset  [mouse] orbit  [scroll] zoom
 """
@@ -27,6 +28,7 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import (
+    DebugVofView,
     FullFLbmState,
     HomeLbmState,
     LbmDomain,
@@ -83,16 +85,11 @@ _COL_ALIASES: dict[str, str] = {
     "nocm": "nocm_mrt",
     "nocm_mrt": "nocm_mrt",
 }
-_FORCE_ALIASES: dict[str, str] = {
-    "0": "none",
-    "none": "none",
-    "g": "gravity",
-    "gravity": "gravity",
+_INTERFACE_ALIASES: dict[str, str] = {
+    "0": "off",
+    "off": "off",
     "sc": "shan_chen",
     "shan_chen": "shan_chen",
-    "gsc": "gravity+shan_chen",
-    "gs": "gravity+shan_chen",
-    "gravity+shan_chen": "gravity+shan_chen",
 }
 
 
@@ -115,12 +112,12 @@ def _parse_col(value: str) -> str:
     return _resolve_alias(value, _COL_ALIASES, "collision")
 
 
-def _parse_force(value: str) -> str:
-    return _resolve_alias(value, _FORCE_ALIASES, "force")
+def _parse_interface(value: str) -> str:
+    return _resolve_alias(value, _INTERFACE_ALIASES, "interface")
 
 
 def create_parser() -> argparse.ArgumentParser:
-    """CLI with short three-axis selectors."""
+    """CLI with independent physical and observation selectors."""
     import newton.examples
 
     parser = newton.examples.create_parser()
@@ -141,12 +138,18 @@ def create_parser() -> argparse.ArgumentParser:
         help="collision: s|srt | t|trt | r|raw | n|nocm (default: t)",
     )
     parser.add_argument(
-        "-f",
-        "--force",
-        type=_parse_force,
-        default="gravity+shan_chen",
-        metavar="F",
-        help="force: 0|none | g|gravity | sc|shan_chen | gsc|gs (default: gsc)",
+        "-i",
+        "--interface",
+        type=_parse_interface,
+        default="shan_chen",
+        metavar="I",
+        help="interface model: 0|off | sc|shan_chen (default: sc)",
+    )
+    parser.add_argument(
+        "--gravity",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="enable or disable gravity independently (default: enabled)",
     )
     parser.add_argument(
         "-n",
@@ -157,9 +160,9 @@ def create_parser() -> argparse.ArgumentParser:
         help=f"grid resolution N³ (default: {N})",
     )
     parser.add_argument(
-        "--vof-debug-labels",
+        "--debug-vof-observation",
         action="store_true",
-        help="derive observation-only VOF labels from SC density",
+        help="derive a read-only debug VOF view from Shan-Chen density",
     )
     parser.add_argument(
         "--vof-debug-no-normals",
@@ -265,20 +268,20 @@ def _mirror_state(domain: LbmDomain) -> None:
 def build_model(args: argparse.Namespace) -> LbmModel:
     encoding: str = args.enc
     collision: str = args.col
-    force_model: str = args.force
+    interface_model: str = args.interface
     n: int = int(args.res)
 
     use_reg = collision == "trt"
     lambda_trt = LAMBDA_TRT if collision == "trt" else 0.0
-    g_sc = G_SC if force_model in ("shan_chen", "gravity+shan_chen") else 0.0
-    gz = GRAVITY if force_model in ("gravity", "gravity+shan_chen") else 0.0
+    g_sc = G_SC if interface_model == "shan_chen" else 0.0
+    gz = GRAVITY if bool(args.gravity) else 0.0
 
     return LbmModel(
         fluid_grid_res=(n, n, n),
         fluid_grid_cell_size=DH,
         encoding=encoding,
         collision=collision,
-        force_model=force_model,
+        interface_model=interface_model,
         tau=TAU,
         G=g_sc,
         sc_boundary_psi=SC_BOUNDARY_PSI,
@@ -290,7 +293,7 @@ def build_model(args: argparse.Namespace) -> LbmModel:
         gravity_x=0.0,
         gravity_y=0.0,
         gravity_z=gz,
-        vof_debug_labels=bool(args.vof_debug_labels),
+        debug_vof_observation=bool(args.debug_vof_observation),
         vof_debug_rho_gas=RHO_AIR,
         vof_debug_rho_liquid=RHO_WATER,
         vof_debug_epsilon=0.35,
@@ -368,8 +371,8 @@ class DamBreakExample:
                 device=self.model._device,
             )
         _mirror_state(self.domain)
-        if self.model.vof_debug_labels:
-            self.domain.solver.update_debug_vof_labels(
+        if self.model.debug_vof_observation:
+            self.domain.solver.update_debug_mock_sc_to_vof(
                 self.domain.state,
                 self.domain._state_out,
             )
@@ -395,7 +398,7 @@ class DamBreakExample:
         )
         viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
         self.vof_visualizer: VofInterfaceVisualizer | None = None
-        if self.model.vof_debug_labels:
+        if self.model.debug_vof_observation:
             self.vof_visualizer = VofInterfaceVisualizer(
                 (n, n, n),
                 self.model._device,
@@ -444,15 +447,15 @@ class DamBreakExample:
                 file=sys.stderr,
                 flush=True,
             )
-            vof = self.domain.state.vof
-            if vof is not None:
-                types = vof.cell_type.numpy()
+            debug_mock = self.domain.state.debug_mock_sc_to_vof
+            if debug_mock is not None:
+                types = debug_mock.cell_type.numpy()
                 gas = int((types == int(VofCellType.GAS)).sum())
                 interface = int((types == int(VofCellType.INTERFACE)).sum())
                 liquid = int((types == int(VofCellType.LIQUID)).sum())
                 print(
                     f"  VOF observe: gas={gas} interface={interface} liquid={liquid} "
-                    f"epoch={vof.epoch}",
+                    f"epoch={debug_mock.epoch}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -468,11 +471,11 @@ class DamBreakExample:
                 max_steps=RAY_MARCH_STEPS,
             )
         if self.vof_visualizer is not None:
-            vof = self.domain.state.vof
-            assert vof is not None
+            debug_mock = self.domain.state.debug_mock_sc_to_vof
+            assert debug_mock is not None
             self.vof_visualizer.render(
                 self.viewer,
-                vof,
+                DebugVofView.from_shan_chen_mock(debug_mock),
                 self.domain.state.solid_phi,
                 show_normals=bool(self.model.vof_debug_show_normals),
             )

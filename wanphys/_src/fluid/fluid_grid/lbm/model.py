@@ -5,15 +5,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import warnings
+from dataclasses import dataclass, field
 
 from ..base import FluidGridModelBase
 from .boundaries import normalize_boundary_type
 from .contracts import (
     BoundaryModel,
+    ForceModel,
+    InterfaceModel,
     normalize_collision,
     normalize_encoding,
+    normalize_interface_model,
     resolve_force_model,
     validate_capability,
 )
@@ -50,13 +53,11 @@ class LbmModel(FluidGridModelBase):
     ``trt``, ``raw_mrt`` and ``nocm_mrt``.
     """
 
-    force_model: str | None = None
-    """Force computation model.
+    interface_model: str = "off"
+    """Authoritative interface physics: ``off``, ``shan_chen``, or ``vof``."""
 
-    ``None`` infers the value from the legacy gravity and Shan-Chen fields.
-    Explicit values are ``none``, ``gravity``, ``shan_chen`` and
-    ``gravity+shan_chen``.
-    """
+    force_model: str = field(init=False, default=ForceModel.NONE.value)
+    """Normalized internal force-pipeline combination; not caller configuration."""
 
     # ---- BGK collision ---------------------------------------------------
     tau: float = 0.55
@@ -90,10 +91,11 @@ class LbmModel(FluidGridModelBase):
 
     # ---- Shan-Chen multiphase interaction --------------------------------
     G: float = 0.0
-    """Shan-Chen interaction strength.  Negative values produce attraction
-    between fluid particles, driving phase separation below a critical
-    threshold.  ``G = 0`` disables the interaction (single-phase mode).
-    Typical values: -4.0 to -6.0 for PSI_EXP, -0.3 to -0.5 for PSI_RHO."""
+    """Shan-Chen interaction strength used by ``interface_model='shan_chen'``.
+
+    This parameter controls interaction strength but no longer selects the
+    physical interface model.
+    """
     psi_type: int = 0
     """Pseudopotential type: ``PSI_RHO = 0`` (ψ = ρ), ``PSI_EXP = 1``
     (ψ = 1 − exp(−ρ / ψ_ref))."""
@@ -181,12 +183,12 @@ class LbmModel(FluidGridModelBase):
     With a=0.5, b=4 → T_c ≈ 0.0943 → T=0.07 gives ρ_l/ρ_g ≈ 100:1."""
 
     # ---- Observation-only VOF diagnostics --------------------------------
-    vof_debug_labels: bool = False
-    """Derive observation-only VOF fields from the final SC density.
+    debug_vof_observation: bool = False
+    """Derive a VOF-shaped debug mock from the final Shan-Chen density.
 
     This flag never changes streaming, forcing, collision, or boundary
-    behavior.  It only allocates and updates ``state.vof`` after macroscopic
-    observables have been written.
+    behavior.  It only allocates and updates
+    ``state.debug_mock_sc_to_vof`` after macroscopic observables are written.
     """
     vof_debug_rho_gas: float = 0.1
     """Gas coexistence density used only by the diagnostic density mapping."""
@@ -369,6 +371,8 @@ class LbmModel(FluidGridModelBase):
         self.bc_types = tuple(normalized_bc_types)  # type: ignore[assignment]
         self.boundary_models = tuple(normalized_boundary_models)  # type: ignore[assignment]
         self.encoding = normalize_encoding(self.encoding).value
+        resolved_interface = normalize_interface_model(self.interface_model)
+        self.interface_model = resolved_interface.value
         if self.collision is not None:
             canonical_collision, used_alias = normalize_collision(self.collision)
             if used_alias:
@@ -379,10 +383,23 @@ class LbmModel(FluidGridModelBase):
                     stacklevel=2,
                 )
             self.collision = canonical_collision.value
+        if resolved_interface is InterfaceModel.VOF:
+            raise NotImplementedError("authoritative VOF is not implemented")
+        if (
+            resolved_interface is InterfaceModel.OFF
+            and self.debug_vof_observation
+        ):
+            raise ValueError("debug_vof_observation requires an interface model")
+        if (
+            resolved_interface is not InterfaceModel.SHAN_CHEN
+            and float(self.G) != 0.0
+        ):
+            raise ValueError(
+                "non-zero Shan-Chen G requires interface_model='shan_chen'"
+            )
         resolved_force = resolve_force_model(
-            self.force_model,
+            resolved_interface,
             (float(self.gravity_x), float(self.gravity_y), float(self.gravity_z)),
-            float(self.G),
         )
         self.force_model = resolved_force.value
         validate_capability(self.encoding, self.resolved_collision, resolved_force)

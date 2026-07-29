@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from .state import VofGridState
+from .state import DebugMockScToVofState
 
 
 @wp.func
@@ -131,7 +131,7 @@ class InterfaceGeometry:
 
     def compute_normal(
         self,
-        vof: VofGridState,
+        debug_mock: DebugMockScToVofState,
         solid_phi: wp.array3d,
     ) -> None:
         nx, ny, nz = self.shape
@@ -140,10 +140,10 @@ class InterfaceGeometry:
             parker_youngs_normal_kernel,
             dim=self.shape,
             inputs=[
-                vof.phi,
-                vof.cell_type,
+                debug_mock.phi,
+                debug_mock.cell_type,
                 solid_phi,
-                vof.geometry.normal,
+                debug_mock.normal,
                 px,
                 py,
                 pz,
@@ -153,7 +153,7 @@ class InterfaceGeometry:
             ],
             device=self.device,
         )
-        vof.geometry.valid_epoch = vof.epoch
+        debug_mock.normal_valid_epoch = debug_mock.epoch
 
 
 __all__ = ["InterfaceGeometry", "parker_youngs_normal_kernel"]

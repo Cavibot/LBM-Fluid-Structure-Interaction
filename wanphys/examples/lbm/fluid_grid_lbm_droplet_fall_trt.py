@@ -164,6 +164,7 @@ class TrtDropletFall:
         self.model: LbmModel = LbmModel(
             fluid_grid_res=(N, N, N),
             fluid_grid_cell_size=DH,
+            interface_model="shan_chen",
             tau=TAU,
             G=G_SC,
             psi_type=PSI_TYPE,

@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU compaction of VOF interface cells into reusable visual primitives."""
+"""Read-only conversion of VOF-shaped views into visual primitives.
+
+This module may derive a render mask, compact points, and transform render
+coordinates.  It must not derive or modify physical phi, normal, or curvature.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,7 @@ from dataclasses import dataclass
 
 import warp as wp
 
-from .state import VofGridState
+from .state import DebugMockScToVofState
 
 
 @wp.kernel
@@ -37,6 +41,30 @@ def compact_interface_visuals_kernel(
     )
     points[output_index] = point
     normal_ends[output_index] = point + normal[i, j, k] * normal_length
+
+
+@dataclass(frozen=True)
+class DebugVofView:
+    """Read-only visual input resolved from one VOF-shaped state source."""
+
+    phi: wp.array
+    cell_type: wp.array
+    normal: wp.array
+    epoch: int
+    source: str
+
+    @classmethod
+    def from_shan_chen_mock(
+        cls,
+        debug_mock: DebugMockScToVofState,
+    ) -> DebugVofView:
+        return cls(
+            phi=debug_mock.phi,
+            cell_type=debug_mock.cell_type,
+            normal=debug_mock.normal,
+            epoch=debug_mock.epoch,
+            source="shan_chen_mock",
+        )
 
 
 @dataclass(frozen=True)
@@ -86,7 +114,7 @@ class VofInterfaceVisualizer:
 
     def compact(
         self,
-        vof: VofGridState,
+        view: DebugVofView,
         solid_phi: wp.array3d,
     ) -> InterfaceVisualData:
         self._count.zero_()
@@ -94,8 +122,8 @@ class VofInterfaceVisualizer:
             compact_interface_visuals_kernel,
             dim=self.shape,
             inputs=[
-                vof.cell_type,
-                vof.geometry.normal,
+                view.cell_type,
+                view.normal,
                 solid_phi,
                 self._count,
                 self._points,
@@ -117,11 +145,11 @@ class VofInterfaceVisualizer:
     def render(
         self,
         viewer: object,
-        vof: VofGridState,
+        view: DebugVofView,
         solid_phi: wp.array3d,
         show_normals: bool = True,
     ) -> int:
-        data = self.compact(vof, solid_phi)
+        data = self.compact(view, solid_phi)
         if data.count == 0:
             viewer.log_points("vof/interface", points=None)
             viewer.log_lines(
@@ -156,6 +184,7 @@ class VofInterfaceVisualizer:
 
 
 __all__ = [
+    "DebugVofView",
     "InterfaceVisualData",
     "VofInterfaceVisualizer",
     "compact_interface_visuals_kernel",

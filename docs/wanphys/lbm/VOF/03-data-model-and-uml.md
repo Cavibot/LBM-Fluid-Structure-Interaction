@@ -28,16 +28,19 @@ Scratch
 
 ### 1.3 阶段一实现状态
 
-阶段一保持 Shan-Chen 为唯一物理多相模型，仅在最终宏观密度写出后生成观察状态。
-除密度映射函数和 `vof_debug_*` 参数外，下列接口按正式 VOF 可复用边界实现：
+P0 保持 Shan-Chen 为唯一已实现的物理多相模型，仅在最终宏观密度写出后生成独立
+调试状态。正式 VOF 与调试副本不共用容器：
 
 | UML 内容 | 阶段一状态 |
 |---|---|
 | `VofCellType` | 已实现 `GAS / INTERFACE / LIQUID`，使用 `uint8` |
-| `VofGridState` | 已实现 `phi / cell_type / epoch`；`mass` 延后 |
-| `GeometryState` | 已实现 `normal / valid_epoch`；PLIC 和 curvature 延后 |
+| `state.vof / VofGridState` | P1 authoritative 容器，P0 未实现且恒为 `None` |
+| `DebugMockScToVofState` | 已实现调试 `phi/cell_type/normal/epoch`；没有 `mass` |
 | `InterfaceGeometry` | 已实现液体指向气体的 Parker-Youngs normal |
-| `VofConfig` | 未实现；阶段一只有可淘汰的 observation/debug 参数 |
+| `DebugVofView` | 已实现只读渲染输入；不拥有也不计算物理状态 |
+| `interface_model` | 已实现 `off/shan_chen/vof` 契约；`vof` 在 P0 fail-fast |
+| `debug_vof_observation` | 已实现 SC 调试观察开关 |
+| `VofConfig` | P1 未实现 |
 | `VofMassTransport` | 未实现 |
 | `LinkResolver` surface reconstruction | 未实现 |
 
@@ -53,8 +56,8 @@ Scratch
 \right).
 \]
 
-它不是 Eq. (9)-(10) 推进得到的守恒 VOF 状态，不能进入 streaming、collision、
-forcing 或边界处理。
+它不是 Eq. (9)-(10) 推进得到的守恒 VOF 状态，只能写入
+`state.debug_mock_sc_to_vof`，不能进入 streaming、collision、forcing 或边界处理。
 
 ## 2. 顶层模块 UML
 
@@ -141,6 +144,8 @@ classDiagram
         +density
         +velocity
         +force
+        +vof = None
+        +debug_mock_sc_to_vof
     }
 
     class HomeKineticState {
@@ -169,18 +174,19 @@ classDiagram
         +cell_type
     }
 
-    class GeometryState {
-        <<project_cache>>
+    class DebugMockScToVofState {
+        <<observation_only>>
+        +phi
+        +cell_type
         +normal
-        +plic_offset
-        +curvature
-        +valid_epoch
+        +epoch
+        +normal_valid_epoch
     }
 
     LbmStateBase *-- HomeKineticState
     LbmStateBase *-- FullFKineticState
     LbmStateBase *-- VofGridState
-    VofGridState *-- GeometryState
+    LbmStateBase *-- DebugMockScToVofState
 ```
 
 实际状态只应包含一种 kinetic encoding：
@@ -190,7 +196,8 @@ HOME -> HomeKineticState
 FullF -> FullFKineticState
 ```
 
-图中同时画出是为了表示可替换关系，不代表同时分配。
+图中同时画出是为了表示可替换关系，不代表同时分配。P0 只可能分配
+`DebugMockScToVofState`；P1 开始后 `VofGridState` 的分配必须与观察开关无关。
 
 ## 4. 建议字段表
 

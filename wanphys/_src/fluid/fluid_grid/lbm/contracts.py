@@ -40,6 +40,12 @@ class CollisionSpace(_StringEnum):
     HOME_ENCODED_MOMENT = "home_encoded_moment"
 
 
+class InterfaceModel(_StringEnum):
+    OFF = "off"
+    SHAN_CHEN = "shan_chen"
+    VOF = "vof"
+
+
 class ForceModel(_StringEnum):
     NONE = "none"
     GRAVITY = "gravity"
@@ -129,40 +135,31 @@ def normalize_collision(value: str | Collision) -> tuple[Collision, bool]:
         raise ValueError(f"Unknown LBM collision {value!r}; expected one of: {expected}") from exc
 
 
-def resolve_force_model(
-    value: str | ForceModel | None,
-    gravity: tuple[float, float, float],
-    shan_chen_g: float,
-) -> ForceModel:
-    """Resolve an explicit force model or infer one from legacy parameters."""
-
-    has_gravity = any(component != 0.0 for component in gravity)
-    has_shan_chen = shan_chen_g != 0.0
-    inferred = ForceModel.NONE
-    if has_gravity and has_shan_chen:
-        inferred = ForceModel.GRAVITY_SHAN_CHEN
-    elif has_gravity:
-        inferred = ForceModel.GRAVITY
-    elif has_shan_chen:
-        inferred = ForceModel.SHAN_CHEN
-
-    if value is None:
-        return inferred
+def normalize_interface_model(value: str | InterfaceModel) -> InterfaceModel:
     try:
-        explicit = ForceModel(str(value).lower())
+        return InterfaceModel(str(value).lower())
     except ValueError as exc:
-        expected = ", ".join(item.value for item in ForceModel)
-        raise ValueError(f"Unknown LBM force_model {value!r}; expected one of: {expected}") from exc
-
-    if explicit is ForceModel.NONE and inferred is not ForceModel.NONE:
+        expected = ", ".join(item.value for item in InterfaceModel)
         raise ValueError(
-            "force_model='none' conflicts with non-zero gravity or Shan-Chen parameters"
-        )
-    if explicit is ForceModel.GRAVITY and has_shan_chen:
-        raise ValueError("force_model='gravity' conflicts with non-zero Shan-Chen G")
-    if explicit is ForceModel.SHAN_CHEN and has_gravity:
-        raise ValueError("force_model='shan_chen' conflicts with non-zero gravity")
-    return explicit
+            f"Unknown LBM interface_model {value!r}; expected one of: {expected}"
+        ) from exc
+
+
+def resolve_force_model(
+    interface_model: str | InterfaceModel,
+    gravity: tuple[float, float, float],
+) -> ForceModel:
+    """Derive the internal force pipeline from interface physics and gravity."""
+
+    resolved_interface = normalize_interface_model(interface_model)
+    has_gravity = any(component != 0.0 for component in gravity)
+    if resolved_interface is InterfaceModel.SHAN_CHEN:
+        if has_gravity:
+            return ForceModel.GRAVITY_SHAN_CHEN
+        return ForceModel.SHAN_CHEN
+    if has_gravity:
+        return ForceModel.GRAVITY
+    return ForceModel.NONE
 
 
 def _contract_registry() -> dict[tuple[Encoding, Collision], CollisionContract]:

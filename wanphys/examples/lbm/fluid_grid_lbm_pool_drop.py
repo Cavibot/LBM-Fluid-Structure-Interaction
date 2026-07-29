@@ -376,6 +376,7 @@ class LbmPoolDropExample:
         self.model: LbmModel = LbmModel(
             fluid_grid_res=GRID_RES,
             fluid_grid_cell_size=CELL_SIZE,
+            interface_model="shan_chen",
             tau=TAU,
             G=G_SC,
             psi_type=PSI_TYPE,

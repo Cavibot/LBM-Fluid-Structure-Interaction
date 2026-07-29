@@ -11,17 +11,18 @@ from .contracts import (
     CollisionSpace,
     Encoding,
     ForceModel,
+    InterfaceModel,
 )
 from .domain import LbmDomain
 from .model import LbmModel
 from .solver import LbmSolver
 from .state import FullFLbmState, HomeLbmState, LbmState, LbmStateBase
 from .vof import (
-    GeometryState,
+    DebugMockScToVofState,
+    DebugVofView,
     InterfaceGeometry,
     InterfaceVisualData,
     VofCellType,
-    VofGridState,
     VofInterfaceVisualizer,
 )
 
@@ -31,12 +32,14 @@ __all__ = [
     "Collision",
     "CollisionContext",
     "CollisionSpace",
+    "DebugMockScToVofState",
+    "DebugVofView",
     "Encoding",
     "ForceModel",
     "FullFLbmState",
-    "GeometryState",
     "HomeLbmState",
     "InterfaceGeometry",
+    "InterfaceModel",
     "InterfaceVisualData",
     "LbmDomain",
     "LbmModel",
@@ -44,6 +47,5 @@ __all__ = [
     "LbmState",
     "LbmStateBase",
     "VofCellType",
-    "VofGridState",
     "VofInterfaceVisualizer",
 ]

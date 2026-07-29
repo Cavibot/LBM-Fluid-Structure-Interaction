@@ -270,7 +270,7 @@ def run_case(
         device=device,
         encoding=encoding,
         collision=collision,
-        force_model="gravity+shan_chen",
+        interface_model="shan_chen",
         tau=0.55,
         lambda_trt=0.03 if use_trt else 0.0,
         use_regularization=use_trt,

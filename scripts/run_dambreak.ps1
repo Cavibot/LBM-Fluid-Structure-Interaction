@@ -1,19 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 #
-# Dam-break three-axis launcher (Encoding / Collision / Force)
+# Dam-break launcher (Encoding / Collision / Interface / Gravity)
 #
 # Usage:
 #   .\scripts\run_dambreak.ps1              # interactive menu
 #   .\scripts\run_dambreak.ps1 help         # print flag cheat-sheet
-#   .\scripts\run_dambreak.ps1 1            # preset #1 (FullF + SRT + g+SC, N=64)
-#   .\scripts\run_dambreak.ps1 -e f -c t -f gsc -n 64
-#   .\scripts\run_dambreak.ps1 f t gsc 64   # positional short form: enc col force [N]
+#   .\scripts\run_dambreak.ps1 1            # preset #1 (FullF + SRT + SC + gravity, N=64)
+#   .\scripts\run_dambreak.ps1 -e f -c t -i sc --gravity -n 64
+#   .\scripts\run_dambreak.ps1 f t sc 64    # positional short form: enc col interface [N]
 #
 # Flags (short):
 #   -e  encoding   f|fullf   h|home
 #   -c  collision  s|srt     t|trt     r|raw|raw_mrt     n|nocm|nocm_mrt
-#   -f  force      0|none    g|gravity sc|shan_chen      gsc|gs|gravity+shan_chen
+#   -i  interface  0|off     sc|shan_chen
+#       gravity    --gravity | --no-gravity
 #   -n  resolution N^3 (default 128)
 #   --viewer gl|null   --device cuda:0|cpu   --headless
 
@@ -22,7 +23,7 @@ $Module = "wanphys.examples.lbm.fluid_grid_lbm_dambreak_trt"
 $DefaultViewer = "gl"
 $DefaultN = 128
 
-# All presets: force = g+SC; matrix = {f,h} x {s,r,n,t} x {64,128}
+# All presets: interface = SC, gravity = on; matrix = {f,h} x {s,r,n,t} x {64,128}
 # Note: HOME + RawMRT is fail-fast (still listed for completeness).
 $Presets = @()
 $id = 1
@@ -41,7 +42,7 @@ foreach ($e in @("f", "h")) {
                 Id   = $id
                 E    = $e
                 C    = $c
-                F    = "gsc"
+                I    = "sc"
                 N    = $n
                 Desc = "$eName + $cName + g+SC  N=$n$note"
             }
@@ -52,14 +53,16 @@ foreach ($e in @("f", "h")) {
 
 function Show-CheatSheet {
     Write-Host ""
-    Write-Host "=== Dam-Break 3-axis flags ===" -ForegroundColor Cyan
+    Write-Host "=== Dam-Break orthogonal flags ===" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  -e / --enc     " -NoNewline -ForegroundColor Yellow
     Write-Host "f|fullf   h|home"
     Write-Host "  -c / --col     " -NoNewline -ForegroundColor Yellow
     Write-Host "s|srt   t|trt   r|raw|raw_mrt   n|nocm|nocm_mrt"
-    Write-Host "  -f / --force   " -NoNewline -ForegroundColor Yellow
-    Write-Host "0|none   g|gravity   sc|shan_chen   gsc|gs"
+    Write-Host "  -i / --interface " -NoNewline -ForegroundColor Yellow
+    Write-Host "0|off   sc|shan_chen"
+    Write-Host "       gravity   " -NoNewline -ForegroundColor Yellow
+    Write-Host "--gravity | --no-gravity"
     Write-Host "  -n / --res     " -NoNewline -ForegroundColor Yellow
     Write-Host "grid N^3  (default $DefaultN)"
     Write-Host ""
@@ -68,15 +71,15 @@ function Show-CheatSheet {
     Write-Host ""
     Write-Host "Examples:" -ForegroundColor Cyan
     Write-Host "  .\scripts\run_dambreak.ps1 1"
-    Write-Host "  .\scripts\run_dambreak.ps1 -e f -c t -f gsc -n 64"
-    Write-Host "  .\scripts\run_dambreak.ps1 f t gsc 64"
-    Write-Host "  .\scripts\run_dambreak.ps1 -e h -c n -f g --viewer null -n 32"
+    Write-Host "  .\scripts\run_dambreak.ps1 -e f -c t -i sc --gravity -n 64"
+    Write-Host "  .\scripts\run_dambreak.ps1 f t sc 64"
+    Write-Host "  .\scripts\run_dambreak.ps1 -e h -c n -i off --gravity --viewer null -n 32"
     Write-Host ""
 }
 
 function Show-Menu {
     Write-Host ""
-    Write-Host "=== Dam-Break Launcher (enc / col / force=g+SC) ===" -ForegroundColor Cyan
+    Write-Host "=== Dam-Break Launcher (enc / col / interface=SC / gravity=on) ===" -ForegroundColor Cyan
     Write-Host ""
     Write-Host ("  {0,-4} {1,-3} {2,-3} {3,-4} {4,-5}  {5}" -f `
         "#", "E", "C", "F", "N", "description") -ForegroundColor DarkGray
@@ -85,12 +88,12 @@ function Show-Menu {
         $color = if ($p.E -eq "h" -and $p.C -eq "r") { "DarkRed" } else { "White" }
         Write-Host ("  [{0,2}] " -f $p.Id) -NoNewline -ForegroundColor Yellow
         Write-Host ("{0,-3} {1,-3} {2,-4} {3,-5}  {4}" -f `
-            $p.E, $p.C, $p.F, $p.N, $p.Desc) -ForegroundColor $color
+            $p.E, $p.C, $p.I, $p.N, $p.Desc) -ForegroundColor $color
     }
     Write-Host ""
     Write-Host "  [ 0] Quit" -ForegroundColor DarkGray
     Write-Host "  [ h] Help / flag cheat-sheet" -ForegroundColor DarkGray
-    Write-Host "  [ c] Custom  (prompt -e -c -f -n)" -ForegroundColor DarkGray
+    Write-Host "  [ c] Custom  (prompt -e -c -i --gravity -n)" -ForegroundColor DarkGray
     Write-Host ""
 }
 
@@ -98,7 +101,8 @@ function Invoke-DamBreak {
     param(
         [Parameter(Mandatory = $true)][string]$Enc,
         [Parameter(Mandatory = $true)][string]$Col,
-        [Parameter(Mandatory = $true)][string]$Force,
+        [Parameter(Mandatory = $true)][string]$Interface,
+        [bool]$Gravity = $true,
         [int]$N = $DefaultN,
         [string]$Viewer = $DefaultViewer,
         [string]$Device = "",
@@ -117,9 +121,14 @@ function Invoke-DamBreak {
         "--viewer", $Viewer,
         "-e", $Enc,
         "-c", $Col,
-        "-f", $Force,
+        "-i", $Interface,
         "-n", "$N"
     )
+    if ($Gravity) {
+        $cmdArgs += "--gravity"
+    } else {
+        $cmdArgs += "--no-gravity"
+    }
     if ($Device -ne "") {
         $cmdArgs += @("--device", $Device)
     }
@@ -143,12 +152,14 @@ function Read-CustomAndRun {
     if ([string]::IsNullOrWhiteSpace($enc)) { $enc = "f" }
     $col = Read-Host "collision [-c] s|t|r|n  (default t)"
     if ([string]::IsNullOrWhiteSpace($col)) { $col = "t" }
-    $frc = Read-Host "force     [-f] 0|g|sc|gsc  (default gsc)"
-    if ([string]::IsNullOrWhiteSpace($frc)) { $frc = "gsc" }
+    $interface = Read-Host "interface [-i] 0|sc  (default sc)"
+    if ([string]::IsNullOrWhiteSpace($interface)) { $interface = "sc" }
+    $gravityIn = Read-Host "gravity [Y/n]  (default Y)"
+    $gravity = -not ($gravityIn -match '^(n|no|0|false)$')
     $nIn = Read-Host "resolution [-n]  (default $DefaultN)"
     $n = $DefaultN
     if (-not [string]::IsNullOrWhiteSpace($nIn)) { $n = [int]$nIn }
-    Invoke-DamBreak -Enc $enc -Col $col -Force $frc -N $n | Out-Null
+    Invoke-DamBreak -Enc $enc -Col $col -Interface $interface -Gravity $gravity -N $n | Out-Null
 }
 
 function Parse-And-Run {
@@ -174,16 +185,16 @@ function Parse-And-Run {
             Write-Host "Unknown preset: $presetId" -ForegroundColor Red
             return $true
         }
-        Invoke-DamBreak -Enc $p.E -Col $p.C -Force $p.F -N $p.N | Out-Null
+        Invoke-DamBreak -Enc $p.E -Col $p.C -Interface $p.I -Gravity $true -N $p.N | Out-Null
         return $true
     }
 
-    # positional: e c f [n]
+    # positional: e c interface [n]
     $isFlag = $ArgList[0].StartsWith("-")
     if (-not $isFlag -and $ArgList.Count -ge 3) {
         $enc = $ArgList[0]
         $col = $ArgList[1]
-        $frc = $ArgList[2]
+        $interface = $ArgList[2]
         $n = $DefaultN
         $viewer = $DefaultViewer
         $device = ""
@@ -201,14 +212,15 @@ function Parse-And-Run {
                 default { $i += 1 }
             }
         }
-        Invoke-DamBreak -Enc $enc -Col $col -Force $frc -N $n -Viewer $viewer -Device $device -Headless:$headless | Out-Null
+        Invoke-DamBreak -Enc $enc -Col $col -Interface $interface -Gravity $true -N $n -Viewer $viewer -Device $device -Headless:$headless | Out-Null
         return $true
     }
 
-    # flag form: -e f -c t -f gsc -n 64 ...
+    # flag form: -e f -c t -i sc --gravity -n 64 ...
     $enc = "f"
     $col = "t"
-    $frc = "gsc"
+    $interface = "sc"
+    $gravity = $true
     $n = $DefaultN
     $viewer = $DefaultViewer
     $device = ""
@@ -224,8 +236,14 @@ function Parse-And-Run {
             '^-c$|^--col$' {
                 $col = $ArgList[$i + 1]; $i += 2; continue
             }
-            '^-f$|^--force$' {
-                $frc = $ArgList[$i + 1]; $i += 2; continue
+            '^-i$|^--interface$' {
+                $interface = $ArgList[$i + 1]; $i += 2; continue
+            }
+            '^--gravity$' {
+                $gravity = $true; $i += 1; continue
+            }
+            '^--no-gravity$' {
+                $gravity = $false; $i += 1; continue
             }
             '^-n$|^--res$' {
                 $n = [int]$ArgList[$i + 1]; $i += 2; continue
@@ -245,7 +263,7 @@ function Parse-And-Run {
             }
         }
     }
-    Invoke-DamBreak -Enc $enc -Col $col -Force $frc -N $n -Viewer $viewer -Device $device -Headless:$headless -ExtraArgs $extra.ToArray() | Out-Null
+    Invoke-DamBreak -Enc $enc -Col $col -Interface $interface -Gravity $gravity -N $n -Viewer $viewer -Device $device -Headless:$headless -ExtraArgs $extra.ToArray() | Out-Null
     return $true
 }
 
@@ -271,7 +289,7 @@ while ($true) {
             Write-Host "Unknown preset: $id" -ForegroundColor Red
             continue
         }
-        Invoke-DamBreak -Enc $p.E -Col $p.C -Force $p.F -N $p.N | Out-Null
+        Invoke-DamBreak -Enc $p.E -Col $p.C -Interface $p.I -Gravity $true -N $p.N | Out-Null
         Write-Host ""
         Read-Host "Press Enter to continue..."
         continue

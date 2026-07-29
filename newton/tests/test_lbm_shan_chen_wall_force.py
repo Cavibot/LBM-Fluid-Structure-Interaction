@@ -108,6 +108,7 @@ class TestLbmShanChenWallForce(unittest.TestCase):
             model: LbmModel = LbmModel(
                 fluid_grid_res=(nx, ny, nz),
                 fluid_grid_cell_size=1.0,
+                interface_model="shan_chen",
                 tau=0.8,
                 G=-1.0,
                 psi_type=0,
@@ -194,6 +195,7 @@ class TestLbmShanChenWallForce(unittest.TestCase):
             model: LbmModel = LbmModel(
                 fluid_grid_res=(nx, ny, nz),
                 fluid_grid_cell_size=1.0,
+                interface_model="shan_chen",
                 tau=0.8,
                 G=-5.0,
                 sc_boundary_psi=0.2,

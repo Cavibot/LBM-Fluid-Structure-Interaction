@@ -180,6 +180,7 @@ class LbmBenchmark:
         self.model: LbmModel = LbmModel(
             fluid_grid_res=(grid_res, grid_res, grid_res),
             fluid_grid_cell_size=dh,
+            interface_model="shan_chen",
             tau=tau,
             G=g_sc,
             sc_boundary_psi=sc_boundary_psi,

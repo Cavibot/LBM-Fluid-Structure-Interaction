@@ -112,10 +112,12 @@ bubble/foam
 
 ### 4.1 单一权威来源
 
-- observation 模式中的 `phi` 只用于调试显示。
-- authoritative VOF 模式中的 `phi/mass/cell_type` 只能由 VOF stepper 更新。
+- `state.debug_mock_sc_to_vof.phi/cell_type/normal` 只允许由 SC density 派生，
+  只用于调试观察。
+- authoritative VOF 的 `state.vof.phi/mass/cell_type` 只能由 VOF stepper 更新。
 - `mass` 与 `phi` 不允许由两个 kernel 独立演化。
-- 几何字段只有在 `geometry.valid_epoch == vof.epoch` 时可读。
+- 调试 normal 只有在 `normal_valid_epoch == epoch` 时可读；正式几何使用独立
+  authoritative epoch。
 - gas 单元中的 kinetic state 在正式 VOF 模式下必须明确视为无效。
 
 ### 4.2 时间语义
@@ -170,12 +172,12 @@ phi 与 mass 属于同一时间层
 
 ### 5.1 阶段概要
 
-固定当前 observation-only VOF 和原 LBM 的行为，避免正式 VOF 接入后无法判断回归
-来自新物理还是旧路径变化。
+固定当前 SC-to-VOF debug observation 和原 LBM 的行为，避免正式 VOF 接入后无法
+判断回归来自新物理还是旧路径变化。
 
 当前代码已经具有：
 
-- 由 Shan-Chen density 派生的调试 `phi/cell_type`；
+- 与 `state.vof` 隔离、由 Shan-Chen density 派生的调试 `phi/cell_type`；
 - Parker–Youngs normal 的 observation 实现；
 - 界面点和法向可视化；
 - FullF/HOME 基础 LBM 路径。
@@ -184,11 +186,12 @@ phi 与 mass 属于同一时间层
 
 ### 5.2 开发内容
 
-- 保存当前 VOF observation 测试作为回归基线。
+- 保存 `test_lbm_debug_mock_sc_to_vof` 作为调试观察回归基线。
 - 保存 FullF/HOME、collision、streaming、boundary 核心回归命令。
 - 建立 VOF capability/status 表。
 - 记录 CPU 和 CUDA 环境、精度与已知限制。
-- 给正式模式加入 fail-fast 占位，防止未完成能力被误启用。
+- 以 `interface_model` 作为界面物理唯一配置权威，gravity 保持正交。
+- 给 `interface_model="vof"` 加入 fail-fast，防止未完成能力被误启用。
 
 ### 5.3 验收目标
 
@@ -231,7 +234,6 @@ geometry_epoch
 正式配置至少包括：
 
 ```text
-mode = off / observe / free_surface
 epsilon_phi
 atmosphere_pressure
 surface_tension
@@ -246,7 +248,7 @@ geometry_cache_policy
 - 使用现有 `state_in/state_out` 完成 VOF 双缓冲；
 - 提供从 `phi`、SDF 或规则几何初始化的正式 API；
 - 初始化 `mass/phi/type/kinetic/geometry epoch`；
-- 正式 VOF 与 Shan-Chen 冲突时 fail-fast；
+- authoritative `state.vof` 的分配不依赖 `debug_vof_observation`；
 - clone、clear、copy、reset 和 state swap 覆盖所有 VOF 字段。
 
 ### 6.3 必须先做出的设计决策

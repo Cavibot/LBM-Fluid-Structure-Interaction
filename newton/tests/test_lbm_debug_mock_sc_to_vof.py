@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the observation-only VOF state, geometry, and visualization."""
+"""Tests for the read-only Shan-Chen-to-VOF debug observation path."""
 
 from __future__ import annotations
 
@@ -12,7 +12,9 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import (
+    DebugVofView,
     HomeLbmState,
+    InterfaceModel,
     LbmDomain,
     LbmModel,
     VofCellType,
@@ -32,7 +34,8 @@ def _debug_model(
         device="cpu",
         encoding=encoding,
         collision="nocm_mrt" if encoding == "home" else "srt",
-        vof_debug_labels=True,
+        interface_model="shan_chen",
+        debug_vof_observation=True,
         vof_debug_rho_gas=0.1,
         vof_debug_rho_liquid=1.1,
         vof_debug_epsilon=0.05,
@@ -40,7 +43,7 @@ def _debug_model(
     )
 
 
-class TestLbmVofObservation(unittest.TestCase):
+class TestLbmDebugMockScToVof(unittest.TestCase):
     def test_debug_configuration_validation(self) -> None:
         with self.assertRaises(ValueError):
             LbmModel(
@@ -56,51 +59,119 @@ class TestLbmVofObservation(unittest.TestCase):
                 vof_debug_epsilon=0.5,
             )
 
-    def test_vof_storage_is_opt_in_for_fullf_and_home(self) -> None:
+    def test_interface_observation_configuration_matrix(self) -> None:
+        off = LbmModel(fluid_grid_res=(2, 2, 2), device="cpu")
+        self.assertEqual(off.interface_model, InterfaceModel.OFF.value)
+        self.assertEqual(off.force_model, "none")
+
+        gravity = LbmModel(
+            fluid_grid_res=(2, 2, 2),
+            device="cpu",
+            gravity_x=1.0e-5,
+        )
+        self.assertEqual(gravity.force_model, "gravity")
+
+        with self.assertRaisesRegex(ValueError, "requires an interface model"):
+            LbmModel(
+                fluid_grid_res=(2, 2, 2),
+                device="cpu",
+                debug_vof_observation=True,
+            )
+        with self.assertRaisesRegex(ValueError, "non-zero Shan-Chen G"):
+            LbmModel(
+                fluid_grid_res=(2, 2, 2),
+                device="cpu",
+                G=-0.1,
+            )
+        with self.assertRaisesRegex(ValueError, "Unknown LBM interface_model"):
+            LbmModel(
+                fluid_grid_res=(2, 2, 2),
+                device="cpu",
+                interface_model="unknown",
+            )
+
+        for observe in (False, True):
+            sc = LbmModel(
+                fluid_grid_res=(2, 2, 2),
+                device="cpu",
+                interface_model="shan_chen",
+                debug_vof_observation=observe,
+                G=-0.1,
+            )
+            self.assertEqual(sc.force_model, "shan_chen")
+            state = LbmDomain(sc).create_state()
+            self.assertIsNone(state.vof)
+            self.assertEqual(state.debug_mock_sc_to_vof is not None, observe)
+
+            sc_gravity = LbmModel(
+                fluid_grid_res=(2, 2, 2),
+                device="cpu",
+                interface_model="shan_chen",
+                debug_vof_observation=observe,
+                gravity_z=-1.0e-5,
+                G=-0.1,
+            )
+            self.assertEqual(sc_gravity.force_model, "gravity+shan_chen")
+
+        for observe in (False, True):
+            with self.assertRaisesRegex(
+                NotImplementedError, "authoritative VOF is not implemented"
+            ):
+                LbmModel(
+                    fluid_grid_res=(2, 2, 2),
+                    device="cpu",
+                    interface_model="vof",
+                    debug_vof_observation=observe,
+                )
+
+    def test_debug_storage_is_opt_in_for_fullf_and_home(self) -> None:
         plain = LbmDomain(
             LbmModel(fluid_grid_res=(2, 2, 2), device="cpu")
         ).create_state()
         self.assertIsNone(plain.vof)
+        self.assertIsNone(plain.debug_mock_sc_to_vof)
 
         for encoding in ("fullf", "home"):
             state = LbmDomain(_debug_model(shape=(2, 2, 2), encoding=encoding)).create_state()
             if encoding == "home":
                 self.assertIsInstance(state, HomeLbmState)
-            self.assertIsNotNone(state.vof)
-            assert state.vof is not None
-            self.assertEqual(state.vof.cell_type.dtype, wp.uint8)
-            self.assertEqual(state.vof.epoch, -1)
-            self.assertEqual(state.vof.geometry.valid_epoch, -1)
+            self.assertIsNone(state.vof)
+            self.assertIsNotNone(state.debug_mock_sc_to_vof)
+            debug_mock = state.debug_mock_sc_to_vof
+            assert debug_mock is not None
+            self.assertEqual(debug_mock.cell_type.dtype, wp.uint8)
+            self.assertEqual(debug_mock.epoch, -1)
+            self.assertEqual(debug_mock.normal_valid_epoch, -1)
 
     def test_state_clone_and_clear_preserve_vof_lifecycle(self) -> None:
         domain = LbmDomain(_debug_model(shape=(3, 2, 2)))
         state = domain.create_state()
         density = np.full((3, 2, 2), 0.6, dtype=np.float32)
         state.density.assign(density)
-        domain.solver.update_debug_vof_labels(state)
+        domain.solver.update_debug_mock_sc_to_vof(state)
 
         clone = state.clone()
-        assert state.vof is not None and clone.vof is not None
-        np.testing.assert_array_equal(clone.vof.phi.numpy(), state.vof.phi.numpy())
+        source = state.debug_mock_sc_to_vof
+        copied = clone.debug_mock_sc_to_vof
+        assert source is not None and copied is not None
+        np.testing.assert_array_equal(copied.phi.numpy(), source.phi.numpy())
         np.testing.assert_array_equal(
-            clone.vof.cell_type.numpy(), state.vof.cell_type.numpy()
+            copied.cell_type.numpy(), source.cell_type.numpy()
         )
         np.testing.assert_array_equal(
-            clone.vof.geometry.normal.numpy(), state.vof.geometry.normal.numpy()
+            copied.normal.numpy(), source.normal.numpy()
         )
-        self.assertEqual(clone.vof.epoch, state.vof.epoch)
-        self.assertEqual(
-            clone.vof.geometry.valid_epoch, state.vof.geometry.valid_epoch
-        )
+        self.assertEqual(copied.epoch, source.epoch)
+        self.assertEqual(copied.normal_valid_epoch, source.normal_valid_epoch)
 
         clone.clear()
-        self.assertEqual(clone.vof.epoch, -1)
-        self.assertEqual(clone.vof.geometry.valid_epoch, -1)
-        np.testing.assert_array_equal(clone.vof.phi.numpy(), 0.0)
+        self.assertEqual(copied.epoch, -1)
+        self.assertEqual(copied.normal_valid_epoch, -1)
+        np.testing.assert_array_equal(copied.phi.numpy(), 0.0)
         np.testing.assert_array_equal(
-            clone.vof.cell_type.numpy(), int(VofCellType.GAS)
+            copied.cell_type.numpy(), int(VofCellType.GAS)
         )
-        np.testing.assert_array_equal(clone.vof.geometry.normal.numpy(), 0.0)
+        np.testing.assert_array_equal(copied.normal.numpy(), 0.0)
 
     def test_density_classification_and_planar_normal(self) -> None:
         domain = LbmDomain(_debug_model())
@@ -108,12 +179,13 @@ class TestLbmVofObservation(unittest.TestCase):
         phi_by_x = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32)
         density = 0.1 + phi_by_x[:, None, None] * 1.0
         state.density.assign(np.broadcast_to(density, (5, 3, 3)).copy())
-        domain.solver.update_debug_vof_labels(state)
+        domain.solver.update_debug_mock_sc_to_vof(state)
 
-        assert state.vof is not None
-        phi = state.vof.phi.numpy()
-        types = state.vof.cell_type.numpy()
-        normals = state.vof.geometry.normal.numpy()
+        debug_mock = state.debug_mock_sc_to_vof
+        assert debug_mock is not None
+        phi = debug_mock.phi.numpy()
+        types = debug_mock.cell_type.numpy()
+        normals = debug_mock.normal.numpy()
         np.testing.assert_allclose(phi[:, 1, 1], phi_by_x, atol=1.0e-6)
         self.assertTrue(np.all(types[0] == int(VofCellType.GAS)))
         self.assertTrue(np.all(types[-1] == int(VofCellType.LIQUID)))
@@ -122,20 +194,21 @@ class TestLbmVofObservation(unittest.TestCase):
         )
         np.testing.assert_allclose(normals[1:4, :, :, 0], -1.0, atol=1.0e-6)
         np.testing.assert_allclose(normals[1:4, :, :, 1:], 0.0, atol=1.0e-6)
-        self.assertEqual(state.vof.geometry.valid_epoch, state.vof.epoch)
+        self.assertEqual(debug_mock.normal_valid_epoch, debug_mock.epoch)
 
     def test_uniform_interface_has_zero_normal(self) -> None:
         domain = LbmDomain(_debug_model(shape=(3, 3, 3)))
         state = domain.create_state()
         state.density.fill_(0.6)
-        domain.solver.update_debug_vof_labels(state)
-        assert state.vof is not None
+        domain.solver.update_debug_mock_sc_to_vof(state)
+        debug_mock = state.debug_mock_sc_to_vof
+        assert debug_mock is not None
         self.assertTrue(
             np.all(
-                state.vof.cell_type.numpy() == int(VofCellType.INTERFACE)
+                debug_mock.cell_type.numpy() == int(VofCellType.INTERFACE)
             )
         )
-        np.testing.assert_array_equal(state.vof.geometry.normal.numpy(), 0.0)
+        np.testing.assert_array_equal(debug_mock.normal.numpy(), 0.0)
 
     def test_periodic_normal_is_continuous_across_seam(self) -> None:
         domain = LbmDomain(
@@ -146,10 +219,11 @@ class TestLbmVofObservation(unittest.TestCase):
         phi = 0.5 + 0.4 * np.sin(2.0 * np.pi * x / 6.0)
         density = 0.1 + phi[:, None, None]
         state.density.assign(np.broadcast_to(density, (6, 3, 3)).copy())
-        domain.solver.update_debug_vof_labels(state)
+        domain.solver.update_debug_mock_sc_to_vof(state)
 
-        assert state.vof is not None
-        normals = state.vof.geometry.normal.numpy()
+        debug_mock = state.debug_mock_sc_to_vof
+        assert debug_mock is not None
+        normals = debug_mock.normal.numpy()
         np.testing.assert_allclose(normals[0, :, :, 0], -1.0, atol=1.0e-6)
         self.assertTrue(np.all(np.isfinite(normals)))
 
@@ -160,15 +234,16 @@ class TestLbmVofObservation(unittest.TestCase):
         solid = np.full((3, 3, 3), 1000.0, dtype=np.float32)
         solid[1, 1, 1] = -1.0
         state.solid_phi.assign(solid)
-        domain.solver.update_debug_vof_labels(state)
+        domain.solver.update_debug_mock_sc_to_vof(state)
 
-        assert state.vof is not None
+        debug_mock = state.debug_mock_sc_to_vof
+        assert debug_mock is not None
         self.assertEqual(
-            int(state.vof.cell_type.numpy()[1, 1, 1]),
+            int(debug_mock.cell_type.numpy()[1, 1, 1]),
             int(VofCellType.GAS),
         )
         np.testing.assert_array_equal(
-            state.vof.geometry.normal.numpy()[1, 1, 1], 0.0
+            debug_mock.normal.numpy()[1, 1, 1], 0.0
         )
 
     def test_visual_compaction_returns_cell_centers_and_normals(self) -> None:
@@ -178,9 +253,11 @@ class TestLbmVofObservation(unittest.TestCase):
         density[0, :, :] = 1.1
         density[1, :, :] = 0.6
         state.density.assign(density)
-        domain.solver.update_debug_vof_labels(state)
+        domain.solver.update_debug_mock_sc_to_vof(state)
 
-        assert state.vof is not None
+        debug_mock = state.debug_mock_sc_to_vof
+        assert debug_mock is not None
+        view = DebugVofView.from_shan_chen_mock(debug_mock)
         visualizer = VofInterfaceVisualizer(
             (3, 2, 2),
             domain.model._device,
@@ -188,7 +265,11 @@ class TestLbmVofObservation(unittest.TestCase):
             origin=(10.0, 20.0, 30.0),
             normal_length_scale=0.5,
         )
-        data = visualizer.compact(state.vof, state.solid_phi)
+        density_before = state.density.numpy().copy()
+        phi_before = debug_mock.phi.numpy().copy()
+        type_before = debug_mock.cell_type.numpy().copy()
+        normal_before = debug_mock.normal.numpy().copy()
+        data = visualizer.compact(view, state.solid_phi)
         self.assertEqual(data.count, 4)
         points = data.points.numpy()
         expected = np.array(
@@ -205,6 +286,10 @@ class TestLbmVofObservation(unittest.TestCase):
             expected,
             atol=1.0e-6,
         )
+        np.testing.assert_array_equal(state.density.numpy(), density_before)
+        np.testing.assert_array_equal(debug_mock.phi.numpy(), phi_before)
+        np.testing.assert_array_equal(debug_mock.cell_type.numpy(), type_before)
+        np.testing.assert_array_equal(debug_mock.normal.numpy(), normal_before)
         np.testing.assert_allclose(
             data.normal_ends.numpy() - points,
             np.tile(
@@ -227,7 +312,7 @@ class TestLbmVofObservation(unittest.TestCase):
         viewer = FakeViewer()
         rendered_count = visualizer.render(
             viewer,
-            state.vof,
+            view,
             state.solid_phi,
             show_normals=False,
         )
@@ -241,12 +326,16 @@ class TestLbmVofObservation(unittest.TestCase):
         self.assertEqual(len(colors), data.count)
         self.assertEqual(radii.dtype, wp.float32)
         self.assertEqual(colors.dtype, wp.vec3)
+        np.testing.assert_array_equal(state.density.numpy(), density_before)
+        np.testing.assert_array_equal(debug_mock.phi.numpy(), phi_before)
+        np.testing.assert_array_equal(debug_mock.cell_type.numpy(), type_before)
+        np.testing.assert_array_equal(debug_mock.normal.numpy(), normal_before)
 
     def test_observer_does_not_change_shan_chen_physics(self) -> None:
         common = {
             "fluid_grid_res": (4, 4, 4),
             "device": "cpu",
-            "force_model": "shan_chen",
+            "interface_model": "shan_chen",
             "G": -0.1,
             "psi_type": 0,
             "sc_force_stride": 1,
@@ -256,7 +345,7 @@ class TestLbmVofObservation(unittest.TestCase):
         observed = LbmDomain(
             LbmModel(
                 **common,
-                vof_debug_labels=True,
+                debug_vof_observation=True,
                 vof_debug_rho_gas=0.1,
                 vof_debug_rho_liquid=1.1,
             )
@@ -289,9 +378,10 @@ class TestLbmVofObservation(unittest.TestCase):
         args = argparse.Namespace(
             enc="fullf",
             col="trt",
-            force="gravity+shan_chen",
+            interface="shan_chen",
+            gravity=True,
             res=8,
-            vof_debug_labels=True,
+            debug_vof_observation=True,
             vof_debug_no_normals=False,
         )
         model = dambreak_example.build_model(args)
@@ -316,18 +406,21 @@ class TestLbmVofObservation(unittest.TestCase):
             device=model._device,
         )
         dambreak_example._mirror_state(domain)
-        domain.solver.update_debug_vof_labels(domain.state, domain._state_out)
-        assert domain.state.vof is not None and domain._state_out.vof is not None
-        self.assertEqual(domain.state.vof.epoch, domain._state_out.vof.epoch)
+        domain.solver.update_debug_mock_sc_to_vof(domain.state, domain._state_out)
+        debug_in = domain.state.debug_mock_sc_to_vof
+        debug_out = domain._state_out.debug_mock_sc_to_vof
+        assert debug_in is not None and debug_out is not None
+        self.assertEqual(debug_in.epoch, debug_out.epoch)
         self.assertEqual(
-            domain.state.vof.geometry.valid_epoch,
-            domain._state_out.vof.geometry.valid_epoch,
+            debug_in.normal_valid_epoch,
+            debug_out.normal_valid_epoch,
         )
         for _ in range(8):
             domain.step(1.0)
 
-        assert domain.state.vof is not None
-        cell_type = domain.state.vof.cell_type.numpy()
+        debug_mock = domain.state.debug_mock_sc_to_vof
+        assert debug_mock is not None
+        cell_type = debug_mock.cell_type.numpy()
         fluid = domain.state.solid_phi.numpy() >= 0.0
         gas = int(((cell_type == int(VofCellType.GAS)) & fluid).sum())
         interface = int(

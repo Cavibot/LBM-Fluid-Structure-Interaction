@@ -81,8 +81,8 @@ class TestPart2ForcePipeline(unittest.TestCase):
                         atol=2.0e-7,
                     )
 
-    def test_explicit_none_rejects_nonzero_legacy_force_fields(self) -> None:
-        with self.assertRaises(ValueError):
+    def test_force_model_is_not_caller_configurable(self) -> None:
+        with self.assertRaises(TypeError):
             LbmModel(
                 fluid_grid_res=(2, 2, 2),
                 device="cpu",
@@ -110,6 +110,7 @@ class TestPart2ForcePipeline(unittest.TestCase):
                         device="cpu",
                         encoding=encoding,
                         collision=collision,
+                        interface_model="shan_chen",
                         G=-0.2,
                         sc_force_stride=1,
                         tau=0.8,

@@ -102,6 +102,7 @@ def _test_one(a: float, b: float, T: float, tau: float, G: float) -> dict:
         model: LbmModel = LbmModel(
             fluid_grid_res=(N, N, N),
             fluid_grid_cell_size=DH,
+            interface_model="shan_chen",
             tau=tau,
             G=G,
             psi_type=2,

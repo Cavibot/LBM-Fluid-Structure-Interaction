@@ -153,6 +153,7 @@ class TrtDropletSplash:
 
         self.model: LbmModel = LbmModel(
             fluid_grid_res=(N, N, N), fluid_grid_cell_size=DH,
+            interface_model="shan_chen",
             tau=TAU, G=G_SC, psi_type=PSI_TYPE, psi_ref=PSI_REF,
             sc_boundary_psi=SC_BOUNDARY_PSI,
             lambda_trt=LAMBDA_TRT, use_regularization=True, omega_reg=OMEGA_REG,
