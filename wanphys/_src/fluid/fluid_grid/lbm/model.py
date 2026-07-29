@@ -180,6 +180,27 @@ class LbmModel(FluidGridModelBase):
     Lower T → larger density ratio, sharper interface.  Typical: 0.04–0.09.
     With a=0.5, b=4 → T_c ≈ 0.0943 → T=0.07 gives ρ_l/ρ_g ≈ 100:1."""
 
+    # ---- Observation-only VOF diagnostics --------------------------------
+    vof_debug_labels: bool = False
+    """Derive observation-only VOF fields from the final SC density.
+
+    This flag never changes streaming, forcing, collision, or boundary
+    behavior.  It only allocates and updates ``state.vof`` after macroscopic
+    observables have been written.
+    """
+    vof_debug_rho_gas: float = 0.1
+    """Gas coexistence density used only by the diagnostic density mapping."""
+    vof_debug_rho_liquid: float = 1.8
+    """Liquid coexistence density used only by the diagnostic density mapping."""
+    vof_debug_epsilon: float = 0.05
+    """Diagnostic GAS/INTERFACE/LIQUID threshold on bounded ``phi``."""
+    vof_debug_show_normals: bool = True
+    """Show liquid-to-gas normals in the opt-in VOF example overlay."""
+    vof_debug_point_radius_scale: float = 0.16
+    """Interface point radius as a fraction of the LBM cell size."""
+    vof_debug_normal_length_scale: float = 0.75
+    """Displayed normal length as a fraction of the LBM cell size."""
+
     @property
     def omega_minus(self) -> float:
         """Shear relaxation frequency ω₋ = 1/τ."""
@@ -452,6 +473,27 @@ class LbmModel(FluidGridModelBase):
             raise ValueError(
                 f"Shan-Chen sc_homogeneous_rel_tol must be >= 0, "
                 f"got sc_homogeneous_rel_tol = {self.sc_homogeneous_rel_tol}"
+            )
+        if self.vof_debug_rho_liquid <= self.vof_debug_rho_gas:
+            raise ValueError(
+                "vof_debug_rho_liquid must be greater than "
+                f"vof_debug_rho_gas, got {self.vof_debug_rho_liquid} <= "
+                f"{self.vof_debug_rho_gas}"
+            )
+        if not (0.0 <= self.vof_debug_epsilon < 0.5):
+            raise ValueError(
+                "vof_debug_epsilon must be in [0, 0.5), "
+                f"got {self.vof_debug_epsilon}"
+            )
+        if self.vof_debug_point_radius_scale <= 0.0:
+            raise ValueError(
+                "vof_debug_point_radius_scale must be > 0, "
+                f"got {self.vof_debug_point_radius_scale}"
+            )
+        if self.vof_debug_normal_length_scale <= 0.0:
+            raise ValueError(
+                "vof_debug_normal_length_scale must be > 0, "
+                f"got {self.vof_debug_normal_length_scale}"
             )
         # ---- Periodic boundary validation -----------------------------------
         if len(self.bc_periodic) != 3:

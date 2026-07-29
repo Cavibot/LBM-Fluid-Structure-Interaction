@@ -3,7 +3,6 @@
 
 """D3Q19 Lattice Boltzmann Method fluid solver."""
 
-from .domain import LbmDomain
 from .contracts import (
     BoundaryModel,
     CapabilityStatus,
@@ -13,23 +12,38 @@ from .contracts import (
     Encoding,
     ForceModel,
 )
+from .domain import LbmDomain
 from .model import LbmModel
 from .solver import LbmSolver
 from .state import FullFLbmState, HomeLbmState, LbmState, LbmStateBase
+from .vof import (
+    GeometryState,
+    InterfaceGeometry,
+    InterfaceVisualData,
+    VofCellType,
+    VofGridState,
+    VofInterfaceVisualizer,
+)
 
 __all__ = [
+    "BoundaryModel",
+    "CapabilityStatus",
+    "Collision",
+    "CollisionContext",
+    "CollisionSpace",
+    "Encoding",
+    "ForceModel",
+    "FullFLbmState",
+    "GeometryState",
+    "HomeLbmState",
+    "InterfaceGeometry",
+    "InterfaceVisualData",
     "LbmDomain",
     "LbmModel",
     "LbmSolver",
     "LbmState",
     "LbmStateBase",
-    "FullFLbmState",
-    "HomeLbmState",
-    "Encoding",
-    "Collision",
-    "CollisionContext",
-    "CollisionSpace",
-    "ForceModel",
-    "BoundaryModel",
-    "CapabilityStatus",
+    "VofCellType",
+    "VofGridState",
+    "VofInterfaceVisualizer",
 ]

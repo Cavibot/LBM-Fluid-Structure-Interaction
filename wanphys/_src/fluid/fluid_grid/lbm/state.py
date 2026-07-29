@@ -11,6 +11,8 @@ import warp as wp
 
 from wanphys._src.core.domain import DomainState
 
+from .vof.state import VofGridState
+
 if TYPE_CHECKING:
     from .model import LbmModel
 
@@ -49,6 +51,12 @@ class LbmStateBase(DomainState):
         self.force_z = wp.zeros((nx, ny, nz), dtype=float, device=self.device)
         # Unified physical force density F = rho*g + F_sc + future providers.
 
+        self.vof = (
+            VofGridState(self.res, self.device, requires_grad=requires_grad)
+            if model.vof_debug_labels
+            else None
+        )
+
     def clear_forces(self) -> None:
         """LBM has no accumulated force buffer in the DomainState sense."""
 
@@ -62,6 +70,8 @@ class LbmStateBase(DomainState):
             field.zero_()
         self.solid_phi.fill_(1000.0)
         self.solid_body_id.fill_(-1)
+        if self.vof is not None:
+            self.vof.clear()
 
     def _copy_common_to(self, target: "LbmStateBase") -> None:
         for name in (
@@ -71,6 +81,10 @@ class LbmStateBase(DomainState):
             "solid_phi", "solid_body_id", "force_x", "force_y", "force_z",
         ):
             wp.copy(getattr(target, name), getattr(self, name))
+        if self.vof is not None:
+            if target.vof is None:
+                raise ValueError("Cannot copy VOF state into a state without VOF storage")
+            self.vof.copy_to(target.vof)
 
 
 class FullFLbmState(LbmStateBase):

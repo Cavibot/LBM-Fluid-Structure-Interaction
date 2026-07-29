@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from typing import Any
 import warnings
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -18,6 +18,7 @@ from .constants import BC_OUTFLOW
 from .contracts import CollisionContext, CollisionSpace, ForceModel, collision_contract
 from .model import LbmModel
 from .state import FullFLbmState, HomeLbmState, LbmStateBase
+from .vof.debug import DebugVofObserver
 
 
 class LbmSolver(FluidGridSolverBase):
@@ -103,6 +104,16 @@ class LbmSolver(FluidGridSolverBase):
         self._sc_fy = wp.zeros(shape, dtype=float, device=self.device)
         self._sc_fz = wp.zeros(shape, dtype=float, device=self.device)
         self._force_provider = forcing.ForceProvider(ForceModel(model.force_model))
+        self._vof_observer = None
+        if model.vof_debug_labels:
+            self._vof_observer = DebugVofObserver(
+                (self.nx, self.ny, self.nz),
+                self.device,
+                float(model.vof_debug_rho_gas),
+                float(model.vof_debug_rho_liquid),
+                float(model.vof_debug_epsilon),
+                model._periodic_ints,
+            )
 
         self._collision_name = model.resolved_collision
         self._collision_contract = collision_contract(model.encoding, self._collision_name)
@@ -535,6 +546,7 @@ class LbmSolver(FluidGridSolverBase):
             self._encode_populations_to_home(output_f, state_out)
 
         self._write_observables(state_out)
+        self.update_debug_vof_labels(state_out)
 
     def _copy_boundary_fields(self, state_in: LbmStateBase, state_out: LbmStateBase) -> None:
         for name in ("solid_phi", "solid_body_id", "vel_solid_u", "vel_solid_v", "vel_solid_w"):
@@ -823,6 +835,24 @@ class LbmSolver(FluidGridSolverBase):
         wp.launch(kernels.moments_to_mac_v_kernel, dim=(self.nx, self.ny + 1, self.nz), inputs=[self._uy, state_out.vel_v, self.ny], device=self.device)
         wp.launch(kernels.moments_to_mac_w_kernel, dim=(self.nx, self.ny, self.nz + 1), inputs=[self._uz, state_out.vel_w, self.nz], device=self.device)
 
+    def update_debug_vof_labels(self, *states: LbmStateBase) -> None:
+        """Refresh one or more observation states as a single VOF epoch."""
+
+        if self._vof_observer is None:
+            return
+        epoch = None
+        for state in states:
+            if state.vof is None:
+                raise ValueError(
+                    "VOF debug labels are enabled but the supplied state has no VOF storage"
+                )
+            epoch = self._vof_observer.update(
+                state.density,
+                state.solid_phi,
+                state.vof,
+                epoch=epoch,
+            )
+
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -883,3 +913,4 @@ class LbmSolver(FluidGridSolverBase):
         state.velocity_x.fill_(u0x)
         state.velocity_y.fill_(u0y)
         state.velocity_z.fill_(u0z)
+        self.update_debug_vof_labels(state)

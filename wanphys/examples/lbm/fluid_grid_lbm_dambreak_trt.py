@@ -32,6 +32,8 @@ from wanphys._src.fluid.fluid_grid.lbm import (
     LbmDomain,
     LbmModel,
     LbmStateBase,
+    VofCellType,
+    VofInterfaceVisualizer,
 )
 from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRenderer
 
@@ -153,6 +155,16 @@ def create_parser() -> argparse.ArgumentParser:
         default=N,
         metavar="N",
         help=f"grid resolution N³ (default: {N})",
+    )
+    parser.add_argument(
+        "--vof-debug-labels",
+        action="store_true",
+        help="derive observation-only VOF labels from SC density",
+    )
+    parser.add_argument(
+        "--vof-debug-no-normals",
+        action="store_true",
+        help="show interface points without liquid-to-gas normal lines",
     )
     return parser
 
@@ -278,6 +290,11 @@ def build_model(args: argparse.Namespace) -> LbmModel:
         gravity_x=0.0,
         gravity_y=0.0,
         gravity_z=gz,
+        vof_debug_labels=bool(args.vof_debug_labels),
+        vof_debug_rho_gas=RHO_AIR,
+        vof_debug_rho_liquid=RHO_WATER,
+        vof_debug_epsilon=0.35,
+        vof_debug_show_normals=not bool(args.vof_debug_no_normals),
     )
 
 
@@ -351,6 +368,11 @@ class DamBreakExample:
                 device=self.model._device,
             )
         _mirror_state(self.domain)
+        if self.model.vof_debug_labels:
+            self.domain.solver.update_debug_vof_labels(
+                self.domain.state,
+                self.domain._state_out,
+            )
         wp.synchronize_device(self.model._device)
         print(f"  Water cells: {(state.density.numpy() > SSFR_THRESHOLD).sum()}")
 
@@ -372,6 +394,16 @@ class DamBreakExample:
             device=self.model._device,
         )
         viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
+        self.vof_visualizer: VofInterfaceVisualizer | None = None
+        if self.model.vof_debug_labels:
+            self.vof_visualizer = VofInterfaceVisualizer(
+                (n, n, n),
+                self.model._device,
+                DH,
+                point_radius_scale=float(self.model.vof_debug_point_radius_scale),
+                normal_length_scale=float(self.model.vof_debug_normal_length_scale),
+            )
+            print("  VOF observation overlay: enabled (SC physics unchanged)")
         self.frame_count = 0
         self._last_ms = 0.0
         print("Controls: [Space] unpause  [R] reset  [mouse] orbit")
@@ -412,6 +444,18 @@ class DamBreakExample:
                 file=sys.stderr,
                 flush=True,
             )
+            vof = self.domain.state.vof
+            if vof is not None:
+                types = vof.cell_type.numpy()
+                gas = int((types == int(VofCellType.GAS)).sum())
+                interface = int((types == int(VofCellType.INTERFACE)).sum())
+                liquid = int((types == int(VofCellType.LIQUID)).sum())
+                print(
+                    f"  VOF observe: gas={gas} interface={interface} liquid={liquid} "
+                    f"epoch={vof.epoch}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)
@@ -422,6 +466,15 @@ class DamBreakExample:
                 cell_size=DH,
                 threshold=SSFR_THRESHOLD,
                 max_steps=RAY_MARCH_STEPS,
+            )
+        if self.vof_visualizer is not None:
+            vof = self.domain.state.vof
+            assert vof is not None
+            self.vof_visualizer.render(
+                self.viewer,
+                vof,
+                self.domain.state.solid_phi,
+                show_normals=bool(self.model.vof_debug_show_normals),
             )
         self.viewer.end_frame()
 
