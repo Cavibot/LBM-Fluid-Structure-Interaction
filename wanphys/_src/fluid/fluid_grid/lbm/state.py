@@ -11,7 +11,7 @@ import warp as wp
 
 from wanphys._src.core.domain import DomainState
 
-from .vof.state import DebugMockScToVofState
+from .vof.state import DebugMockScToVofState, VofGridState
 
 if TYPE_CHECKING:
     from .model import LbmModel
@@ -21,6 +21,10 @@ class LbmStateBase(DomainState):
     """Fields shared by FullF and HOME persistent kinetic states."""
 
     def __init__(self, model: LbmModel, requires_grad: bool = False) -> None:
+        if model.interface_model == "vof" and requires_grad:
+            raise NotImplementedError(
+                "P1 authoritative VOF does not support requires_grad"
+            )
         self.model = model
         nx, ny, nz = int(model.nx), int(model.ny), int(model.nz)
         self.res = (nx, ny, nz)
@@ -52,6 +56,8 @@ class LbmStateBase(DomainState):
         # Unified physical force density F = rho*g + F_sc + future providers.
 
         self.vof = None
+        if model.interface_model == "vof":
+            self.vof = VofGridState(self.res, self.device)
         allocate_debug_mock = (
             model.interface_model == "shan_chen"
             and model.debug_vof_observation
@@ -79,6 +85,8 @@ class LbmStateBase(DomainState):
             field.zero_()
         self.solid_phi.fill_(1000.0)
         self.solid_body_id.fill_(-1)
+        if self.vof is not None:
+            self.vof.clear()
         if self.debug_mock_sc_to_vof is not None:
             self.debug_mock_sc_to_vof.clear()
 
@@ -90,6 +98,12 @@ class LbmStateBase(DomainState):
             "solid_phi", "solid_body_id", "force_x", "force_y", "force_z",
         ):
             wp.copy(getattr(target, name), getattr(self, name))
+        if self.vof is not None:
+            if target.vof is None:
+                raise ValueError(
+                    "Cannot copy authoritative VOF into a state without storage"
+                )
+            self.vof.copy_to(target.vof)
         if self.debug_mock_sc_to_vof is not None:
             if target.debug_mock_sc_to_vof is None:
                 raise ValueError(

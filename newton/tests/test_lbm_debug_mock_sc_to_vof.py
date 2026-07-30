@@ -71,7 +71,9 @@ class TestLbmDebugMockScToVof(unittest.TestCase):
         )
         self.assertEqual(gravity.force_model, "gravity")
 
-        with self.assertRaisesRegex(ValueError, "requires an interface model"):
+        with self.assertRaisesRegex(
+            ValueError, "requires interface_model='shan_chen'"
+        ):
             LbmModel(
                 fluid_grid_res=(2, 2, 2),
                 device="cpu",
@@ -113,16 +115,21 @@ class TestLbmDebugMockScToVof(unittest.TestCase):
             )
             self.assertEqual(sc_gravity.force_model, "gravity+shan_chen")
 
-        for observe in (False, True):
-            with self.assertRaisesRegex(
-                NotImplementedError, "authoritative VOF is not implemented"
-            ):
-                LbmModel(
-                    fluid_grid_res=(2, 2, 2),
-                    device="cpu",
-                    interface_model="vof",
-                    debug_vof_observation=observe,
-                )
+        vof = LbmModel(
+            fluid_grid_res=(2, 2, 2),
+            device="cpu",
+            interface_model="vof",
+        )
+        self.assertEqual(vof.interface_model, InterfaceModel.VOF.value)
+        with self.assertRaisesRegex(
+            ValueError, "requires interface_model='shan_chen'"
+        ):
+            LbmModel(
+                fluid_grid_res=(2, 2, 2),
+                device="cpu",
+                interface_model="vof",
+                debug_vof_observation=True,
+            )
 
     def test_debug_storage_is_opt_in_for_fullf_and_home(self) -> None:
         plain = LbmDomain(

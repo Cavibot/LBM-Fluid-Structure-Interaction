@@ -383,13 +383,20 @@ class LbmModel(FluidGridModelBase):
                     stacklevel=2,
                 )
             self.collision = canonical_collision.value
-        if resolved_interface is InterfaceModel.VOF:
-            raise NotImplementedError("authoritative VOF is not implemented")
         if (
-            resolved_interface is InterfaceModel.OFF
+            resolved_interface is not InterfaceModel.SHAN_CHEN
             and self.debug_vof_observation
         ):
-            raise ValueError("debug_vof_observation requires an interface model")
+            raise ValueError(
+                "debug_vof_observation requires interface_model='shan_chen'"
+            )
+        if resolved_interface is InterfaceModel.VOF and (
+            self.has_moving_walls or self.use_cut_link
+        ):
+            raise NotImplementedError(
+                "P1 authoritative VOF does not support moving-wall or cut-link "
+                "solid boundaries"
+            )
         if (
             resolved_interface is not InterfaceModel.SHAN_CHEN
             and float(self.G) != 0.0

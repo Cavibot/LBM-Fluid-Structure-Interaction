@@ -5,7 +5,7 @@
 
 from .contracts import VofCellType
 from .geometry import InterfaceGeometry
-from .state import DebugMockScToVofState
+from .state import DebugMockScToVofState, VofGridState
 from .visualization import DebugVofView, InterfaceVisualData, VofInterfaceVisualizer
 
 __all__ = [
@@ -14,5 +14,6 @@ __all__ = [
     "InterfaceGeometry",
     "InterfaceVisualData",
     "VofCellType",
+    "VofGridState",
     "VofInterfaceVisualizer",
 ]

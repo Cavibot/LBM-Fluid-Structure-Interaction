@@ -23,6 +23,7 @@ from .vof import (
     InterfaceGeometry,
     InterfaceVisualData,
     VofCellType,
+    VofGridState,
     VofInterfaceVisualizer,
 )
 
@@ -47,5 +48,6 @@ __all__ = [
     "LbmState",
     "LbmStateBase",
     "VofCellType",
+    "VofGridState",
     "VofInterfaceVisualizer",
 ]

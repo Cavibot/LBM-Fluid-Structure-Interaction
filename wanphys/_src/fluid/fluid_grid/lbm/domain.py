@@ -5,11 +5,18 @@
 
 from __future__ import annotations
 
+import numpy as np
+
 from wanphys._src.core.domain import Domain
 
 from .model import LbmModel
 from .solver import LbmSolver
 from .state import LbmStateBase
+from .vof.initialization import prepare_initial_vof, validate_no_solid_cells
+from .vof.validation import (
+    validate_initialized_vof_state,
+    validate_vof_buffer_pair,
+)
 
 
 class LbmDomain(Domain):
@@ -79,6 +86,49 @@ class LbmDomain(Domain):
         self._state_in = self._solver.create_state()
         self._state_out = self._solver.create_state()
         return self._state_in
+
+    def initialize_vof(
+        self,
+        phi0: np.ndarray,
+        *,
+        rho0: float = 1.0,
+        u0: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> LbmStateBase:
+        """Transactionally initialize uniform LBM kinetic and VOF state."""
+
+        if self._model.interface_model != "vof":
+            raise ValueError("initialize_vof requires interface_model='vof'")
+
+        rho0, u0 = self._solver.validate_equilibrium_inputs(rho0, u0)
+        periodic = tuple(bool(value) for value in self._model._periodic_ints)
+        prepared_phi, prepared_cell_type = prepare_initial_vof(
+            phi0,
+            shape=(
+                int(self._model.nx),
+                int(self._model.ny),
+                int(self._model.nz),
+            ),
+            periodic=periodic,
+        )
+        if self._state_in is not None:
+            validate_no_solid_cells(self._state_in.solid_phi)
+
+        candidate_in = self._solver.create_state()
+        self._solver.initialize_equilibrium(candidate_in, rho0, u0)
+        self._solver._initialize_prepared_vof_state(
+            candidate_in,
+            prepared_phi,
+            prepared_cell_type,
+        )
+        validate_initialized_vof_state(candidate_in, periodic=periodic)
+
+        candidate_out = candidate_in.clone()
+        validate_initialized_vof_state(candidate_out, periodic=periodic)
+        validate_vof_buffer_pair(candidate_in, candidate_out)
+
+        self._state_in = candidate_in
+        self._state_out = candidate_out
+        return candidate_in
 
     def step(
         self,

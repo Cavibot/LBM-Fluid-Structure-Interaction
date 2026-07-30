@@ -19,6 +19,11 @@ from .contracts import CollisionContext, CollisionSpace, ForceModel, collision_c
 from .model import LbmModel
 from .state import FullFLbmState, HomeLbmState, LbmStateBase
 from .vof.debug import DebugMockScToVofObserver
+from .vof.initialization import (
+    initialize_vof_fields,
+    prepare_initial_vof,
+    validate_no_solid_cells,
+)
 
 
 class LbmSolver(FluidGridSolverBase):
@@ -176,9 +181,47 @@ class LbmSolver(FluidGridSolverBase):
 
     def create_state(self, requires_grad: bool = False) -> LbmStateBase:
         """Create the concrete persistent state selected by the model."""
+        if self.model.interface_model == "vof" and requires_grad:
+            raise NotImplementedError(
+                "P1 authoritative VOF does not support requires_grad"
+            )
         if self.model.encoding == "home":
             return HomeLbmState(self.model, requires_grad=requires_grad)
         return FullFLbmState(self.model, requires_grad=requires_grad)
+
+    @staticmethod
+    def validate_equilibrium_inputs(
+        rho0: float,
+        u0: tuple[float, float, float],
+    ) -> tuple[float, tuple[float, float, float]]:
+        """Return finite float32-compatible uniform initial conditions."""
+
+        try:
+            with np.errstate(over="ignore", invalid="ignore"):
+                rho = float(np.float32(rho0))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("rho0 must be a real scalar") from exc
+        try:
+            velocity_values = tuple(u0)
+        except TypeError as exc:
+            raise TypeError("u0 must contain three real components") from exc
+        if len(velocity_values) != 3:
+            raise ValueError(
+                f"u0 must contain three components, got {velocity_values!r}"
+            )
+        try:
+            with np.errstate(over="ignore", invalid="ignore"):
+                velocity = tuple(
+                    float(np.float32(value)) for value in velocity_values
+                )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("u0 must contain three real components") from exc
+
+        if not np.isfinite(rho) or rho <= 0.0:
+            raise ValueError("rho0 must remain finite and positive in float32")
+        if not np.all(np.isfinite(velocity)):
+            raise ValueError("u0 must remain finite in float32")
+        return rho, (velocity[0], velocity[1], velocity[2])
 
     # ------------------------------------------------------------------
     # Boundary condition helpers
@@ -315,6 +358,11 @@ class LbmSolver(FluidGridSolverBase):
         control: Any | None = None,
     ) -> None:
         """Advance ``post-collision -> stream -> collide -> post-collision``."""
+        if self.model.interface_model == "vof":
+            raise NotImplementedError(
+                "P1 supports authoritative VOF initialization only; "
+                "VOF time stepping is not implemented"
+            )
         del contacts, control, dt
         self._copy_boundary_fields(state_in, state_out)
         px, py, pz = self.model._periodic_ints
@@ -900,3 +948,51 @@ class LbmSolver(FluidGridSolverBase):
         state.velocity_y.fill_(u0y)
         state.velocity_z.fill_(u0z)
         self.update_debug_mock_sc_to_vof(state)
+
+    def initialize_vof_state(
+        self,
+        state: LbmStateBase,
+        phi0: np.ndarray,
+    ) -> None:
+        """Initialize authoritative VOF fields from the state's actual density."""
+
+        if self.model.interface_model != "vof":
+            raise ValueError(
+                "initialize_vof_state requires interface_model='vof'"
+            )
+        if state.vof is None:
+            raise ValueError("supplied state has no authoritative VOF storage")
+        validate_no_solid_cells(state.solid_phi)
+        periodic = tuple(bool(value) for value in self.model._periodic_ints)
+        prepared_phi, cell_type = prepare_initial_vof(
+            phi0,
+            shape=(self.nx, self.ny, self.nz),
+            periodic=periodic,
+        )
+        self._initialize_prepared_vof_state(
+            state,
+            prepared_phi,
+            cell_type,
+        )
+
+    def _initialize_prepared_vof_state(
+        self,
+        state: LbmStateBase,
+        prepared_phi: np.ndarray,
+        cell_type: np.ndarray,
+    ) -> None:
+        """Initialize from host data already validated by ``prepare_initial_vof``."""
+
+        if self.model.interface_model != "vof":
+            raise ValueError(
+                "_initialize_prepared_vof_state requires interface_model='vof'"
+            )
+        if state.vof is None:
+            raise ValueError("supplied state has no authoritative VOF storage")
+        validate_no_solid_cells(state.solid_phi)
+        initialize_vof_fields(
+            state.density,
+            state.vof,
+            prepared_phi,
+            cell_type,
+        )
