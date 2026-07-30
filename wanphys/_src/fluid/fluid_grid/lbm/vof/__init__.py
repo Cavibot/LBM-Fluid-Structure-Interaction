@@ -6,6 +6,10 @@
 from .advection import VofMassTransport, VofMassTransportResult
 from .contracts import VofCellType, VofMassScheme
 from .geometry import InterfaceGeometry
+from .kinetic_init import (
+    VofKineticInitializationResult,
+    VofKineticInitializer,
+)
 from .state import DebugMockScToVofState, VofGridState
 from .surface import VofSurfaceBoundary
 from .transition import VofTopologyTransition, VofTransitionResult
@@ -19,6 +23,8 @@ __all__ = [
     "VofCellType",
     "VofGridState",
     "VofInterfaceVisualizer",
+    "VofKineticInitializationResult",
+    "VofKineticInitializer",
     "VofMassScheme",
     "VofMassTransport",
     "VofMassTransportResult",

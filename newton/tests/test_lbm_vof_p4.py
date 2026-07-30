@@ -509,27 +509,37 @@ class TestVofP4OracleAndIntegration(unittest.TestCase):
             places=5,
         )
 
-    def test_new_interface_waits_for_p5_without_buffer_swap(self) -> None:
+    def test_new_interface_handoff_preserves_p4_mass_and_topology(self) -> None:
         shape = (5, 3, 3)
         domain = LbmDomain(_model(shape))
         state_in = domain.initialize_vof(_layered_phi(shape))
-        state_out = domain._state_out
-        assert state_in.vof is not None and state_out is not None
+        assert state_in.vof is not None
         center = (2, 1, 1)
+        old_type = state_in.vof.cell_type.numpy().copy()
         mass = state_in.vof.mass.numpy().copy()
         phi = state_in.vof.phi.numpy().copy()
         mass[center] = 1.2
         phi[center] = 1.2
         state_in.vof.mass.assign(mass)
         state_in.vof.phi.assign(phi)
-        mass_before = state_in.vof.mass.numpy().copy()
+        total_before = float(np.sum(mass, dtype=np.float64))
 
-        with self.assertRaisesRegex(NotImplementedError, "deferred to P5"):
-            domain.step(1.0)
+        domain.step(1.0)
 
-        self.assertIs(domain._state_in, state_in)
-        self.assertIs(domain._state_out, state_out)
-        np.testing.assert_array_equal(state_in.vof.mass.numpy(), mass_before)
+        self.assertIsNot(domain.state, state_in)
+        assert domain.state.vof is not None
+        final_type = domain.state.vof.cell_type.numpy()
+        self.assertEqual(int(final_type[center]), int(VofCellType.LIQUID))
+        new_interface = (
+            (old_type == int(VofCellType.GAS))
+            & (final_type == int(VofCellType.INTERFACE))
+        )
+        self.assertEqual(int(np.count_nonzero(new_interface)), 5)
+        self.assertAlmostEqual(
+            float(np.sum(domain.state.vof.mass.numpy(), dtype=np.float64)),
+            total_before,
+            places=5,
+        )
 
 
 if __name__ == "__main__":

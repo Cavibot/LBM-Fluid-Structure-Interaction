@@ -25,6 +25,7 @@ from .vof.initialization import (
     prepare_initial_vof,
     validate_no_solid_cells,
 )
+from .vof.kinetic_init import VofKineticInitializer
 from .vof.surface import VofSurfaceBoundary
 from .vof.transition import VofTopologyTransition
 
@@ -147,6 +148,13 @@ class LbmSolver(FluidGridSolverBase):
                 self.device,
                 model._periodic_ints,
                 float(model.vof_transition_epsilon),
+            )
+        self._vof_kinetic_initializer = None
+        if model.interface_model == "vof":
+            self._vof_kinetic_initializer = VofKineticInitializer(
+                (self.nx, self.ny, self.nz),
+                self.device,
+                model._periodic_ints,
             )
 
         self._collision_name = model.resolved_collision
@@ -441,6 +449,8 @@ class LbmSolver(FluidGridSolverBase):
                 raise RuntimeError("VOF surface boundary was not allocated")
             if self._vof_topology_transition is None:
                 raise RuntimeError("VOF topology transition was not allocated")
+            if self._vof_kinetic_initializer is None:
+                raise RuntimeError("VOF kinetic initializer was not allocated")
             self._vof_mass_transport.compute_fullf(state_in)
 
         del contacts, control, dt
@@ -669,6 +679,7 @@ class LbmSolver(FluidGridSolverBase):
             assert self._vof_surface_boundary is not None
             assert self._vof_mass_transport is not None
             assert self._vof_topology_transition is not None
+            assert self._vof_kinetic_initializer is not None
             self._vof_surface_boundary.restore_gas(state_in, state_out)
             if state_in.vof is None or state_out.vof is None:
                 raise RuntimeError("P4 VOF step requires authoritative storage")
@@ -677,12 +688,23 @@ class LbmSolver(FluidGridSolverBase):
                 state_out.density,
                 state_in.vof.cell_type,
             )
-            if np.any(np.asarray(transition.new_interface.numpy()) != 0):
-                raise NotImplementedError(
-                    "P4 resolved GAS-to-INTERFACE transitions, but their "
-                    "kinetic initialization is deferred to P5"
-                )
+            self._vof_kinetic_initializer.initialize_fullf(
+                state_out,
+                state_in.vof.cell_type,
+                transition,
+                gravity=(
+                    float(self.model.gravity_x),
+                    float(self.model.gravity_y),
+                    float(self.model.gravity_z),
+                ),
+                max_lattice_speed=float(self.model.max_lattice_speed),
+                enforce_population_positivity=bool(
+                    self.model.enforce_population_positivity
+                ),
+                population_floor=float(self.model.population_floor),
+            )
             self._vof_topology_transition.commit(state_out.vof)
+            self._write_mac_velocities(state_out)
         self.update_debug_mock_sc_to_vof(state_out)
 
     def _copy_boundary_fields(self, state_in: LbmStateBase, state_out: LbmStateBase) -> None:
@@ -968,9 +990,29 @@ class LbmSolver(FluidGridSolverBase):
         wp.copy(state_out.force_x, self._fx)
         wp.copy(state_out.force_y, self._fy)
         wp.copy(state_out.force_z, self._fz)
-        wp.launch(kernels.moments_to_mac_u_kernel, dim=(self.nx + 1, self.ny, self.nz), inputs=[self._ux, state_out.vel_u, self.nx], device=self.device)
-        wp.launch(kernels.moments_to_mac_v_kernel, dim=(self.nx, self.ny + 1, self.nz), inputs=[self._uy, state_out.vel_v, self.ny], device=self.device)
-        wp.launch(kernels.moments_to_mac_w_kernel, dim=(self.nx, self.ny, self.nz + 1), inputs=[self._uz, state_out.vel_w, self.nz], device=self.device)
+        self._write_mac_velocities(state_out)
+
+    def _write_mac_velocities(self, state_out: LbmStateBase) -> None:
+        """Refresh face velocities from the candidate cell-centred velocity."""
+
+        wp.launch(
+            kernels.moments_to_mac_u_kernel,
+            dim=(self.nx + 1, self.ny, self.nz),
+            inputs=[state_out.velocity_x, state_out.vel_u, self.nx],
+            device=self.device,
+        )
+        wp.launch(
+            kernels.moments_to_mac_v_kernel,
+            dim=(self.nx, self.ny + 1, self.nz),
+            inputs=[state_out.velocity_y, state_out.vel_v, self.ny],
+            device=self.device,
+        )
+        wp.launch(
+            kernels.moments_to_mac_w_kernel,
+            dim=(self.nx, self.ny, self.nz + 1),
+            inputs=[state_out.velocity_z, state_out.vel_w, self.nz],
+            device=self.device,
+        )
 
     def update_debug_mock_sc_to_vof(self, *states: LbmStateBase) -> None:
         """Refresh density-derived SC debug mocks as one observation epoch."""

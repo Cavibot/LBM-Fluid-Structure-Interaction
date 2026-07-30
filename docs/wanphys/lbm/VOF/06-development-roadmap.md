@@ -549,11 +549,11 @@ P5 才使新界面成为真正可演化的流体格点。
 ### 10.4 退出门禁
 
 ```text
-[ ] 每个新 interface 都有合法 kinetic state
-[ ] gas kinetic 不会被后续路径误读
-[ ] 初始化无 NaN、负密度和不可接受速度尖峰
-[ ] 初始化质量影响闭合
-[ ] 固定 gamma=0 的移动界面可长期运行
+[x] 每个新 interface 都有合法 kinetic state
+[x] gas kinetic 不会被后续路径误读
+[x] 初始化无 NaN、负密度和不可接受速度尖峰
+[x] 初始化质量影响闭合
+[x] 固定 gamma=0 的移动界面可连续运行
 ```
 
 ## 11. P6：法向、PLIC、曲率与表面张力
@@ -832,7 +832,7 @@ BLOCKED
 | P2 | CPU_ACCEPTED | FullF fixed-topology mass transport、旧 density 时间层、gas-link zero flux 已冻结 |
 | P3 | CPU_ACCEPTED | FullF fixed-topology Eq.11、gamma=0 surface step 与事务门禁已冻结 |
 | P4 | CPU_ACCEPTED | deterministic transition、topology gather、signed redistribution 与 P5 handoff 已冻结 |
-| P5 | NOT_STARTED | 无通用 GAS→INTERFACE kinetic 初始化 |
+| P5 | CPU_ACCEPTED | FullF donor mean、equilibrium 初始化、mass/phi 重闭合与 moving step 已冻结 |
 | P6 | NOT_STARTED | observation normal 已有，但正式 PLIC/curvature 未完成 |
 | P7 | NOT_STARTED | 尚无完整自由表面集成验收 |
 | P8 | NOT_STARTED | 尚无 authoritative VOF dam-break 可视化验收与启动入口 |
@@ -864,6 +864,17 @@ zero-receiver fail-fast
 exact new_interface handoff
 ```
 
-P5 下一步必须冻结新界面邻居资格、rho/u 时间层与权重、FullF equilibrium
-初始化、zero-neighbor 策略以及 kinetic/VOF commit 顺序。只有完成 P5-P6 后才能
-声明移动自由表面能够正确推进。
+P5 已冻结并实现：
+
+```text
+donor = old active AND final active
+D3Q19 uniform state_out rho/u mean
+FullF equilibrium initialization
+zero-donor pre-write fail-fast
+mass read-only and phi reclosure
+kinetic-before-VOF commit
+```
+
+P6 下一步必须冻结 authoritative normal、PLIC plane/offset、volume inversion、
+curvature estimator/sign、geometry epoch 和 Eq.12 `rho_g` positivity 策略。只有
+完成 P6 后才能声明包含毛细压力的移动自由表面能够正确推进。
