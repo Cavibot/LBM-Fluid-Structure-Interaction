@@ -7,6 +7,9 @@ WanPhys-specific implementation notes and migration guides.
 
 LATEST HOME-FREE VOF 双球近期工作总结 <LATEST_home_vof_two_spheres_progress_zh>
 中期答辩：LBM 自由表面流固耦合 <中期答辩_LBM自由表面流固耦合_zh>
+中期·甲·杨宇峰·HOME-VOF流体步进 <中期_甲_杨宇峰_HOME-VOF流体步进_zh>
+中期·乙·张弋洋·自由面与无球验收 <中期_乙_张弋洋_自由面与无球验收_zh>
+中期·丙·徐子轩·VOF流固耦合 <中期_丙_徐子轩_VOF流固耦合_zh>
 HOME-FREE VOF 流固耦合算法说明 <lbm_home_vof_fsi_algorithm_zh>
 LBM 术语与领域语言 <domain_glossary_zh>
 LBM HOME/HOME-FREE 扩展路线图 <lbm_home_roadmap_zh>
