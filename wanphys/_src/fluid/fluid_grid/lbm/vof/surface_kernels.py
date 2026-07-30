@@ -134,7 +134,82 @@ def restore_gas_fullf_state_kernel(
     force_z_out[i, j, k] = force_z_n[i, j, k]
 
 
+@wp.kernel
+def restore_gas_home_kinetic_kernel(
+    rho_n: wp.array3d(dtype=float),
+    jx_n: wp.array3d(dtype=float),
+    jy_n: wp.array3d(dtype=float),
+    jz_n: wp.array3d(dtype=float),
+    sxx_n: wp.array3d(dtype=float),
+    syy_n: wp.array3d(dtype=float),
+    szz_n: wp.array3d(dtype=float),
+    sxy_n: wp.array3d(dtype=float),
+    sxz_n: wp.array3d(dtype=float),
+    syz_n: wp.array3d(dtype=float),
+    cell_type_n: wp.array3d(dtype=wp.uint8),
+    rho_out: wp.array3d(dtype=float),
+    jx_out: wp.array3d(dtype=float),
+    jy_out: wp.array3d(dtype=float),
+    jz_out: wp.array3d(dtype=float),
+    sxx_out: wp.array3d(dtype=float),
+    syy_out: wp.array3d(dtype=float),
+    szz_out: wp.array3d(dtype=float),
+    sxy_out: wp.array3d(dtype=float),
+    sxz_out: wp.array3d(dtype=float),
+    syz_out: wp.array3d(dtype=float),
+) -> None:
+    """Preserve semantically invalid GAS HOME moment storage."""
+
+    i, j, k = wp.tid()
+    if cell_type_n[i, j, k] != wp.uint8(0):
+        return
+    rho_out[i, j, k] = rho_n[i, j, k]
+    jx_out[i, j, k] = jx_n[i, j, k]
+    jy_out[i, j, k] = jy_n[i, j, k]
+    jz_out[i, j, k] = jz_n[i, j, k]
+    sxx_out[i, j, k] = sxx_n[i, j, k]
+    syy_out[i, j, k] = syy_n[i, j, k]
+    szz_out[i, j, k] = szz_n[i, j, k]
+    sxy_out[i, j, k] = sxy_n[i, j, k]
+    sxz_out[i, j, k] = sxz_n[i, j, k]
+    syz_out[i, j, k] = syz_n[i, j, k]
+
+
+@wp.kernel
+def restore_gas_macroscopic_state_kernel(
+    density_n: wp.array3d(dtype=float),
+    velocity_x_n: wp.array3d(dtype=float),
+    velocity_y_n: wp.array3d(dtype=float),
+    velocity_z_n: wp.array3d(dtype=float),
+    force_x_n: wp.array3d(dtype=float),
+    force_y_n: wp.array3d(dtype=float),
+    force_z_n: wp.array3d(dtype=float),
+    cell_type_n: wp.array3d(dtype=wp.uint8),
+    density_out: wp.array3d(dtype=float),
+    velocity_x_out: wp.array3d(dtype=float),
+    velocity_y_out: wp.array3d(dtype=float),
+    velocity_z_out: wp.array3d(dtype=float),
+    force_x_out: wp.array3d(dtype=float),
+    force_y_out: wp.array3d(dtype=float),
+    force_z_out: wp.array3d(dtype=float),
+) -> None:
+    """Preserve semantically invalid GAS macro/force storage."""
+
+    i, j, k = wp.tid()
+    if cell_type_n[i, j, k] != wp.uint8(0):
+        return
+    density_out[i, j, k] = density_n[i, j, k]
+    velocity_x_out[i, j, k] = velocity_x_n[i, j, k]
+    velocity_y_out[i, j, k] = velocity_y_n[i, j, k]
+    velocity_z_out[i, j, k] = velocity_z_n[i, j, k]
+    force_x_out[i, j, k] = force_x_n[i, j, k]
+    force_y_out[i, j, k] = force_y_n[i, j, k]
+    force_z_out[i, j, k] = force_z_n[i, j, k]
+
+
 __all__ = [
     "complete_gas_to_interface_fullf_kernel",
+    "restore_gas_home_kinetic_kernel",
+    "restore_gas_macroscopic_state_kernel",
     "restore_gas_fullf_state_kernel",
 ]

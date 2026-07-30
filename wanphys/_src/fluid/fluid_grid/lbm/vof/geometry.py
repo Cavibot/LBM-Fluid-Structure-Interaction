@@ -190,11 +190,13 @@ def plic_cube_volume(
         return alpha
     if dimension == 2:
         a, b = (float(value) for value in active)
-        result = (
-            alpha**2
-            - _positive_power(alpha - a, 2)
-            - _positive_power(alpha - b, 2)
-        ) / (2.0 * a * b)
+        a, b = min(a, b), max(a, b)
+        if alpha < a:
+            result = alpha**2 / (2.0 * a * b)
+        elif alpha <= b:
+            result = (alpha - 0.5 * a) / b
+        else:
+            result = 1.0 - (1.0 - alpha) ** 2 / (2.0 * a * b)
         return float(np.clip(result, 0.0, 1.0))
     mx, my, mz = (float(value) for value in weights)
     result = (

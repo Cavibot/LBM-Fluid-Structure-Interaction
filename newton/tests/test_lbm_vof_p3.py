@@ -98,18 +98,20 @@ class TestVofP3Configuration(unittest.TestCase):
                 ),
             )
 
-    def test_home_step_fails_before_mutation_or_swap(self) -> None:
+    def test_home_step_uses_p7_shared_population_path(self) -> None:
         shape = (5, 2, 2)
         domain = LbmDomain(_model(shape, encoding="home"))
         state_in = domain.initialize_vof(_layered_phi(shape))
-        state_out = domain._state_out
-        assert state_in.vof is not None and state_out is not None
-        mass_before = state_in.vof.mass.numpy().copy()
-        with self.assertRaisesRegex(NotImplementedError, "deferred to P7"):
-            domain.step(1.0)
-        self.assertIs(domain._state_in, state_in)
-        self.assertIs(domain._state_out, state_out)
-        np.testing.assert_array_equal(state_in.vof.mass.numpy(), mass_before)
+        assert state_in.vof is not None
+        mass_before = float(np.sum(state_in.vof.mass.numpy(), dtype=np.float64))
+        domain.step(1.0)
+        self.assertIsNot(domain.state, state_in)
+        assert domain.state.vof is not None
+        self.assertAlmostEqual(
+            float(np.sum(domain.state.vof.mass.numpy(), dtype=np.float64)),
+            mass_before,
+            places=5,
+        )
 
 
 class TestVofP3Equation11(unittest.TestCase):

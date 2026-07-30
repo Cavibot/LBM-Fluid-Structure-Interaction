@@ -122,6 +122,7 @@ def resolve_vof_topology_kernel(
 def prepare_vof_redistribution_kernel(
     mass_pre: wp.array3d(dtype=float),
     density_out: wp.array3d(dtype=float),
+    cell_type_n: wp.array3d(dtype=wp.uint8),
     final_type: wp.array3d(dtype=wp.uint8),
     mass_base: wp.array3d(dtype=float),
     excess: wp.array3d(dtype=float),
@@ -140,14 +141,15 @@ def prepare_vof_redistribution_kernel(
 
     i, j, k = wp.tid()
     kind = final_type[i, j, k]
+    old_kind = cell_type_n[i, j, k]
     rho = density_out[i, j, k]
     mass = mass_pre[i, j, k]
 
     base = float(0.0)
     if kind == wp.uint8(2):
-        base = rho
-        if wp.abs(mass - rho) <= mass_tolerance:
-            base = mass
+        base = mass
+        if old_kind == wp.uint8(1) and wp.abs(mass - rho) > mass_tolerance:
+            base = rho
     elif kind == wp.uint8(1):
         base = wp.min(wp.max(mass, 0.0), rho)
     local_excess = mass - base
@@ -238,6 +240,8 @@ def gather_vof_redistribution_kernel(
     mass_final[i, j, k] = mass
     if kind == wp.uint8(0):
         phi_final[i, j, k] = 0.0
+    elif kind == wp.uint8(2):
+        phi_final[i, j, k] = 1.0
     else:
         phi_final[i, j, k] = mass / density_out[i, j, k]
 

@@ -180,14 +180,6 @@ def _positive_cube(value: float) -> float:
 
 
 @wp.func
-def _positive_square(value: float) -> float:
-    result = float(0.0)
-    if value > 0.0:
-        result = value * value
-    return result
-
-
-@wp.func
 def plic_cube_volume_from_alpha(
     alpha: float,
     m_x: float,
@@ -230,12 +222,17 @@ def plic_cube_volume_from_alpha(
                 a = m_z
             else:
                 b = m_z
-        numerator = (
-            alpha * alpha
-            - _positive_square(alpha - a)
-            - _positive_square(alpha - b)
-        )
-        volume = numerator / (2.0 * a * b)
+        if a > b:
+            temporary = a
+            a = b
+            b = temporary
+        if alpha < a:
+            volume = alpha * alpha / (2.0 * a * b)
+        elif alpha <= b:
+            volume = (alpha - 0.5 * a) / b
+        else:
+            complement = 1.0 - alpha
+            volume = 1.0 - complement * complement / (2.0 * a * b)
     elif active == 3:
         numerator = (
             _positive_cube(alpha)

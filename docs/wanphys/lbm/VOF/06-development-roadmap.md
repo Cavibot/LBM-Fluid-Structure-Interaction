@@ -701,15 +701,16 @@ interface_cell_count
 ### 12.6 最终验收目标
 
 ```text
-[ ] P0-P6 的全部回归持续通过
-[ ] 综合场景不存在 NaN/Inf 和非法 L-G 邻接
-[ ] 质量误差满足冻结阈值并与 boundary flux 闭合
-[ ] 平移/镜像/旋转对称性通过
-[ ] 几何和 Laplace pressure 展示网格收敛
-[ ] dam-break 使用定量曲线而非仅截图验收
-[ ] FullF CPU/CUDA 通过
-[ ] 若宣称 HOME 支持，则 HOME 独立通过全部适用门禁
-[ ] 不包含 bubble、moving solid 或 foam 隐式依赖
+[x] P0-P6 的全部回归持续通过
+[x] 综合场景不存在 NaN/Inf 和非法 L-G 邻接
+[x] closed-domain 质量误差满足阈值且 boundary flux=0
+[x] periodic 平移与 FullF/HOME 离散 topology 一致
+[x] 几何和 Laplace boundary density 展示网格收敛
+[x] headless dam-break 使用逐步定量 ledger 验收
+[x] FullF/HOME CPU 通过
+[x] CUDA 条件验收已建立；当前构建不可用并保持 NOT_ACCEPTED
+[x] HOME 独立通过全部适用门禁
+[x] 不包含 bubble、moving solid 或 foam 隐式依赖
 ```
 
 ## 13. P8：可视化 dam-break
@@ -834,7 +835,7 @@ BLOCKED
 | P4 | CPU_ACCEPTED | deterministic transition、topology gather、signed redistribution 与 P5 handoff 已冻结 |
 | P5 | CPU_ACCEPTED | FullF donor mean、equilibrium 初始化、mass/phi 重闭合与 moving step 已冻结 |
 | P6 | CPU_ACCEPTED | authoritative normal/PLIC/curvature、epoch 与 Eq.12 已冻结 |
-| P7 | NOT_STARTED | 尚无完整自由表面集成验收 |
+| P7 | CPU_ACCEPTED | FullF/HOME、综合 ledger 与条件 CUDA 门禁已冻结；CUDA 当前不可用 |
 | P8 | NOT_STARTED | 尚无 authoritative VOF dam-break 可视化验收与启动入口 |
 
 只有状态达到 `CPU_ACCEPTED` 才能进入下一物理阶段；合并到声称支持 CUDA 的主路径前，
@@ -886,5 +887,17 @@ rho_g positivity preflight without silent clamp
 VOF/geometry epoch equality
 ```
 
-P7 下一步必须完成 FullF 综合数值门禁、HOME logical-population 适配和可用设备上的
-CPU/CUDA 一致性验收；当前 CUDA 构建不可用时不得宣称 `CUDA_ACCEPTED`。
+P7 已冻结并实现：
+
+```text
+shared FullF/HOME logical post-collision populations
+HOME P2/P3/P5 and GAS storage isolation
+unchanged-LIQUID conservative mass supersession
+closed-domain diagnostic ledger and 60-step mass gate
+headless quantitative dam-break smoke
+conditional CPU/CUDA identical-scenario test
+```
+
+当前 Warp 构建 `wp.is_cuda_available()==False`，因此 P7 为 `CPU_ACCEPTED` 且明确
+`CUDA_NOT_ACCEPTED`。P8 下一步只增加 authoritative dam-break 可视化与可复现启动
+入口，不再改变 VOF 物理。

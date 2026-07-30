@@ -133,30 +133,35 @@ class TestVofP2Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown VOF mass scheme"):
             _model((3, 2, 2), scheme="paper_center")
 
-    def test_p2_is_fullf_only_and_home_step_still_fails_before_writes(
+    def test_p2_home_extension_preserves_fixed_topology_and_mass(
         self,
     ) -> None:
         shape = (3, 2, 2)
         phi = np.full(shape, 0.5, dtype=np.float32)
         home = _domain_from_phi(phi, encoding="home")
-        with self.assertRaisesRegex(NotImplementedError, "deferred to P7"):
-            home.solver.compute_vof_mass_transport(home.state)
-
-        state_before = home.state.clone()
-        with self.assertRaisesRegex(NotImplementedError, "deferred to P7"):
-            home.step(1.0)
-        assert home.state.vof is not None and state_before.vof is not None
-        for actual, expected in zip(
-            home.state.kinetic_fields,
-            state_before.kinetic_fields,
-            strict=True,
-        ):
-            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
-        for name in ("mass", "phi", "cell_type"):
-            np.testing.assert_array_equal(
-                getattr(home.state.vof, name).numpy(),
-                getattr(state_before.vof, name).numpy(),
-            )
+        state_before = home.state
+        assert state_before.vof is not None
+        result = home.solver.compute_vof_mass_transport(state_before)
+        np.testing.assert_allclose(
+            result.mass_tmp.numpy(),
+            state_before.vof.mass.numpy(),
+            atol=2.0e-7,
+        )
+        type_before = state_before.vof.cell_type.numpy().copy()
+        total_before = float(
+            np.sum(state_before.vof.mass.numpy(), dtype=np.float64)
+        )
+        home.step(1.0)
+        assert home.state.vof is not None
+        np.testing.assert_array_equal(
+            home.state.vof.cell_type.numpy(),
+            type_before,
+        )
+        self.assertAlmostEqual(
+            float(np.sum(home.state.vof.mass.numpy(), dtype=np.float64)),
+            total_before,
+            places=5,
+        )
 
 
 class TestVofP2LinkWeights(unittest.TestCase):

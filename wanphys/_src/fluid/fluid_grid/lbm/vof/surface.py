@@ -14,10 +14,12 @@ from .geometry import validate_authoritative_geometry
 from .surface_kernels import (
     complete_gas_to_interface_fullf_kernel,
     restore_gas_fullf_state_kernel,
+    restore_gas_home_kinetic_kernel,
+    restore_gas_macroscopic_state_kernel,
 )
 
 if TYPE_CHECKING:
-    from ..state import FullFLbmState
+    from ..state import FullFLbmState, LbmStateBase
 
 
 class VofSurfaceBoundary:
@@ -38,7 +40,7 @@ class VofSurfaceBoundary:
         self.surface_tension = float(surface_tension)
         self.rho_g = 3.0 * self.atmosphere_pressure
 
-    def validate_pressure_state(self, state_in: FullFLbmState) -> None:
+    def validate_pressure_state(self, state_in: LbmStateBase) -> None:
         """Fail before population writes when P6 geometry/pressure is invalid."""
 
         if state_in.vof is None:
@@ -69,6 +71,18 @@ class VofSurfaceBoundary:
 
         if state_in.vof is None:
             raise ValueError("P3 surface completion requires state.vof storage")
+        return self.complete_populations(state_in, state_in.f_post, f_star)
+
+    def complete_populations(
+        self,
+        state_in: LbmStateBase,
+        logical_f_post_n: wp.array,
+        f_star: wp.array,
+    ) -> None:
+        """Complete Eq. (11) from an encoding-independent logical population."""
+
+        if state_in.vof is None:
+            raise ValueError("P7 surface completion requires state.vof storage")
         self.validate_pressure_state(state_in)
         nx, ny, nz = self.shape
         px, py, pz = self.periodic
@@ -76,7 +90,7 @@ class VofSurfaceBoundary:
             complete_gas_to_interface_fullf_kernel,
             dim=self.shape,
             inputs=[
-                state_in.f_post,
+                logical_f_post_n,
                 state_in.velocity_x,
                 state_in.velocity_y,
                 state_in.velocity_z,
@@ -99,19 +113,65 @@ class VofSurfaceBoundary:
 
     def restore_gas(
         self,
-        state_in: FullFLbmState,
-        state_out: FullFLbmState,
+        state_in: LbmStateBase,
+        state_out: LbmStateBase,
     ) -> None:
         """Restore GAS storage after the generic all-cell LBM kernels."""
 
         if state_in.vof is None:
             raise ValueError("P3 GAS restoration requires state.vof storage")
-        nx, ny, nz = self.shape
+        from ..state import FullFLbmState, HomeLbmState
+
+        if isinstance(state_in, FullFLbmState) and isinstance(
+            state_out, FullFLbmState
+        ):
+            nx, ny, nz = self.shape
+            wp.launch(
+                restore_gas_fullf_state_kernel,
+                dim=self.shape,
+                inputs=[
+                    state_in.f_post,
+                    state_in.density,
+                    state_in.velocity_x,
+                    state_in.velocity_y,
+                    state_in.velocity_z,
+                    state_in.force_x,
+                    state_in.force_y,
+                    state_in.force_z,
+                    state_in.vof.cell_type,
+                    state_out.f_post,
+                    state_out.density,
+                    state_out.velocity_x,
+                    state_out.velocity_y,
+                    state_out.velocity_z,
+                    state_out.force_x,
+                    state_out.force_y,
+                    state_out.force_z,
+                    ny,
+                    nz,
+                    nx * ny * nz,
+                ],
+                device=self.device,
+            )
+            return
+        if not isinstance(state_in, HomeLbmState) or not isinstance(
+            state_out, HomeLbmState
+        ):
+            raise TypeError("P7 GAS restore requires matching FullF or HOME states")
         wp.launch(
-            restore_gas_fullf_state_kernel,
+            restore_gas_home_kinetic_kernel,
             dim=self.shape,
             inputs=[
-                state_in.f_post,
+                *state_in.kinetic_fields,
+                state_in.vof.cell_type,
+                *state_out.kinetic_fields,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            restore_gas_macroscopic_state_kernel,
+            dim=self.shape,
+            inputs=[
                 state_in.density,
                 state_in.velocity_x,
                 state_in.velocity_y,
@@ -120,7 +180,6 @@ class VofSurfaceBoundary:
                 state_in.force_y,
                 state_in.force_z,
                 state_in.vof.cell_type,
-                state_out.f_post,
                 state_out.density,
                 state_out.velocity_x,
                 state_out.velocity_y,
@@ -128,9 +187,6 @@ class VofSurfaceBoundary:
                 state_out.force_x,
                 state_out.force_y,
                 state_out.force_z,
-                ny,
-                nz,
-                nx * ny * nz,
             ],
             device=self.device,
         )

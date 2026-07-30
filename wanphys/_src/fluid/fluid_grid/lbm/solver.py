@@ -165,6 +165,13 @@ class LbmSolver(FluidGridSolverBase):
                 self.device,
                 model._periodic_ints,
             )
+        self._vof_logical_f_post = None
+        if model.interface_model == "vof":
+            self._vof_logical_f_post = wp.zeros(
+                19 * self._stride,
+                dtype=float,
+                device=self.device,
+            )
 
         self._collision_name = model.resolved_collision
         self._collision_contract = collision_contract(model.encoding, self._collision_name)
@@ -404,33 +411,29 @@ class LbmSolver(FluidGridSolverBase):
             )
         if self._vof_mass_transport is None:
             raise RuntimeError("VOF mass transport was not allocated")
-        if not isinstance(state_in, FullFLbmState):
-            raise NotImplementedError(
-                "P2 authoritative VOF mass transport supports FullF only; "
-                "HOME transport is deferred to P7"
-            )
-        return self._vof_mass_transport.compute_fullf(state_in)
+        logical_f_post = self._vof_postcollision_populations(state_in)
+        return self._vof_mass_transport.compute(state_in, logical_f_post)
 
     def compute_vof_surface_populations(
         self,
         state_in: LbmStateBase,
     ) -> wp.array:
-        """Form P3 streamed FullF populations with Eq. (11) completion."""
+        """Form streamed populations with encoding-independent Eq. (11)."""
 
         if self.model.interface_model != "vof":
             raise ValueError(
                 "compute_vof_surface_populations requires interface_model='vof'"
             )
-        if not isinstance(state_in, FullFLbmState):
-            raise NotImplementedError(
-                "P3 authoritative VOF surface completion supports FullF only; "
-                "HOME is deferred to P7"
-            )
         if self._vof_surface_boundary is None:
             raise RuntimeError("VOF surface boundary was not allocated")
         px, py, pz = self.model._periodic_ints
+        logical_f_post = self._vof_postcollision_populations(state_in)
         self._stream_to_populations(state_in, px, py, pz)
-        self._vof_surface_boundary.complete_fullf(state_in, self._f_star)
+        self._vof_surface_boundary.complete_populations(
+            state_in,
+            logical_f_post,
+            self._f_star,
+        )
         return self._f_star
 
     def step(
@@ -443,14 +446,9 @@ class LbmSolver(FluidGridSolverBase):
     ) -> None:
         """Advance ``post-collision -> stream -> collide -> post-collision``."""
         is_vof = self.model.interface_model == "vof"
-        if is_vof and (
-            not isinstance(state_in, FullFLbmState)
-            or not isinstance(state_out, FullFLbmState)
-        ):
-            raise NotImplementedError(
-                "P3 authoritative VOF time stepping supports FullF only; "
-                "HOME is deferred to P7"
-            )
+        if is_vof and type(state_in) is not type(state_out):
+            raise TypeError("P7 VOF step requires matching persistent encodings")
+        logical_f_post = None
         if is_vof:
             if self._vof_mass_transport is None:
                 raise RuntimeError("VOF mass transport was not allocated")
@@ -460,7 +458,8 @@ class LbmSolver(FluidGridSolverBase):
                 raise RuntimeError("VOF topology transition was not allocated")
             if self._vof_kinetic_initializer is None:
                 raise RuntimeError("VOF kinetic initializer was not allocated")
-            self._vof_mass_transport.compute_fullf(state_in)
+            logical_f_post = self._vof_postcollision_populations(state_in)
+            self._vof_mass_transport.compute(state_in, logical_f_post)
 
         del contacts, control, dt
         self._copy_boundary_fields(state_in, state_out)
@@ -469,9 +468,13 @@ class LbmSolver(FluidGridSolverBase):
         # 1. StateProvider + StreamingEngine always form logical populations.
         self._stream_to_populations(state_in, px, py, pz)
         if is_vof:
-            assert isinstance(state_in, FullFLbmState)
             assert self._vof_surface_boundary is not None
-            self._vof_surface_boundary.complete_fullf(state_in, self._f_star)
+            assert logical_f_post is not None
+            self._vof_surface_boundary.complete_populations(
+                state_in,
+                logical_f_post,
+                self._f_star,
+            )
         if self.model.use_cut_link:
             if isinstance(state_in, FullFLbmState):
                 cut_link_kernel = streaming.apply_fullf_cut_link_transport_kernel
@@ -683,8 +686,6 @@ class LbmSolver(FluidGridSolverBase):
 
         self._write_observables(state_out)
         if is_vof:
-            assert isinstance(state_in, FullFLbmState)
-            assert isinstance(state_out, FullFLbmState)
             assert self._vof_surface_boundary is not None
             assert self._vof_mass_transport is not None
             assert self._vof_topology_transition is not None
@@ -698,21 +699,36 @@ class LbmSolver(FluidGridSolverBase):
                 state_out.density,
                 state_in.vof.cell_type,
             )
-            self._vof_kinetic_initializer.initialize_fullf(
-                state_out,
-                state_in.vof.cell_type,
-                transition,
-                gravity=(
+            initializer_kwargs = {
+                "gravity": (
                     float(self.model.gravity_x),
                     float(self.model.gravity_y),
                     float(self.model.gravity_z),
                 ),
-                max_lattice_speed=float(self.model.max_lattice_speed),
-                enforce_population_positivity=bool(
+                "max_lattice_speed": float(self.model.max_lattice_speed),
+                "enforce_population_positivity": bool(
                     self.model.enforce_population_positivity
                 ),
-                population_floor=float(self.model.population_floor),
-            )
+                "population_floor": float(self.model.population_floor),
+            }
+            if isinstance(state_out, FullFLbmState):
+                self._vof_kinetic_initializer.initialize_fullf(
+                    state_out,
+                    state_in.vof.cell_type,
+                    transition,
+                    **initializer_kwargs,
+                )
+            elif isinstance(state_out, HomeLbmState):
+                self._vof_kinetic_initializer.initialize_home(
+                    state_out,
+                    state_in.vof.cell_type,
+                    transition,
+                    **initializer_kwargs,
+                )
+            else:
+                raise TypeError(
+                    f"Unsupported VOF encoding: {type(state_out).__name__}"
+                )
             self._vof_topology_transition.commit(
                 state_out.vof,
                 source_epoch=state_in.vof.epoch,
@@ -727,6 +743,21 @@ class LbmSolver(FluidGridSolverBase):
 
     def _home_inputs(self, state: HomeLbmState) -> list[wp.array]:
         return list(state.kinetic_fields)
+
+    def _vof_postcollision_populations(
+        self,
+        state: LbmStateBase,
+    ) -> wp.array:
+        """Return the P7 shared logical post-collision D3Q19 population view."""
+
+        if isinstance(state, FullFLbmState):
+            return state.f_post
+        if isinstance(state, HomeLbmState):
+            if self._vof_logical_f_post is None:
+                raise RuntimeError("P7 VOF logical-population scratch is missing")
+            self._decode_home_to_populations(state, self._vof_logical_f_post)
+            return self._vof_logical_f_post
+        raise TypeError(f"Unsupported LBM state type: {type(state).__name__}")
 
     def _stream_to_populations(self, state: LbmStateBase, px: int, py: int, pz: int) -> None:
         assert self._f_star is not None

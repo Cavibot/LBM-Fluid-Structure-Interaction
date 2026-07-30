@@ -2,8 +2,9 @@
 
 当前仓库已经冻结 authoritative VOF 的 P1 状态/初始化、P2 FullF 质量 transport、
 P3 自由面边界、P4 类型转换/守恒重分配、P5 新界面 kinetic 初始化和 P6
-normal/PLIC/curvature/Eq.12 表面张力。FullF 现在可以提交带常数 gamma 的
-moving-interface step；Shan-Chen 调试观察路径继续与正式 VOF 完全隔离。
+normal/PLIC/curvature/Eq.12 表面张力，以及 P7 FullF/HOME 综合验收。两种 persistent
+encoding 现在都可以提交 closed-domain、常数 gamma 的 moving-interface step；
+Shan-Chen 调试观察路径继续与正式 VOF 完全隔离。
 
 ## 当前 API
 
@@ -33,8 +34,8 @@ gravity = independent
 ```
 
 `force_model` 仅是内部派生结果，调用者不能配置。`interface_model="vof"` 的 P6
-路径要求 FullF、非负常数 `vof_surface_tension` 以及 periodic/static bounce-back
-domain boundary；HOME 和开口 VOF domain boundary 会 fail-fast。
+路径支持 FullF/HOME、非负常数 `vof_surface_tension` 以及 periodic/static
+bounce-back domain boundary；开口 VOF domain boundary 仍会 fail-fast。
 
 ## 状态隔离
 
@@ -92,7 +93,8 @@ dam-break 示例的相关参数为：
 - P4 deterministic topology/redistribution：`CPU_ACCEPTED`；
 - P5 FullF new-interface kinetic initialization：`CPU_ACCEPTED`；
 - P6 authoritative geometry 与 Eq.12 surface tension：`CPU_ACCEPTED`；
-- HOME mass transport：P7；
+- P7 FullF/HOME 综合 closed-domain 验收：`CPU_ACCEPTED`；
+- CUDA：条件测试已建立，当前 Warp 构建不可用，`CUDA_NOT_ACCEPTED`；
 - bubble pressure、moving-solid VOF coupling 和 foam。
 
 ## 文档导航
@@ -123,3 +125,6 @@ dam-break 示例的相关参数为：
 - [21-p6-engineering-plan.md](21-p6-engineering-plan.md)：P6 几何、符号、epoch 与验收计划；
 - [22-p6-completion-summary.md](22-p6-completion-summary.md)：P6 完成与 CPU 验收总结；
 - [23-p6-change-architecture.md](23-p6-change-architecture.md)：P6 改动文件与关键架构新旧对比。
+- [24-p7-engineering-plan.md](24-p7-engineering-plan.md)：P7 HOME、综合场景和设备计划；
+- [25-p7-completion-summary.md](25-p7-completion-summary.md)：P7 完成与 CPU 验收总结；
+- [26-p7-change-architecture.md](26-p7-change-architecture.md)：P7 改动文件与关键架构新旧对比。

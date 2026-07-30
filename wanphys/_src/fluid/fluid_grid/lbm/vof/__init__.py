@@ -5,6 +5,11 @@
 
 from .advection import VofMassTransport, VofMassTransportResult
 from .contracts import VofCellType, VofMassScheme
+from .diagnostics import (
+    VofDiagnostics,
+    collect_vof_diagnostics,
+    validate_vof_diagnostics,
+)
 from .geometry import (
     InterfaceGeometry,
     VofInterfaceGeometry,
@@ -27,6 +32,7 @@ __all__ = [
     "InterfaceGeometry",
     "InterfaceVisualData",
     "VofCellType",
+    "VofDiagnostics",
     "VofGridState",
     "VofInterfaceVisualizer",
     "VofInterfaceGeometry",
@@ -41,4 +47,6 @@ __all__ = [
     "plic_cube_volume",
     "plic_plane_offset",
     "validate_authoritative_geometry",
+    "collect_vof_diagnostics",
+    "validate_vof_diagnostics",
 ]

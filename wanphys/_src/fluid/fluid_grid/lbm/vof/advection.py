@@ -36,27 +36,31 @@ class VofMassTransportResult:
 
 def validate_p2_transport_input(
     state: LbmStateBase,
+    logical_populations: wp.array | None = None,
     *,
     periodic: tuple[bool, bool, bool],
 ) -> None:
     """Validate the initialized fixed-topology state consumed by P2."""
 
-    from ..state import FullFLbmState
-
-    if not isinstance(state, FullFLbmState):
-        raise NotImplementedError(
-            "P2 authoritative VOF mass transport supports FullF only; "
-            "HOME transport is deferred to P7"
-        )
     if state.vof is None:
         raise ValueError("P2 VOF mass transport requires state.vof storage")
 
     validate_no_solid_cells(state.solid_phi)
     validate_initialized_density(state.density)
 
-    populations = np.asarray(state.f_post.numpy())
+    if logical_populations is None:
+        from ..state import FullFLbmState
+
+        if not isinstance(state, FullFLbmState):
+            raise ValueError(
+                "P7 HOME VOF validation requires decoded logical populations"
+            )
+        logical_populations = state.f_post
+    populations = np.asarray(logical_populations.numpy())
+    if populations.shape != (19 * int(np.prod(state.res)),):
+        raise ValueError("P2 logical population shape does not match D3Q19 grid")
     if not np.all(np.isfinite(populations)):
-        raise ValueError("P2 FullF populations must be finite")
+        raise ValueError("P2 logical populations must be finite")
 
     mass = np.asarray(state.vof.mass.numpy())
     phi = np.asarray(state.vof.phi.numpy())
@@ -71,18 +75,24 @@ def validate_p2_transport_input(
     validate_initial_topology(cell_type, periodic=periodic)
 
     density = np.asarray(state.density.numpy())
-    if not np.allclose(mass, density * phi, atol=1.0e-6, rtol=1.0e-5):
-        raise ValueError("P2 input must satisfy mass ~= density * phi")
     gas = cell_type == 0
     liquid = cell_type == 2
     if np.any(mass[gas] != 0.0) or np.any(phi[gas] != 0.0):
         raise ValueError("P2 input GAS cells must have mass=0 and phi=0")
     if not np.allclose(phi[liquid], 1.0, atol=2.0e-6, rtol=2.0e-5):
         raise ValueError("P2 input LIQUID cells must have phi approximately 1")
+    interface = cell_type == 1
+    if not np.allclose(
+        mass[interface],
+        density[interface] * phi[interface],
+        atol=1.0e-6,
+        rtol=1.0e-5,
+    ):
+        raise ValueError("P2 input INTERFACE must satisfy mass ~= density * phi")
 
 
 class VofMassTransport:
-    """Compute P2 fixed-topology FullF mass exchange without state mutation."""
+    """Compute fixed-topology mass from shared logical D3Q19 populations."""
 
     def __init__(
         self,
@@ -113,10 +123,18 @@ class VofMassTransport:
         from ..state import FullFLbmState
 
         if not isinstance(state, FullFLbmState):
-            raise NotImplementedError(
-                "P2 authoritative VOF mass transport supports FullF only; "
-                "HOME transport is deferred to P7"
-            )
+            raise TypeError("compute_fullf requires FullFLbmState")
+        return self.compute(state, state.f_post, validate=validate)
+
+    def compute(
+        self,
+        state: LbmStateBase,
+        logical_populations: wp.array,
+        *,
+        validate: bool = True,
+    ) -> VofMassTransportResult:
+        """Return provisional mass using one encoding-independent population view."""
+
         if tuple(int(value) for value in state.res) != self.shape:
             raise ValueError(
                 f"P2 state shape {state.res} does not match transport {self.shape}"
@@ -126,6 +144,7 @@ class VofMassTransport:
         if validate:
             validate_p2_transport_input(
                 state,
+                logical_populations,
                 periodic=tuple(bool(value) for value in self.periodic),
             )
 
@@ -135,7 +154,7 @@ class VofMassTransport:
             advect_vof_mass_fullf_fixed_topology_kernel,
             dim=self.shape,
             inputs=[
-                state.f_post,
+                logical_populations,
                 state.density,
                 state.vof.mass,
                 state.vof.phi,
@@ -157,8 +176,8 @@ class VofMassTransport:
 
     def finalize_fixed_topology(
         self,
-        state_in: FullFLbmState,
-        state_out: FullFLbmState,
+        state_in: LbmStateBase,
+        state_out: LbmStateBase,
     ) -> None:
         """Commit the latest provisional mass using P3 output density."""
 

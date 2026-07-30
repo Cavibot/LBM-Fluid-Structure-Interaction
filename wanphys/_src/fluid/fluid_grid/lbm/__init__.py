@@ -23,6 +23,7 @@ from .vof import (
     InterfaceGeometry,
     InterfaceVisualData,
     VofCellType,
+    VofDiagnostics,
     VofGridState,
     VofInterfaceGeometry,
     VofInterfaceVisualizer,
@@ -34,9 +35,11 @@ from .vof import (
     VofSurfaceBoundary,
     VofTopologyTransition,
     VofTransitionResult,
+    collect_vof_diagnostics,
     plic_cube_volume,
     plic_plane_offset,
     validate_authoritative_geometry,
+    validate_vof_diagnostics,
 )
 
 __all__ = [
@@ -60,6 +63,7 @@ __all__ = [
     "LbmState",
     "LbmStateBase",
     "VofCellType",
+    "VofDiagnostics",
     "VofGridState",
     "VofInterfaceVisualizer",
     "VofInterfaceGeometry",
@@ -71,7 +75,9 @@ __all__ = [
     "VofSurfaceBoundary",
     "VofTopologyTransition",
     "VofTransitionResult",
+    "collect_vof_diagnostics",
     "plic_cube_volume",
     "plic_plane_offset",
     "validate_authoritative_geometry",
+    "validate_vof_diagnostics",
 ]

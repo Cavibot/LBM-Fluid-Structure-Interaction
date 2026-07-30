@@ -379,26 +379,25 @@ class TestVofP1Initialization(unittest.TestCase):
         ordinary_walls = LbmDomain(_vof_model())
         ordinary_walls.initialize_vof(_layered_phi())
 
-    def test_home_step_fails_before_mutation_or_buffer_swap_until_p7(self) -> None:
+    def test_home_step_preserves_p1_state_contract_after_p7_extension(self) -> None:
         domain = LbmDomain(_vof_model(encoding="home"))
         state_in = domain.initialize_vof(_layered_phi())
         state_out = domain._state_out
         assert state_in.vof is not None and state_out is not None
-        kinetic_before = tuple(
-            field.numpy().copy() for field in state_in.kinetic_fields
+        mass_before = float(np.sum(state_in.vof.mass.numpy(), dtype=np.float64))
+        domain.step(1.0)
+        self.assertIs(domain._state_in, state_out)
+        self.assertIs(domain._state_out, state_in)
+        assert domain.state.vof is not None
+        self.assertAlmostEqual(
+            float(np.sum(domain.state.vof.mass.numpy(), dtype=np.float64)),
+            mass_before,
+            places=5,
         )
-        mass_before = state_in.vof.mass.numpy().copy()
-
-        with self.assertRaisesRegex(NotImplementedError, "deferred to P7"):
-            domain.step(1.0)
-
-        self.assertIs(domain._state_in, state_in)
-        self.assertIs(domain._state_out, state_out)
-        for field, expected in zip(
-            state_in.kinetic_fields, kinetic_before, strict=True
-        ):
-            np.testing.assert_array_equal(field.numpy(), expected)
-        np.testing.assert_array_equal(state_in.vof.mass.numpy(), mass_before)
+        self.assertEqual(
+            domain.state.vof.epoch,
+            domain.state.vof.geometry_epoch,
+        )
 
     def test_uniform_initial_conditions_must_survive_float32_conversion(self) -> None:
         domain = LbmDomain(_vof_model())

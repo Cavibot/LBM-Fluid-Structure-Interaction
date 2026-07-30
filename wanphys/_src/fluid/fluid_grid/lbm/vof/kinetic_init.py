@@ -14,11 +14,12 @@ import warp as wp
 from ..constants import CX, CY, CZ, W
 from .kinetic_init_kernels import (
     initialize_new_interface_fullf_kernel,
+    initialize_new_interface_home_kernel,
     prepare_new_interface_donors_kernel,
 )
 
 if TYPE_CHECKING:
-    from ..state import FullFLbmState
+    from ..state import FullFLbmState, HomeLbmState, LbmStateBase
     from .transition import VofTransitionResult
 
 
@@ -114,7 +115,7 @@ def validate_p5_prepared_kinetic(
 
 
 def validate_p5_initialized_state(
-    state: FullFLbmState,
+    state: LbmStateBase,
     transition: VofTransitionResult,
     result: VofKineticInitializationResult,
     *,
@@ -127,8 +128,9 @@ def validate_p5_initialized_state(
     mask = np.asarray(transition.new_interface.numpy(), dtype=bool)
     if not np.any(mask):
         return
+    from ..state import FullFLbmState, HomeLbmState
+
     shape = tuple(int(value) for value in state.res)
-    f_post = np.asarray(state.f_post.numpy()).reshape((19, *shape))
     rho = np.asarray(state.density.numpy())
     ux = np.asarray(state.velocity_x.numpy())
     uy = np.asarray(state.velocity_y.numpy())
@@ -138,21 +140,50 @@ def validate_p5_initialized_state(
     expected_uy = np.asarray(result.uy_init.numpy())
     expected_uz = np.asarray(result.uz_init.numpy())
 
-    expected_f = _equilibrium_numpy(
-        expected_rho[mask],
-        expected_ux[mask],
-        expected_uy[mask],
-        expected_uz[mask],
-    )
-    if not np.allclose(
-        f_post[:, mask],
-        expected_f,
-        atol=atol,
-        rtol=rtol,
-    ):
-        raise ValueError(
-            "P5 initialized populations do not match equilibrium projection"
+    if isinstance(state, FullFLbmState):
+        f_post = np.asarray(state.f_post.numpy()).reshape((19, *shape))
+        expected_f = _equilibrium_numpy(
+            expected_rho[mask],
+            expected_ux[mask],
+            expected_uy[mask],
+            expected_uz[mask],
         )
+        if not np.allclose(
+            f_post[:, mask],
+            expected_f,
+            atol=atol,
+            rtol=rtol,
+        ):
+            raise ValueError(
+                "P5 initialized populations do not match equilibrium projection"
+            )
+    elif isinstance(state, HomeLbmState):
+        expected_fields = (
+            expected_rho,
+            expected_rho * expected_ux,
+            expected_rho * expected_uy,
+            expected_rho * expected_uz,
+            expected_rho * expected_ux * expected_ux,
+            expected_rho * expected_uy * expected_uy,
+            expected_rho * expected_uz * expected_uz,
+            expected_rho * expected_ux * expected_uy,
+            expected_rho * expected_ux * expected_uz,
+            expected_rho * expected_uy * expected_uz,
+        )
+        for actual_field, expected_field in zip(
+            state.kinetic_fields, expected_fields, strict=True
+        ):
+            if not np.allclose(
+                np.asarray(actual_field.numpy())[mask],
+                expected_field[mask],
+                atol=atol,
+                rtol=rtol,
+            ):
+                raise ValueError(
+                    "P7 initialized HOME moments do not match equilibrium"
+                )
+    else:
+        raise TypeError("P5/P7 validator requires FullF or HOME state")
     for actual, expected, name in (
         (rho, expected_rho, "density"),
         (ux, expected_ux, "velocity_x"),
@@ -226,7 +257,7 @@ class VofKineticInitializer:
 
     def prepare(
         self,
-        state_out: FullFLbmState,
+        state_out: LbmStateBase,
         cell_type_n: wp.array,
         transition: VofTransitionResult,
         *,
@@ -347,6 +378,61 @@ class VofKineticInitializer:
                 ny,
                 nz,
                 nx * ny * nz,
+            ],
+            device=self.device,
+        )
+        validate_p5_initialized_state(
+            state_out,
+            transition,
+            result,
+            gravity=(gx, gy, gz),
+        )
+        return result
+
+    def initialize_home(
+        self,
+        state_out: HomeLbmState,
+        cell_type_n: wp.array,
+        transition: VofTransitionResult,
+        *,
+        gravity: tuple[float, float, float],
+        max_lattice_speed: float,
+        enforce_population_positivity: bool,
+        population_floor: float,
+    ) -> VofKineticInitializationResult:
+        """Prepare, write, and validate new-interface HOME equilibrium moments."""
+
+        result = self.prepare(
+            state_out,
+            cell_type_n,
+            transition,
+            max_lattice_speed=max_lattice_speed,
+            enforce_population_positivity=enforce_population_positivity,
+            population_floor=population_floor,
+        )
+        gx, gy, gz = (float(value) for value in gravity)
+        wp.launch(
+            initialize_new_interface_home_kernel,
+            dim=self.shape,
+            inputs=[
+                transition.new_interface,
+                transition.mass_final,
+                transition.phi_final,
+                self._rho_init,
+                self._ux_init,
+                self._uy_init,
+                self._uz_init,
+                *state_out.kinetic_fields,
+                state_out.density,
+                state_out.velocity_x,
+                state_out.velocity_y,
+                state_out.velocity_z,
+                state_out.force_x,
+                state_out.force_y,
+                state_out.force_z,
+                gx,
+                gy,
+                gz,
             ],
             device=self.device,
         )

@@ -151,7 +151,67 @@ def initialize_new_interface_fullf_kernel(
     phi_final[i, j, k] = mass_final[i, j, k] / rho
 
 
+@wp.kernel
+def initialize_new_interface_home_kernel(
+    new_interface: wp.array3d(dtype=wp.uint8),
+    mass_final: wp.array3d(dtype=float),
+    phi_final: wp.array3d(dtype=float),
+    rho_init: wp.array3d(dtype=float),
+    ux_init: wp.array3d(dtype=float),
+    uy_init: wp.array3d(dtype=float),
+    uz_init: wp.array3d(dtype=float),
+    rho_out: wp.array3d(dtype=float),
+    jx_out: wp.array3d(dtype=float),
+    jy_out: wp.array3d(dtype=float),
+    jz_out: wp.array3d(dtype=float),
+    sxx_out: wp.array3d(dtype=float),
+    syy_out: wp.array3d(dtype=float),
+    szz_out: wp.array3d(dtype=float),
+    sxy_out: wp.array3d(dtype=float),
+    sxz_out: wp.array3d(dtype=float),
+    syz_out: wp.array3d(dtype=float),
+    density_out: wp.array3d(dtype=float),
+    velocity_x_out: wp.array3d(dtype=float),
+    velocity_y_out: wp.array3d(dtype=float),
+    velocity_z_out: wp.array3d(dtype=float),
+    force_x_out: wp.array3d(dtype=float),
+    force_y_out: wp.array3d(dtype=float),
+    force_z_out: wp.array3d(dtype=float),
+    gravity_x: float,
+    gravity_y: float,
+    gravity_z: float,
+) -> None:
+    """Write equilibrium HOME moments and consistent macro/VOF fields."""
+
+    i, j, k = wp.tid()
+    if new_interface[i, j, k] == wp.uint8(0):
+        return
+    rho = rho_init[i, j, k]
+    ux = ux_init[i, j, k]
+    uy = uy_init[i, j, k]
+    uz = uz_init[i, j, k]
+    rho_out[i, j, k] = rho
+    jx_out[i, j, k] = rho * ux
+    jy_out[i, j, k] = rho * uy
+    jz_out[i, j, k] = rho * uz
+    sxx_out[i, j, k] = rho * ux * ux
+    syy_out[i, j, k] = rho * uy * uy
+    szz_out[i, j, k] = rho * uz * uz
+    sxy_out[i, j, k] = rho * ux * uy
+    sxz_out[i, j, k] = rho * ux * uz
+    syz_out[i, j, k] = rho * uy * uz
+    density_out[i, j, k] = rho
+    velocity_x_out[i, j, k] = ux
+    velocity_y_out[i, j, k] = uy
+    velocity_z_out[i, j, k] = uz
+    force_x_out[i, j, k] = rho * gravity_x
+    force_y_out[i, j, k] = rho * gravity_y
+    force_z_out[i, j, k] = rho * gravity_z
+    phi_final[i, j, k] = mass_final[i, j, k] / rho
+
+
 __all__ = [
     "initialize_new_interface_fullf_kernel",
+    "initialize_new_interface_home_kernel",
     "prepare_new_interface_donors_kernel",
 ]

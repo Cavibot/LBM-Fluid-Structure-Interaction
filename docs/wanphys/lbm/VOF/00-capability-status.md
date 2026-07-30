@@ -2,14 +2,15 @@
 
 本文是当前 LBM/VOF 能力的状态入口，严格区分 Shan-Chen 调试观察与未来的守恒
 VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
-[06-development-roadmap.md](06-development-roadmap.md)。P0-P6 当前均为
+[06-development-roadmap.md](06-development-roadmap.md)。P0-P7 当前均为
 `CPU_ACCEPTED`；冻结证据分别见 [07-p0-baseline.md](07-p0-baseline.md)、
 [08-p1-engineering-plan.md](08-p1-engineering-plan.md) 和
 [10-p2-completion-summary.md](10-p2-completion-summary.md)、
 [13-p3-completion-summary.md](13-p3-completion-summary.md)、
 [16-p4-completion-summary.md](16-p4-completion-summary.md)、
 [19-p5-completion-summary.md](19-p5-completion-summary.md)、
-[22-p6-completion-summary.md](22-p6-completion-summary.md)，CUDA 尚未验收。
+[22-p6-completion-summary.md](22-p6-completion-summary.md)、
+[25-p7-completion-summary.md](25-p7-completion-summary.md)，CUDA 尚未验收。
 
 ## 1. 状态含义
 
@@ -23,6 +24,7 @@ VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
 | `TOPOLOGY_CPU_ACCEPTED` | transition/redistribution scratch 与无新界面提交通过 CPU 验收 |
 | `KINETIC_CPU_ACCEPTED` | GAS→INTERFACE FullF kinetic 初始化与 moving step 通过 CPU 验收 |
 | `GEOMETRY_CPU_ACCEPTED` | authoritative normal/PLIC/curvature 与 Eq.12 通过 CPU 验收 |
+| `INTEGRATION_CPU_ACCEPTED` | FullF/HOME 与综合 closed-domain 场景通过 CPU 验收 |
 | `NOT_STARTED` | 尚未实现 |
 | `FAIL_FAST` | 当前只允许显式拒绝 |
 | `CUDA_NOT_ACCEPTED` | 尚未完成 CUDA 验收 |
@@ -59,8 +61,7 @@ vof         + gravity    -> gravity
 - VOF 请求 `requires_grad=True`：`NotImplementedError`；
 - VOF 配置非正/非有限大气压力：`ValueError`；
 - VOF 配置负数或非有限表面张力：`ValueError`；
-- VOF 配置开口 domain boundary：`NotImplementedError`，等待 P7；
-- HOME authoritative VOF step：`NotImplementedError`，等待 P7；
+- VOF 配置开口 domain boundary：`NotImplementedError`；当前 closed-domain 范围不支持；
 
 旧字段 `vof_debug_labels` 和调用者可配置的 `force_model` 均已删除，没有 deprecated
 alias。
@@ -77,20 +78,20 @@ alias。
 | `state.vof.phi` | `AUTHORITATIVE_CPU_ACCEPTED` | `mass/density` 反算 | 派生占据率缓存 |
 | `state.vof.cell_type` | `AUTHORITATIVE_CPU_ACCEPTED` | 严格 phi 分类 | GAS/INTERFACE/LIQUID 拓扑 |
 | `vof_mass_scheme` | `TRANSPORT_CPU_ACCEPTED` | 配置层 | 固定为已审计的 `fslbm_neighbor` |
-| `VofMassTransport` | `TRANSPORT_CPU_ACCEPTED` | solver scratch | 无副作用 FullF 固定拓扑质量交换 |
+| `VofMassTransport` | `INTEGRATION_CPU_ACCEPTED` | solver scratch | 共享 logical-population 固定拓扑质量交换 |
 | `mass_tmp/phi_tmp/mass_delta` | `TRANSPORT_CPU_ACCEPTED` | P2 transport | 旧时间层 provisional scratch，不是持久状态 |
-| `compute_vof_mass_transport()` | `TRANSPORT_CPU_ACCEPTED` | solver | 独立 P2 transport 测试入口 |
+| `compute_vof_mass_transport()` | `INTEGRATION_CPU_ACCEPTED` | solver | FullF/HOME 独立 transport 测试入口 |
 | `vof_atmosphere_pressure` | `SURFACE_CPU_ACCEPTED` | 配置层 | 固定气相压力，默认 `c_s^2` |
 | `vof_surface_tension` | `GEOMETRY_CPU_ACCEPTED` | 配置层 | 非负常数 gamma，Eq.12 唯一消费方 |
 | `VofSurfaceBoundary` | `GEOMETRY_CPU_ACCEPTED` | solver stage | Eq.11 + Eq.12 gas-to-interface population 补全 |
-| `compute_vof_surface_populations()` | `SURFACE_CPU_ACCEPTED` | solver | 独立 FullF pull + Eq.11 测试入口 |
-| FullF surface `step()` | `KINETIC_CPU_ACCEPTED` | solver/domain | gamma=0 moving interface 可提交 |
+| `compute_vof_surface_populations()` | `INTEGRATION_CPU_ACCEPTED` | solver | FullF/HOME pull + Eq.11/Eq.12 测试入口 |
+| FullF/HOME `step()` | `INTEGRATION_CPU_ACCEPTED` | solver/domain | closed-domain moving interface 可提交 |
 | `validate_p3_fixed_topology_state()` | `SURFACE_CPU_ACCEPTED` | validator | 越界/非法 topology 在 buffer swap 前失败 |
 | `vof_transition_epsilon` | `TOPOLOGY_CPU_ACCEPTED` | 配置层 | 论文阈值，默认 `1e-4` |
 | `VofTopologyTransition` | `TOPOLOGY_CPU_ACCEPTED` | solver scratch | proposal/topology/clamp/redistribution |
 | `VofTransitionResult` | `TOPOLOGY_CPU_ACCEPTED` | solver scratch | final VOF 与 new/retired/changed masks |
 | P4 deterministic gather | `TOPOLOGY_CPU_ACCEPTED` | transition kernels | 无原地邻居写、无 atomic scatter |
-| `VofKineticInitializer` | `KINETIC_CPU_ACCEPTED` | solver scratch | old/final active donor mean + FullF equilibrium |
+| `VofKineticInitializer` | `INTEGRATION_CPU_ACCEPTED` | solver scratch | donor mean + FullF populations/HOME moments |
 | `VofKineticInitializationResult` | `KINETIC_CPU_ACCEPTED` | solver scratch | donor count 与 rho/u 初始化值 |
 | GAS→INTERFACE handoff | `KINETIC_CPU_ACCEPTED` | P4→P5 | kinetic 成功后才提交 VOF |
 | `state.vof.normal` | `GEOMETRY_CPU_ACCEPTED` | P6 geometry | 液体到气体 Parker–Youngs unit normal |
@@ -98,6 +99,8 @@ alias。
 | `state.vof.curvature` | `GEOMETRY_CPU_ACCEPTED` | P6 geometry | `-0.5 div(normal)` mean curvature |
 | `state.vof.epoch/geometry_epoch` | `GEOMETRY_CPU_ACCEPTED` | commit/geometry | 过期几何硬门禁 |
 | `VofInterfaceGeometry` | `GEOMETRY_CPU_ACCEPTED` | solver stage | final phi/type normal→PLIC→curvature |
+| shared logical `f_post` provider | `INTEGRATION_CPU_ACCEPTED` | solver scratch | FullF direct、HOME ten-moment decode |
+| `VofDiagnostics` | `INTEGRATION_CPU_ACCEPTED` | read-only host ledger | mass/topology/finite/speed/epoch 门禁 |
 | `LbmDomain.initialize_vof()` | `AUTHORITATIVE_CPU_ACCEPTED` | domain | candidate 双缓冲完整初始化 |
 | `validate_initialized_vof_state()` | `AUTHORITATIVE_CPU_ACCEPTED` | validator | 只读检查实际数组不变量 |
 | `DebugMockScToVofState` | `OBSERVE_CPU_ACCEPTED` | debug observer | 与正式 VOF 分离的调试容器 |
@@ -118,7 +121,7 @@ alias。
 |---|---|---|---|
 | `off` | 单相 LBM | 禁止 | 无 VOF view |
 | `shan_chen` | density | 只写 `state.debug_mock_sc_to_vof` | 只读 `DebugVofView` |
-| `vof`（P6） | `state.vof.mass/phi/cell_type` | 不得覆盖正式状态 | FullF moving interface + constant gamma |
+| `vof`（P7） | `state.vof.mass/phi/cell_type` | 不得覆盖正式状态 | FullF/HOME closed-domain + constant gamma |
 
 P0 数据流：
 
@@ -139,17 +142,17 @@ population 有效性或边界行为。
 | 能力 | 状态 | 未来权威写入者 |
 |---|---|---|
 | physical VOF construction/initialization | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer |
-| physical VOF time stepping | `GEOMETRY_CPU_ACCEPTED` | P6 FullF moving interface + Eq.12 |
+| physical VOF time stepping | `INTEGRATION_CPU_ACCEPTED` | P7 FullF/HOME closed-domain |
 | `mass/phi/cell_type` initialization | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer |
 | FullF fixed-topology mass advection | `TRANSPORT_CPU_ACCEPTED` | P2 mass transport scratch |
-| HOME fixed-topology mass advection | `NOT_STARTED` | P7 logical population provider |
+| HOME fixed-topology mass advection | `INTEGRATION_CPU_ACCEPTED` | P7 logical population provider |
 | transition writes | `TOPOLOGY_CPU_ACCEPTED` | P4 scratch/conditional commit |
 | authoritative normal | `GEOMETRY_CPU_ACCEPTED` | P6 geometry step |
 | FullF logical population access for mass flux | `TRANSPORT_CPU_ACCEPTED` | P2 direct FullF access |
-| shared FullF/HOME logical population provider | `NOT_STARTED` | P7 adapter |
+| shared FullF/HOME logical population provider | `INTEGRATION_CPU_ACCEPTED` | P7 adapter |
 | gas-to-interface completion | `SURFACE_CPU_ACCEPTED` | P3 `VofSurfaceBoundary` |
 | topology repair / redistribution | `TOPOLOGY_CPU_ACCEPTED` | P4 deterministic gathers |
-| new-interface kinetic initialization | `KINETIC_CPU_ACCEPTED` | P5 FullF equilibrium projection |
+| new-interface kinetic initialization | `INTEGRATION_CPU_ACCEPTED` | FullF populations / HOME moments |
 | PLIC / curvature / surface tension | `GEOMETRY_CPU_ACCEPTED` | P6 geometry/free-surface pressure |
 
 正式 VOF 状态与 `debug_vof_observation` 无关：即使不显示也必须分配。P2 的独立
@@ -220,4 +223,17 @@ gamma=0 follows the exact P3 density branch
 non-finite/non-positive rho_g fails before surface population writes
 PLIC is derived geometry and never advects mass
 geometry_epoch must equal vof.epoch
+```
+
+P7 冻结语义：
+
+```text
+FullF uses direct logical post-collision populations
+HOME decodes rho/rho*u/rho*S into solver-owned logical population scratch
+P2 and P3 consume the same logical population contract
+old GAS HOME moments/macros are restored before topology transition
+new HOME interfaces receive equilibrium rho/rho*u/rho*S
+unchanged LIQUID preserves conserved VOF mass and canonical phi=1
+closed-domain diagnostics require mass error<=5e-6 and zero D3Q19 L-G links
+CUDA test exists but is skipped when wp.is_cuda_available() is false
 ```

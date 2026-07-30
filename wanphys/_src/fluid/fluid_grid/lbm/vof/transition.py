@@ -89,9 +89,13 @@ def validate_p4_transition_result(
     liquid = final_type == int(VofCellType.LIQUID)
     if np.any(mass_final[gas] != 0.0) or np.any(phi_final[gas] != 0.0):
         raise ValueError("P4 final GAS cells must have mass=0 and phi=0")
+    became_liquid = (
+        (cell_type_n == int(VofCellType.INTERFACE))
+        & liquid
+    )
     if not np.allclose(
-        mass_final[liquid],
-        density_out[liquid],
+        mass_final[became_liquid],
+        density_out[became_liquid],
         atol=mass_tolerance,
         rtol=mass_tolerance,
     ) or not np.allclose(
@@ -100,7 +104,9 @@ def validate_p4_transition_result(
         atol=mass_tolerance,
         rtol=mass_tolerance,
     ):
-        raise ValueError("P4 final LIQUID cells must have mass=density and phi=1")
+        raise ValueError(
+            "P4 new LIQUID cells must have mass=density and all LIQUID phi=1"
+        )
     if not np.allclose(
         mass_final[interface],
         density_out[interface] * phi_final[interface],
@@ -267,6 +273,7 @@ class VofTopologyTransition:
             inputs=[
                 mass_pre,
                 density_out,
+                cell_type_n,
                 self._final_type,
                 self._mass_base,
                 self._excess,
