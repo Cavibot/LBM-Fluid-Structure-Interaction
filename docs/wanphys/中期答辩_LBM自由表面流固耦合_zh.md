@@ -1,7 +1,10 @@
 # 中期答辩
 
 **题目：** 基于 HOMELBM 的锐界面自由表面与刚体流固耦合  
-**工程载体：** WanPhys / `LBM-Fluid-Structure-Interaction`
+**工程载体：** WanPhys / `LBM-Fluid-Structure-Interaction`   
+**参考材料:** **High-Order Moment-Encoded Kinetic Simulation of Turbulent Flows**/**High-Performance Moment-Encoded Lattice Boltzmann Method with Stability-Guided Quantization**/**Kinetic Free-Surface Flows and Foams with Sharp Interfaces**
+以及代码仓库**https://github.com/qingxu-thu/Home-FSLBM** 和 **https://github.com/kuiwuchn/OpenHOMELBM**
+
 
 
 
