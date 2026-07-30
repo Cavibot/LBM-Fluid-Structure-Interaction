@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""P3 fixed-atmosphere, zero-surface-tension boundary dispatch."""
+"""P3/P6 fixed-atmosphere free-surface boundary dispatch."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import warp as wp
 
+from .geometry import validate_authoritative_geometry
 from .surface_kernels import (
     complete_gas_to_interface_fullf_kernel,
     restore_gas_fullf_state_kernel,
@@ -27,12 +29,36 @@ class VofSurfaceBoundary:
         device: wp.Device,
         periodic: tuple[int, int, int],
         atmosphere_pressure: float,
+        surface_tension: float,
     ) -> None:
         self.shape = tuple(int(value) for value in shape)
         self.device = device
         self.periodic = tuple(int(value) for value in periodic)
         self.atmosphere_pressure = float(atmosphere_pressure)
+        self.surface_tension = float(surface_tension)
         self.rho_g = 3.0 * self.atmosphere_pressure
+
+    def validate_pressure_state(self, state_in: FullFLbmState) -> None:
+        """Fail before population writes when P6 geometry/pressure is invalid."""
+
+        if state_in.vof is None:
+            raise ValueError("P6 surface completion requires state.vof storage")
+        validate_authoritative_geometry(state_in.vof)
+        if self.surface_tension == 0.0:
+            return
+        curvature = np.asarray(state_in.vof.curvature.numpy())
+        cell_type = np.asarray(state_in.vof.cell_type.numpy())
+        interface = cell_type == 1
+        rho_g = 3.0 * (
+            self.atmosphere_pressure
+            - 2.0 * self.surface_tension * curvature[interface]
+        )
+        if not np.all(np.isfinite(rho_g)) or np.any(rho_g <= 0.0):
+            minimum = float(np.min(rho_g)) if rho_g.size else float("inf")
+            raise ValueError(
+                "P6 Eq. (12) requires finite positive rho_g on every "
+                f"INTERFACE cell; minimum={minimum}"
+            )
 
     def complete_fullf(
         self,
@@ -43,6 +69,7 @@ class VofSurfaceBoundary:
 
         if state_in.vof is None:
             raise ValueError("P3 surface completion requires state.vof storage")
+        self.validate_pressure_state(state_in)
         nx, ny, nz = self.shape
         px, py, pz = self.periodic
         wp.launch(
@@ -54,8 +81,11 @@ class VofSurfaceBoundary:
                 state_in.velocity_y,
                 state_in.velocity_z,
                 state_in.vof.cell_type,
+                state_in.vof.curvature,
                 f_star,
                 self.rho_g,
+                self.atmosphere_pressure,
+                self.surface_tension,
                 px,
                 py,
                 pz,

@@ -33,8 +33,11 @@ def complete_gas_to_interface_fullf_kernel(
     velocity_y_n: wp.array3d(dtype=float),
     velocity_z_n: wp.array3d(dtype=float),
     cell_type_n: wp.array3d(dtype=wp.uint8),
+    curvature_n: wp.array3d(dtype=float),
     f_star: wp.array(dtype=float),
-    rho_g: float,
+    atmosphere_density: float,
+    atmosphere_pressure: float,
+    surface_tension: float,
     periodic_x: int,
     periodic_y: int,
     periodic_z: int,
@@ -53,6 +56,12 @@ def complete_gas_to_interface_fullf_kernel(
     ux = velocity_x_n[i, j, k]
     uy = velocity_y_n[i, j, k]
     uz = velocity_z_n[i, j, k]
+    rho_g = atmosphere_density
+    if surface_tension != 0.0:
+        rho_g = 3.0 * (
+            atmosphere_pressure
+            - 2.0 * surface_tension * curvature_n[i, j, k]
+        )
     for q in range(1, 19):
         si = i - direction_x(q)
         sj = j - direction_y(q)

@@ -33,6 +33,14 @@ def validate_empty_vof_state(vof: VofGridState) -> None:
         raise ValueError("empty VOF phi must be finite and exactly zero")
     if not np.all(cell_type == int(VofCellType.GAS)):
         raise ValueError("empty VOF cell_type must be GAS at every cell")
+    if not np.all(np.asarray(vof.normal.numpy()) == 0.0):
+        raise ValueError("empty VOF normal must be exactly zero")
+    if not np.all(np.asarray(vof.plic_offset.numpy()) == 0.0):
+        raise ValueError("empty VOF PLIC offset must be exactly zero")
+    if not np.all(np.asarray(vof.curvature.numpy()) == 0.0):
+        raise ValueError("empty VOF curvature must be exactly zero")
+    if vof.epoch != -1 or vof.geometry_epoch != -1:
+        raise ValueError("empty VOF epochs must both equal -1")
 
 
 def validate_initialized_vof_state(
@@ -94,6 +102,9 @@ def validate_initialized_vof_state(
         raise ValueError("initialized VOF must satisfy mass ~= density * phi")
 
     validate_initial_topology(cell_type, periodic=periodic)
+    from .geometry import validate_authoritative_geometry
+
+    validate_authoritative_geometry(state.vof)
 
 
 def validate_vof_buffer_pair(
@@ -104,13 +115,24 @@ def validate_vof_buffer_pair(
 
     if state_in.vof is None or state_out.vof is None:
         raise ValueError("both state buffers must contain authoritative VOF storage")
-    for name in ("mass", "phi", "cell_type"):
+    for name in (
+        "mass",
+        "phi",
+        "cell_type",
+        "normal",
+        "plic_offset",
+        "curvature",
+    ):
         source = getattr(state_in.vof, name)
         target = getattr(state_out.vof, name)
         if source is target or int(source.ptr) == int(target.ptr):
             raise ValueError(f"VOF buffer {name} shares storage")
         if not np.array_equal(source.numpy(), target.numpy()):
             raise ValueError(f"VOF buffer {name} values differ")
+    if state_in.vof.epoch != state_out.vof.epoch:
+        raise ValueError("VOF buffer epochs differ")
+    if state_in.vof.geometry_epoch != state_out.vof.geometry_epoch:
+        raise ValueError("VOF buffer geometry epochs differ")
 
 
 def validate_p3_fixed_topology_state(

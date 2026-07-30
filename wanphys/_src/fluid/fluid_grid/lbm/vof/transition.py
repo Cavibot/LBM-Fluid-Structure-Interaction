@@ -314,7 +314,7 @@ class VofTopologyTransition:
             )
         return self.result
 
-    def commit(self, target: VofGridState) -> None:
+    def commit(self, target: VofGridState, *, source_epoch: int) -> None:
         """Copy the latest validated P4 result into a persistent VOF state."""
 
         if tuple(int(value) for value in target.shape) != self.shape:
@@ -324,6 +324,8 @@ class VofTopologyTransition:
         wp.copy(target.mass, self._mass_final)
         wp.copy(target.phi, self._phi_final)
         wp.copy(target.cell_type, self._final_type)
+        target.epoch = int(source_epoch) + 1
+        target.geometry_epoch = -1
 
 
 __all__ = [

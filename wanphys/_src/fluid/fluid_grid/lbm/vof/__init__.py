@@ -5,7 +5,13 @@
 
 from .advection import VofMassTransport, VofMassTransportResult
 from .contracts import VofCellType, VofMassScheme
-from .geometry import InterfaceGeometry
+from .geometry import (
+    InterfaceGeometry,
+    VofInterfaceGeometry,
+    plic_cube_volume,
+    plic_plane_offset,
+    validate_authoritative_geometry,
+)
 from .kinetic_init import (
     VofKineticInitializationResult,
     VofKineticInitializer,
@@ -23,6 +29,7 @@ __all__ = [
     "VofCellType",
     "VofGridState",
     "VofInterfaceVisualizer",
+    "VofInterfaceGeometry",
     "VofKineticInitializationResult",
     "VofKineticInitializer",
     "VofMassScheme",
@@ -31,4 +38,7 @@ __all__ = [
     "VofSurfaceBoundary",
     "VofTopologyTransition",
     "VofTransitionResult",
+    "plic_cube_volume",
+    "plic_plane_offset",
+    "validate_authoritative_geometry",
 ]

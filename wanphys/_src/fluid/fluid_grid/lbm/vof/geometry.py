@@ -1,13 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Reusable interface-normal estimation for VOF fill fractions."""
+"""Debug and authoritative interface geometry for VOF fill fractions."""
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import warp as wp
 
-from .state import DebugMockScToVofState
+from .geometry_kernels import (
+    authoritative_curvature_kernel,
+    authoritative_normal_plic_kernel,
+)
+from .state import DebugMockScToVofState, VofGridState
 
 
 @wp.func
@@ -156,4 +163,204 @@ class InterfaceGeometry:
         debug_mock.normal_valid_epoch = debug_mock.epoch
 
 
-__all__ = ["InterfaceGeometry", "parker_youngs_normal_kernel"]
+def _positive_power(value: float, power: int) -> float:
+    return max(float(value), 0.0) ** power
+
+
+def plic_cube_volume(
+    normal: tuple[float, float, float] | np.ndarray,
+    offset: float,
+) -> float:
+    """Return the liquid volume of ``n dot r <= offset`` in a centered cube."""
+
+    vector = np.abs(np.asarray(normal, dtype=np.float64))
+    vector[vector < 1.0e-4] = 0.0
+    l1 = float(np.sum(vector))
+    if not math.isfinite(l1) or l1 <= 1.0e-14:
+        return 0.0
+    weights = vector / l1
+    alpha = float(offset) / l1 + 0.5
+    if alpha <= 0.0:
+        return 0.0
+    if alpha >= 1.0:
+        return 1.0
+    active = weights[weights > 1.0e-4]
+    dimension = int(active.size)
+    if dimension == 1:
+        return alpha
+    if dimension == 2:
+        a, b = (float(value) for value in active)
+        result = (
+            alpha**2
+            - _positive_power(alpha - a, 2)
+            - _positive_power(alpha - b, 2)
+        ) / (2.0 * a * b)
+        return float(np.clip(result, 0.0, 1.0))
+    mx, my, mz = (float(value) for value in weights)
+    result = (
+        _positive_power(alpha, 3)
+        - _positive_power(alpha - mx, 3)
+        - _positive_power(alpha - my, 3)
+        - _positive_power(alpha - mz, 3)
+        + _positive_power(alpha - mx - my, 3)
+        + _positive_power(alpha - mx - mz, 3)
+        + _positive_power(alpha - my - mz, 3)
+        - _positive_power(alpha - 1.0, 3)
+    ) / (6.0 * mx * my * mz)
+    return float(np.clip(result, 0.0, 1.0))
+
+
+def plic_plane_offset(
+    fill: float,
+    normal: tuple[float, float, float] | np.ndarray,
+    *,
+    iterations: int = 60,
+) -> float:
+    """Host oracle for the centered unit-cube PLIC offset."""
+
+    target = float(fill)
+    vector = np.asarray(normal, dtype=np.float64)
+    if not math.isfinite(target) or not 0.0 <= target <= 1.0:
+        raise ValueError("PLIC fill must be finite and lie in [0, 1]")
+    if vector.shape != (3,) or not np.all(np.isfinite(vector)):
+        raise ValueError("PLIC normal must contain three finite components")
+    magnitude = float(np.linalg.norm(vector))
+    if magnitude <= 1.0e-14:
+        return 0.0
+    vector = vector / magnitude
+    l1 = float(np.sum(np.abs(vector)))
+    lower = -0.5 * l1
+    upper = 0.5 * l1
+    for _ in range(iterations):
+        middle = 0.5 * (lower + upper)
+        if plic_cube_volume(vector, middle) < target:
+            lower = middle
+        else:
+            upper = middle
+    return 0.5 * (lower + upper)
+
+
+def validate_authoritative_geometry(
+    state: VofGridState,
+    *,
+    volume_tolerance: float = 2.0e-5,
+) -> None:
+    """Validate geometry finiteness, epochs and PLIC volume closure."""
+
+    if state.epoch < 0 or state.geometry_epoch != state.epoch:
+        raise ValueError(
+            "authoritative VOF geometry is stale: "
+            f"geometry_epoch={state.geometry_epoch}, epoch={state.epoch}"
+        )
+    phi = np.asarray(state.phi.numpy()).copy()
+    cell_type = np.asarray(state.cell_type.numpy()).copy()
+    normal = np.asarray(state.normal.numpy()).copy()
+    offset = np.asarray(state.plic_offset.numpy()).copy()
+    curvature = np.asarray(state.curvature.numpy()).copy()
+    expected_shape = tuple(int(value) for value in state.shape)
+    if normal.shape != (*expected_shape, 3):
+        raise ValueError("authoritative normal shape does not match VOF grid")
+    for name, values in (
+        ("normal", normal),
+        ("plic_offset", offset),
+        ("curvature", curvature),
+    ):
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"authoritative {name} contains NaN or Inf")
+    interface = cell_type == 1
+    non_interface = ~interface
+    if np.any(normal[non_interface] != 0.0):
+        raise ValueError("authoritative normal must be zero outside INTERFACE")
+    if np.any(offset[non_interface] != 0.0):
+        raise ValueError("authoritative PLIC offset must be zero outside INTERFACE")
+    if np.any(curvature[non_interface] != 0.0):
+        raise ValueError("authoritative curvature must be zero outside INTERFACE")
+    lengths = np.linalg.norm(normal[interface], axis=-1)
+    if np.any((lengths > 1.0e-6) & (np.abs(lengths - 1.0) > 2.0e-5)):
+        raise ValueError("non-degenerate authoritative normals must be unit length")
+    for index in zip(*np.nonzero(interface), strict=True):
+        vector = normal[index]
+        if float(np.linalg.norm(vector)) <= 1.0e-6:
+            if offset[index] != 0.0 or curvature[index] != 0.0:
+                raise ValueError("degenerate interface geometry must be canonical zero")
+            continue
+        reconstructed = plic_cube_volume(vector, float(offset[index]))
+        target_fill = float(np.clip(phi[index], 0.0, 1.0))
+        if abs(reconstructed - target_fill) > volume_tolerance:
+            raise ValueError(
+                "authoritative PLIC volume does not close phi at "
+                f"{index}: {reconstructed} != clip({float(phi[index])})"
+            )
+    if np.any(np.abs(curvature[interface]) > 1.0 + 1.0e-6):
+        raise ValueError("authoritative curvature exceeds the frozen limiter")
+
+
+class VofInterfaceGeometry:
+    """Build epoch-consistent normal, PLIC and curvature from final VOF fill."""
+
+    def __init__(
+        self,
+        shape: tuple[int, int, int],
+        device: wp.Device,
+        periodic: tuple[int, int, int],
+    ) -> None:
+        self.shape = tuple(int(value) for value in shape)
+        self.device = device
+        self.periodic = tuple(int(value) for value in periodic)
+
+    def compute(self, state: VofGridState, *, validate: bool = True) -> None:
+        if tuple(int(value) for value in state.shape) != self.shape:
+            raise ValueError(
+                f"P6 geometry shape {state.shape} does not match {self.shape}"
+            )
+        if state.epoch < 0:
+            raise ValueError("P6 geometry requires an initialized VOF epoch")
+        nx, ny, nz = self.shape
+        px, py, pz = self.periodic
+        wp.launch(
+            authoritative_normal_plic_kernel,
+            dim=self.shape,
+            inputs=[
+                state.phi,
+                state.cell_type,
+                state.normal,
+                state.plic_offset,
+                px,
+                py,
+                pz,
+                nx,
+                ny,
+                nz,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            authoritative_curvature_kernel,
+            dim=self.shape,
+            inputs=[
+                state.phi,
+                state.cell_type,
+                state.curvature,
+                px,
+                py,
+                pz,
+                nx,
+                ny,
+                nz,
+            ],
+            device=self.device,
+        )
+        state.geometry_epoch = state.epoch
+        if validate:
+            wp.synchronize_device(self.device)
+            validate_authoritative_geometry(state)
+
+
+__all__ = [
+    "InterfaceGeometry",
+    "VofInterfaceGeometry",
+    "parker_youngs_normal_kernel",
+    "plic_cube_volume",
+    "plic_plane_offset",
+    "validate_authoritative_geometry",
+]

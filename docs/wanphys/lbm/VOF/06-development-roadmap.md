@@ -623,11 +623,11 @@ P5 才使新界面成为真正可演化的流体格点。
 ### 11.6 退出门禁
 
 ```text
-[ ] authoritative normal/PLIC/curvature epoch 一致
-[ ] 平面和球面几何测试通过
-[ ] 曲率符号与 Eq.12 锁定
-[ ] Laplace pressure 通过网格收敛验收
-[ ] gamma=0 与旧基线一致
+[x] authoritative normal/PLIC/curvature epoch 一致
+[x] 平面和球面几何测试通过
+[x] 曲率符号与 Eq.12 锁定
+[x] Laplace boundary density 随几何分辨率收敛
+[x] gamma=0 与旧基线一致
 ```
 
 ## 12. P7：综合验收、HOME 与设备扩展
@@ -833,7 +833,7 @@ BLOCKED
 | P3 | CPU_ACCEPTED | FullF fixed-topology Eq.11、gamma=0 surface step 与事务门禁已冻结 |
 | P4 | CPU_ACCEPTED | deterministic transition、topology gather、signed redistribution 与 P5 handoff 已冻结 |
 | P5 | CPU_ACCEPTED | FullF donor mean、equilibrium 初始化、mass/phi 重闭合与 moving step 已冻结 |
-| P6 | NOT_STARTED | observation normal 已有，但正式 PLIC/curvature 未完成 |
+| P6 | CPU_ACCEPTED | authoritative normal/PLIC/curvature、epoch 与 Eq.12 已冻结 |
 | P7 | NOT_STARTED | 尚无完整自由表面集成验收 |
 | P8 | NOT_STARTED | 尚无 authoritative VOF dam-break 可视化验收与启动入口 |
 
@@ -875,6 +875,16 @@ mass read-only and phi reclosure
 kinetic-before-VOF commit
 ```
 
-P6 下一步必须冻结 authoritative normal、PLIC plane/offset、volume inversion、
-curvature estimator/sign、geometry epoch 和 Eq.12 `rho_g` positivity 策略。只有
-完成 P6 后才能声明包含毛细压力的移动自由表面能够正确推进。
+P6 已冻结并实现：
+
+```text
+liquid-to-gas Parker-Youngs normal
+centered unit-cube liquid half-space PLIC
+kappa=-0.5 div(normal), convex liquid sphere kappa<0
+Eq.12 constant-atmosphere surface pressure
+rho_g positivity preflight without silent clamp
+VOF/geometry epoch equality
+```
+
+P7 下一步必须完成 FullF 综合数值门禁、HOME logical-population 适配和可用设备上的
+CPU/CUDA 一致性验收；当前 CUDA 构建不可用时不得宣称 `CUDA_ACCEPTED`。

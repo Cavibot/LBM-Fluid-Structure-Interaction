@@ -1,9 +1,9 @@
 # LBM VOF 当前能力与开发入口
 
 当前仓库已经冻结 authoritative VOF 的 P1 状态/初始化、P2 FullF 质量 transport、
-P3 零表面张力自由面边界、P4 类型转换/守恒重分配和 P5 新界面 kinetic 初始化。
-FullF 现在可以提交 gamma=0 moving-interface step；Shan-Chen 调试观察路径继续与
-正式 VOF 完全隔离。
+P3 自由面边界、P4 类型转换/守恒重分配、P5 新界面 kinetic 初始化和 P6
+normal/PLIC/curvature/Eq.12 表面张力。FullF 现在可以提交带常数 gamma 的
+moving-interface step；Shan-Chen 调试观察路径继续与正式 VOF 完全隔离。
 
 ## 当前 API
 
@@ -32,9 +32,9 @@ debug_vof_observation = false / true
 gravity = independent
 ```
 
-`force_model` 仅是内部派生结果，调用者不能配置。`interface_model="vof"` 的 P3
-首版要求 FullF、`vof_surface_tension=0` 以及 periodic/static bounce-back domain
-boundary；HOME 和开口 VOF domain boundary 会 fail-fast。
+`force_model` 仅是内部派生结果，调用者不能配置。`interface_model="vof"` 的 P6
+路径要求 FullF、非负常数 `vof_surface_tension` 以及 periodic/static bounce-back
+domain boundary；HOME 和开口 VOF domain boundary 会 fail-fast。
 
 ## 状态隔离
 
@@ -44,6 +44,11 @@ boundary；HOME 和开口 VOF domain boundary 会 fail-fast。
 state.vof.mass
 state.vof.phi
 state.vof.cell_type
+state.vof.normal
+state.vof.plic_offset
+state.vof.curvature
+state.vof.epoch
+state.vof.geometry_epoch
 ```
 
 P2 的 `mass_tmp/phi_tmp/mass_delta` 由 solver-owned `VofMassTransport` 持有，不进入
@@ -86,8 +91,8 @@ dam-break 示例的相关参数为：
 - P3 FullF fixed-topology gamma=0 surface step：`CPU_ACCEPTED`；
 - P4 deterministic topology/redistribution：`CPU_ACCEPTED`；
 - P5 FullF new-interface kinetic initialization：`CPU_ACCEPTED`；
+- P6 authoritative geometry 与 Eq.12 surface tension：`CPU_ACCEPTED`；
 - HOME mass transport：P7；
-- PLIC、curvature 与表面张力；
 - bubble pressure、moving-solid VOF coupling 和 foam。
 
 ## 文档导航
@@ -115,3 +120,6 @@ dam-break 示例的相关参数为：
 - [18-p5-engineering-plan.md](18-p5-engineering-plan.md)：P5 决策、实现和验收计划；
 - [19-p5-completion-summary.md](19-p5-completion-summary.md)：P5 完成与 CPU 验收总结；
 - [20-p5-change-architecture.md](20-p5-change-architecture.md)：P5 改动文件与关键架构新旧对比。
+- [21-p6-engineering-plan.md](21-p6-engineering-plan.md)：P6 几何、符号、epoch 与验收计划；
+- [22-p6-completion-summary.md](22-p6-completion-summary.md)：P6 完成与 CPU 验收总结；
+- [23-p6-change-architecture.md](23-p6-change-architecture.md)：P6 改动文件与关键架构新旧对比。

@@ -24,6 +24,7 @@ from .vof import (
     InterfaceVisualData,
     VofCellType,
     VofGridState,
+    VofInterfaceGeometry,
     VofInterfaceVisualizer,
     VofKineticInitializationResult,
     VofKineticInitializer,
@@ -33,6 +34,9 @@ from .vof import (
     VofSurfaceBoundary,
     VofTopologyTransition,
     VofTransitionResult,
+    plic_cube_volume,
+    plic_plane_offset,
+    validate_authoritative_geometry,
 )
 
 __all__ = [
@@ -58,6 +62,7 @@ __all__ = [
     "VofCellType",
     "VofGridState",
     "VofInterfaceVisualizer",
+    "VofInterfaceGeometry",
     "VofKineticInitializationResult",
     "VofKineticInitializer",
     "VofMassScheme",
@@ -66,4 +71,7 @@ __all__ = [
     "VofSurfaceBoundary",
     "VofTopologyTransition",
     "VofTransitionResult",
+    "plic_cube_volume",
+    "plic_plane_offset",
+    "validate_authoritative_geometry",
 ]

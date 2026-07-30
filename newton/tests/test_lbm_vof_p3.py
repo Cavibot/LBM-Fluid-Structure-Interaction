@@ -63,7 +63,7 @@ def _layered_phi(shape: tuple[int, int, int]) -> np.ndarray:
 
 
 class TestVofP3Configuration(unittest.TestCase):
-    def test_pressure_contract_and_zero_surface_tension_gate(self) -> None:
+    def test_pressure_contract_and_surface_tension_validation(self) -> None:
         model = _model((3, 2, 2))
         domain = LbmDomain(model)
         self.assertAlmostEqual(
@@ -75,8 +75,14 @@ class TestVofP3Configuration(unittest.TestCase):
             with self.subTest(pressure=pressure):
                 with self.assertRaises(ValueError):
                     _model((3, 2, 2), pressure=pressure)
-        with self.assertRaisesRegex(NotImplementedError, "deferred to P6"):
-            _model((3, 2, 2), surface_tension=1.0e-3)
+        self.assertAlmostEqual(
+            _model((3, 2, 2), surface_tension=1.0e-3).vof_surface_tension,
+            1.0e-3,
+        )
+        for surface_tension in (-1.0, np.nan, np.inf):
+            with self.subTest(surface_tension=surface_tension):
+                with self.assertRaises(ValueError):
+                    _model((3, 2, 2), surface_tension=surface_tension)
 
     def test_open_vof_boundary_is_deferred(self) -> None:
         with self.assertRaisesRegex(NotImplementedError, "static bounce-back"):

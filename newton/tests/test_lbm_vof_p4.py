@@ -493,6 +493,7 @@ class TestVofP4OracleAndIntegration(unittest.TestCase):
         phi[center] = 1.2
         state_in.vof.mass.assign(mass)
         state_in.vof.phi.assign(phi)
+        domain.solver._vof_interface_geometry.compute(state_in.vof)
         initial_total = float(np.sum(mass, dtype=np.float64))
 
         domain.step(1.0)
@@ -522,6 +523,7 @@ class TestVofP4OracleAndIntegration(unittest.TestCase):
         phi[center] = 1.2
         state_in.vof.mass.assign(mass)
         state_in.vof.phi.assign(phi)
+        domain.solver._vof_interface_geometry.compute(state_in.vof)
         total_before = float(np.sum(mass, dtype=np.float64))
 
         domain.step(1.0)

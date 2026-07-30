@@ -462,6 +462,7 @@ class TestVofP5Integration(unittest.TestCase):
         phi[center] = 1.2
         state.vof.mass.assign(mass)
         state.vof.phi.assign(phi)
+        domain.solver._vof_interface_geometry.compute(state.vof)
         return domain, state, center, float(np.sum(mass, dtype=np.float64))
 
     def test_positive_front_commits_and_new_interface_runs_next_step(
@@ -535,6 +536,7 @@ class TestVofP5Integration(unittest.TestCase):
         delta = float(mass[target] - state.vof.mass.numpy()[target])
         state.vof.mass.assign(mass)
         state.vof.phi.assign(phi)
+        domain.solver._vof_interface_geometry.compute(state.vof)
 
         domain.step(1.0)
 

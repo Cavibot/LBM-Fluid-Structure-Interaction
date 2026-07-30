@@ -11,13 +11,11 @@ from .contracts import VofCellType
 
 
 class VofGridState:
-    """Authoritative conservative VOF state: mass, phi, and cell type.
+    """Authoritative conservative VOF state plus P6 derived geometry.
 
-    P1 introduces only the three persistent authoritative fields.  No
-    derived geometry cache (normal, PLIC, curvature), epoch, active mask,
-    density/moment copy or transition scratch is stored here.  The canonical
-    empty state after construction and :meth:`clear` is all-GAS with zero
-    mass and zero phi.
+    ``mass``, ``phi`` and ``cell_type`` remain the only conservative fields.
+    P6 adds an epoch-scoped geometry cache: liquid-to-gas ``normal``, centered
+    unit-cube ``plic_offset`` and mean ``curvature``.
     """
 
     def __init__(
@@ -35,15 +33,25 @@ class VofGridState:
             dtype=wp.uint8,
             device=device,
         )
+        self.normal = wp.zeros(shape, dtype=wp.vec3, device=device)
+        self.plic_offset = wp.zeros(shape, dtype=float, device=device)
+        self.curvature = wp.zeros(shape, dtype=float, device=device)
+        self.epoch = -1
+        self.geometry_epoch = -1
 
     def clear(self) -> None:
         """Reset to the canonical all-GAS empty state."""
         self.mass.zero_()
         self.phi.zero_()
         self.cell_type.fill_(int(VofCellType.GAS))
+        self.normal.zero_()
+        self.plic_offset.zero_()
+        self.curvature.zero_()
+        self.epoch = -1
+        self.geometry_epoch = -1
 
     def copy_to(self, target: VofGridState) -> None:
-        """Copy the three authoritative arrays into *target*."""
+        """Copy conservative fields, derived geometry and epochs into target."""
         if target.shape != self.shape:
             raise ValueError(
                 "VofGridState shape mismatch: "
@@ -52,6 +60,11 @@ class VofGridState:
         wp.copy(target.mass, self.mass)
         wp.copy(target.phi, self.phi)
         wp.copy(target.cell_type, self.cell_type)
+        wp.copy(target.normal, self.normal)
+        wp.copy(target.plic_offset, self.plic_offset)
+        wp.copy(target.curvature, self.curvature)
+        target.epoch = self.epoch
+        target.geometry_epoch = self.geometry_epoch
 
     def clone(self) -> VofGridState:
         """Return an independent deep copy of this state."""

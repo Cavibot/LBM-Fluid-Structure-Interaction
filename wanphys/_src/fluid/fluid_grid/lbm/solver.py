@@ -20,6 +20,7 @@ from .model import LbmModel
 from .state import FullFLbmState, HomeLbmState, LbmStateBase
 from .vof.advection import VofMassTransport, VofMassTransportResult
 from .vof.debug import DebugMockScToVofObserver
+from .vof.geometry import VofInterfaceGeometry
 from .vof.initialization import (
     initialize_vof_fields,
     prepare_initial_vof,
@@ -140,6 +141,14 @@ class LbmSolver(FluidGridSolverBase):
                 self.device,
                 model._periodic_ints,
                 float(model.vof_atmosphere_pressure),
+                float(model.vof_surface_tension),
+            )
+        self._vof_interface_geometry = None
+        if model.interface_model == "vof":
+            self._vof_interface_geometry = VofInterfaceGeometry(
+                (self.nx, self.ny, self.nz),
+                self.device,
+                model._periodic_ints,
             )
         self._vof_topology_transition = None
         if model.interface_model == "vof":
@@ -680,6 +689,7 @@ class LbmSolver(FluidGridSolverBase):
             assert self._vof_mass_transport is not None
             assert self._vof_topology_transition is not None
             assert self._vof_kinetic_initializer is not None
+            assert self._vof_interface_geometry is not None
             self._vof_surface_boundary.restore_gas(state_in, state_out)
             if state_in.vof is None or state_out.vof is None:
                 raise RuntimeError("P4 VOF step requires authoritative storage")
@@ -703,7 +713,11 @@ class LbmSolver(FluidGridSolverBase):
                 ),
                 population_floor=float(self.model.population_floor),
             )
-            self._vof_topology_transition.commit(state_out.vof)
+            self._vof_topology_transition.commit(
+                state_out.vof,
+                source_epoch=state_in.vof.epoch,
+            )
+            self._vof_interface_geometry.compute(state_out.vof)
             self._write_mac_velocities(state_out)
         self.update_debug_mock_sc_to_vof(state_out)
 
@@ -1142,3 +1156,7 @@ class LbmSolver(FluidGridSolverBase):
             prepared_phi,
             cell_type,
         )
+        state.vof.epoch = 0
+        if self._vof_interface_geometry is None:
+            raise RuntimeError("P6 VOF geometry operator is not configured")
+        self._vof_interface_geometry.compute(state.vof)

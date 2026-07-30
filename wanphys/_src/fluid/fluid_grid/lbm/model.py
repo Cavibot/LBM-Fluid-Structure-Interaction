@@ -426,14 +426,6 @@ class LbmModel(FluidGridModelBase):
             raise ValueError("vof_transition_epsilon must be finite")
         if not 0.0 <= float(self.vof_transition_epsilon) < 0.5:
             raise ValueError("vof_transition_epsilon must lie in [0, 0.5)")
-        if (
-            resolved_interface is InterfaceModel.VOF
-            and float(self.vof_surface_tension) != 0.0
-        ):
-            raise NotImplementedError(
-                "P3 authoritative VOF requires vof_surface_tension=0; "
-                "nonzero surface tension is deferred to P6"
-            )
         if resolved_interface is InterfaceModel.VOF:
             unsupported_vof_boundaries = tuple(
                 name

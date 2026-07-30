@@ -96,7 +96,7 @@ class TestVofP1ConfigurationAndState(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "requires_grad"):
             domain.solver.create_state(requires_grad=True)
 
-    def test_clear_clone_and_copy_use_independent_three_array_storage(self) -> None:
+    def test_clear_clone_and_copy_use_independent_vof_storage(self) -> None:
         state = LbmDomain(_vof_model()).create_state()
         assert state.vof is not None
         state.vof.mass.assign(np.full(state.res, 0.25, dtype=np.float32))
@@ -105,7 +105,14 @@ class TestVofP1ConfigurationAndState(unittest.TestCase):
 
         clone = state.clone()
         assert clone.vof is not None
-        for name in ("mass", "phi", "cell_type"):
+        for name in (
+            "mass",
+            "phi",
+            "cell_type",
+            "normal",
+            "plic_offset",
+            "curvature",
+        ):
             source = getattr(state.vof, name)
             target = getattr(clone.vof, name)
             self.assertIsNot(source, target)
