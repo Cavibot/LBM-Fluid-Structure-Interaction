@@ -172,113 +172,131 @@ def parker_youngs_normal_at(
 
 
 @wp.func
-def _positive_cube(value: float) -> float:
-    result = float(0.0)
-    if value > 0.0:
-        result = value * value * value
-    return result
+def _plic_cube_offset_reduced(
+    volume: wp.float64,
+    n1: wp.float64,
+    n2: wp.float64,
+    n3: wp.float64,
+) -> wp.float64:
+    """Analytical symmetry-reduced PLIC inverse in cancellation-safe precision."""
 
-
-@wp.func
-def plic_cube_volume_from_alpha(
-    alpha: float,
-    m_x: float,
-    m_y: float,
-    m_z: float,
-) -> float:
-    """Volume below ``m dot x <= alpha`` for x in [0,1]^3 and sum(m)=1."""
-
-    eps = float(1.0e-4)
-    active = int(0)
-    if m_x > eps:
-        active += 1
-    if m_y > eps:
-        active += 1
-    if m_z > eps:
-        active += 1
-
-    volume = float(0.0)
-    if alpha <= 0.0:
-        volume = 0.0
-    elif alpha >= 1.0:
-        volume = 1.0
-    elif active == 1:
-        volume = alpha
-    elif active == 2:
-        a = float(0.0)
-        b = float(0.0)
-        if m_x > eps:
-            if a == 0.0:
-                a = m_x
-            else:
-                b = m_x
-        if m_y > eps:
-            if a == 0.0:
-                a = m_y
-            else:
-                b = m_y
-        if m_z > eps:
-            if a == 0.0:
-                a = m_z
-            else:
-                b = m_z
-        if a > b:
-            temporary = a
-            a = b
-            b = temporary
-        if alpha < a:
-            volume = alpha * alpha / (2.0 * a * b)
-        elif alpha <= b:
-            volume = (alpha - 0.5 * a) / b
+    zero = wp.float64(0.0)
+    half = wp.float64(0.5)
+    one = wp.float64(1.0)
+    two = wp.float64(2.0)
+    three = wp.float64(3.0)
+    six = wp.float64(6.0)
+    eight = wp.float64(8.0)
+    result = zero
+    n12 = n1 + n2
+    n3_volume = n3 * volume
+    if n12 <= two * n3_volume:
+        result = n3_volume + half * n12
+    else:
+        square_n1 = n1 * n1
+        six_n2 = six * n2
+        v1 = square_n1 / six_n2
+        if (
+            v1 <= n3_volume
+            and n3_volume < v1 + half * (n2 - n1)
+        ):
+            result = half * (
+                n1
+                + wp.sqrt(
+                    square_n1
+                    + eight * n2 * (n3_volume - v1)
+                )
+            )
         else:
-            complement = 1.0 - alpha
-            volume = 1.0 - complement * complement / (2.0 * a * b)
-    elif active == 3:
-        numerator = (
-            _positive_cube(alpha)
-            - _positive_cube(alpha - m_x)
-            - _positive_cube(alpha - m_y)
-            - _positive_cube(alpha - m_z)
-            + _positive_cube(alpha - m_x - m_y)
-            + _positive_cube(alpha - m_x - m_z)
-            + _positive_cube(alpha - m_y - m_z)
-            - _positive_cube(alpha - 1.0)
-        )
-        volume = numerator / (6.0 * m_x * m_y * m_z)
-    return wp.clamp(volume, 0.0, 1.0)
+            volume6 = n1 * six_n2 * n3_volume
+            if n3_volume < v1:
+                result = wp.pow(volume6, one / three)
+            else:
+                v3 = half * n12
+                if n3 < n12:
+                    v3 = (
+                        n3 * n3 * (three * n12 - n3)
+                        + square_n1 * (n1 - three * n3)
+                        + n2 * n2 * (n2 - three * n3)
+                    ) / (n1 * six_n2)
+                square_n12 = square_n1 + n2 * n2
+                volume6_minus_cubes = (
+                    volume6
+                    - n1 * n1 * n1
+                    - n2 * n2 * n2
+                )
+                case_three = n3_volume < v3
+                a = volume6_minus_cubes
+                b = square_n12
+                c = n12
+                if not case_three:
+                    a = half * (
+                        volume6_minus_cubes - n3 * n3 * n3
+                    )
+                    b = half * (square_n12 + n3 * n3)
+                    c = half
+                t = wp.sqrt(wp.max(c * c - b, zero))
+                argument = (
+                    c * c * c - half * a - (one + half) * b * c
+                ) / (t * t * t)
+                result = c - two * t * wp.sin(
+                    wp.asin(
+                        wp.clamp(
+                            argument,
+                            -one,
+                            one,
+                        )
+                    )
+                    / three
+                )
+    return result
 
 
 @wp.func
 def plic_cube_offset(fill: float, normal: wp.vec3) -> float:
     """Invert unit-cube volume for the centered liquid plane ``n dot r <= d``."""
 
+    epsilon = float(1.0e-4)
     ax = wp.abs(normal[0])
     ay = wp.abs(normal[1])
     az = wp.abs(normal[2])
-    if ax < 1.0e-4:
+    if ax < epsilon:
         ax = 0.0
-    if ay < 1.0e-4:
+    if ay < epsilon:
         ay = 0.0
-    if az < 1.0e-4:
+    if az < epsilon:
         az = 0.0
     l1 = ax + ay + az
+    if l1 > 1.0e-12:
+        if ax / l1 <= epsilon:
+            ax = 0.0
+        if ay / l1 <= epsilon:
+            ay = 0.0
+        if az / l1 <= epsilon:
+            az = 0.0
+        l1 = ax + ay + az
+
     result = float(0.0)
     if l1 > 1.0e-12:
         m_x = ax / l1
         m_y = ay / l1
         m_z = az / l1
-        lower = float(0.0)
-        upper = float(1.0)
+        n1 = wp.min(wp.min(m_x, m_y), m_z)
+        n3 = wp.max(wp.max(m_x, m_y), m_z)
+        n2 = wp.max(1.0 - n1 - n3, 0.0)
         target = wp.clamp(fill, 0.0, 1.0)
-        for _iteration in range(30):
-            middle = 0.5 * (lower + upper)
-            volume = plic_cube_volume_from_alpha(middle, m_x, m_y, m_z)
-            if volume < target:
-                lower = middle
-            else:
-                upper = middle
-        alpha = 0.5 * (lower + upper)
-        result = (alpha - 0.5) * l1
+        reduced_volume = 0.5 - wp.abs(target - 0.5)
+        reduced_offset = _plic_cube_offset_reduced(
+            wp.float64(reduced_volume),
+            wp.float64(n1),
+            wp.float64(n2),
+            wp.float64(n3),
+        )
+        result = l1 * wp.float32(wp.float64(0.5) - reduced_offset)
+        if target < 0.5:
+            result = -result
+        elif target == 0.5:
+            result = 0.0
     return result
 
 
@@ -375,5 +393,4 @@ __all__ = [
     "authoritative_normal_plic_kernel",
     "parker_youngs_normal_at",
     "plic_cube_offset",
-    "plic_cube_volume_from_alpha",
 ]

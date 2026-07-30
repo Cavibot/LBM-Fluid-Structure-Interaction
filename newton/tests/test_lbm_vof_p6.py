@@ -17,6 +17,7 @@ from wanphys._src.fluid.fluid_grid.lbm import (
     VofGridState,
     VofInterfaceGeometry,
     plic_cube_volume,
+    plic_plane_offset,
 )
 from wanphys._src.fluid.fluid_grid.lbm.constants import CX, CY, CZ, OPPOSITE, W
 from wanphys._src.fluid.fluid_grid.lbm.vof.geometry import (
@@ -195,6 +196,44 @@ class TestVofP6NormalPlicCurvature(unittest.TestCase):
         )
         np.testing.assert_allclose(reconstructed, fill, atol=2.0e-5, rtol=0.0)
         self.assertAlmostEqual(float(offsets[2]), 0.0, places=7)
+
+    def test_near_axis_plic_inverse_avoids_float32_cancellation(self) -> None:
+        normal = np.array(
+            [
+                [1.12466514e-4, 1.12436712e-4, 1.0],
+                [1.35063205e-4, -5.32898689e-1, -8.46179041e-1],
+            ],
+            dtype=np.float32,
+        )
+        normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+        fill = np.array([0.4994719923, 0.4773713218], dtype=np.float32)
+        fill_device = wp.array(fill, dtype=float, device="cpu")
+        normal_device = wp.array(normal, dtype=wp.vec3, device="cpu")
+        offset_device = wp.zeros(len(fill), dtype=float, device="cpu")
+
+        wp.launch(
+            _plic_offset_test_kernel,
+            dim=len(fill),
+            inputs=[fill_device, normal_device, offset_device],
+            device="cpu",
+        )
+
+        offsets = offset_device.numpy()
+        host_offsets = np.array(
+            [
+                plic_plane_offset(float(value), vector)
+                for value, vector in zip(fill, normal, strict=True)
+            ]
+        )
+        reconstructed = np.array(
+            [
+                plic_cube_volume(vector, float(offset))
+                for vector, offset in zip(normal, offsets, strict=True)
+            ]
+        )
+        np.testing.assert_allclose(reconstructed, fill, atol=2.0e-5, rtol=0.0)
+        np.testing.assert_allclose(offsets, host_offsets, atol=2.0e-7, rtol=0.0)
+        self.assertLess(abs(float(offsets[0])), 1.0e-3)
 
     def test_convex_sphere_curvature_is_negative_and_lattice_convergent(
         self,

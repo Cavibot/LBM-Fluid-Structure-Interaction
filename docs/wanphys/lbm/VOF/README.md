@@ -2,9 +2,10 @@
 
 当前仓库已经冻结 authoritative VOF 的 P1 状态/初始化、P2 FullF 质量 transport、
 P3 自由面边界、P4 类型转换/守恒重分配、P5 新界面 kinetic 初始化和 P6
-normal/PLIC/curvature/Eq.12 表面张力，以及 P7 FullF/HOME 综合验收。两种 persistent
-encoding 现在都可以提交 closed-domain、常数 gamma 的 moving-interface step；
-Shan-Chen 调试观察路径继续与正式 VOF 完全隔离。
+normal/PLIC/curvature/Eq.12 表面张力、P7 FullF/HOME 综合验收，以及 P8
+authoritative dam-break 可视化与 headless/CSV 入口。两种 persistent encoding
+现在都可以提交 closed-domain、常数 gamma 的 moving-interface step；Shan-Chen
+调试观察路径继续与正式 VOF 完全隔离。
 
 ## 当前 API
 
@@ -33,7 +34,7 @@ debug_vof_observation = false / true
 gravity = independent
 ```
 
-`force_model` 仅是内部派生结果，调用者不能配置。`interface_model="vof"` 的 P6
+`force_model` 仅是内部派生结果，调用者不能配置。`interface_model="vof"` 的 P8
 路径支持 FullF/HOME、非负常数 `vof_surface_tension` 以及 periodic/static
 bounce-back domain boundary；开口 VOF domain boundary 仍会 fail-fast。
 
@@ -76,7 +77,50 @@ force 有完全一致性测试。
 点云、转换坐标、生成颜色和 normal line。它不能计算或修改
 `phi/cell_type/normal/curvature`。
 
-dam-break 示例的相关参数为：
+P8 增加另一条明确标记为 `source="authoritative_vof"` 的只读适配路径：
+
+```text
+state.vof.phi -> ScreenSpaceFluidRenderer
+state.vof.cell_type/normal -> VofInterfaceVisualizer
+```
+
+渲染不会回写 VOF 状态，并要求 `geometry_epoch == epoch`。
+
+### 启动 authoritative VOF dam-break
+
+CPU 交互可视化：
+
+```bash
+uv run --frozen python -m wanphys.examples.lbm.fluid_grid_lbm_vof_dambreak
+```
+
+CPU 无窗口定量运行与 CSV：
+
+```bash
+uv run --frozen python -m wanphys.examples.lbm.fluid_grid_lbm_vof_dambreak \
+  --viewer null --num-frames 30 --print-every 10 \
+  --csv vof-dambreak.csv
+```
+
+HOME：
+
+```bash
+uv run --frozen python -m wanphys.examples.lbm.fluid_grid_lbm_vof_dambreak \
+  --encoding home
+```
+
+只有 `wp.is_cuda_available()` 为真时才可显式请求 CUDA：
+
+```bash
+uv run --frozen python -m wanphys.examples.lbm.fluid_grid_lbm_vof_dambreak \
+  --device cuda:0
+```
+
+当前冻结环境的 Warp 1.12.0 没有启用 CUDA；此命令会在分配前明确失败，不能据此声明
+CUDA 已验收。可用参数通过 `--help` 查看，包括 grid、gravity、surface tension、
+FullF/HOME、normal overlay、viewer 与有界帧数。
+
+旧 Shan-Chen dam-break observation 示例仍使用：
 
 ```text
 -i sc | --interface shan_chen
@@ -94,6 +138,7 @@ dam-break 示例的相关参数为：
 - P5 FullF new-interface kinetic initialization：`CPU_ACCEPTED`；
 - P6 authoritative geometry 与 Eq.12 surface tension：`CPU_ACCEPTED`；
 - P7 FullF/HOME 综合 closed-domain 验收：`CPU_ACCEPTED`；
+- P8 authoritative dam-break visual/headless/CSV：`CPU_ACCEPTED`；
 - CUDA：条件测试已建立，当前 Warp 构建不可用，`CUDA_NOT_ACCEPTED`；
 - bubble pressure、moving-solid VOF coupling 和 foam。
 
@@ -128,3 +173,6 @@ dam-break 示例的相关参数为：
 - [24-p7-engineering-plan.md](24-p7-engineering-plan.md)：P7 HOME、综合场景和设备计划；
 - [25-p7-completion-summary.md](25-p7-completion-summary.md)：P7 完成与 CPU 验收总结；
 - [26-p7-change-architecture.md](26-p7-change-architecture.md)：P7 改动文件与关键架构新旧对比。
+- [27-p8-engineering-plan.md](27-p8-engineering-plan.md)：P8 authoritative 可视化、headless、CSV 与 CLI 计划；
+- [28-p8-completion-summary.md](28-p8-completion-summary.md)：P8 完成与 CPU 验收总结；
+- [29-p8-change-architecture.md](29-p8-change-architecture.md)：P8 改动文件与关键架构新旧对比。

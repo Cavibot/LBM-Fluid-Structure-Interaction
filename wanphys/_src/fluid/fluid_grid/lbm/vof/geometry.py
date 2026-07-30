@@ -163,8 +163,96 @@ class InterfaceGeometry:
         debug_mock.normal_valid_epoch = debug_mock.epoch
 
 
-def _positive_power(value: float, power: int) -> float:
-    return max(float(value), 0.0) ** power
+_PLIC_COMPONENT_EPSILON = 1.0e-4
+
+
+def _prepare_plic_weights(
+    normal: tuple[float, float, float] | np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Return thresholded, L1-normalized PLIC weights and their scale."""
+
+    vector = np.abs(np.asarray(normal, dtype=np.float64))
+    vector[vector < _PLIC_COMPONENT_EPSILON] = 0.0
+    scale = float(np.sum(vector))
+    if not math.isfinite(scale) or scale <= 1.0e-14:
+        return np.zeros(3, dtype=np.float64), 0.0
+    vector[(vector / scale) <= _PLIC_COMPONENT_EPSILON] = 0.0
+    scale = float(np.sum(vector))
+    if scale <= 1.0e-14:
+        return np.zeros(3, dtype=np.float64), 0.0
+    return vector / scale, scale
+
+
+def _scaled_positive_cube_difference(value: float, interval: float) -> float:
+    """Evaluate ``((t+)^3 - ((t-h)+)^3) / h`` without cancellation."""
+
+    if value <= 0.0:
+        return 0.0
+    if value < interval:
+        return value**3 / interval
+    return (
+        3.0 * value * value
+        - 3.0 * value * interval
+        + interval * interval
+    )
+
+
+def _plic_cube_offset_reduced(
+    volume: float,
+    n1: float,
+    n2: float,
+    n3: float,
+) -> float:
+    """Invert the symmetry-reduced unit-cube plane volume analytically."""
+
+    n12 = n1 + n2
+    n3_volume = n3 * volume
+    if n12 <= 2.0 * n3_volume:
+        return n3_volume + 0.5 * n12
+
+    square_n1 = n1 * n1
+    six_n2 = 6.0 * n2
+    v1 = square_n1 / six_n2
+    if v1 <= n3_volume < v1 + 0.5 * (n2 - n1):
+        return 0.5 * (
+            n1
+            + math.sqrt(
+                square_n1 + 8.0 * n2 * (n3_volume - v1)
+            )
+        )
+
+    volume6 = n1 * six_n2 * n3_volume
+    if n3_volume < v1:
+        return math.cbrt(volume6)
+
+    v3 = 0.5 * n12
+    if n3 < n12:
+        v3 = (
+            n3 * n3 * (3.0 * n12 - n3)
+            + square_n1 * (n1 - 3.0 * n3)
+            + n2 * n2 * (n2 - 3.0 * n3)
+        ) / (n1 * six_n2)
+    square_n12 = square_n1 + n2 * n2
+    volume6_minus_cubes = volume6 - n1**3 - n2**3
+    case_three = n3_volume < v3
+    a = (
+        volume6_minus_cubes
+        if case_three
+        else 0.5 * (volume6_minus_cubes - n3**3)
+    )
+    b = (
+        square_n12
+        if case_three
+        else 0.5 * (square_n12 + n3 * n3)
+    )
+    c = n12 if case_three else 0.5
+    t = math.sqrt(max(c * c - b, 0.0))
+    argument = (
+        c**3 - 0.5 * a - 1.5 * b * c
+    ) / (t**3)
+    return c - 2.0 * t * math.sin(
+        math.asin(float(np.clip(argument, -1.0, 1.0))) / 3.0
+    )
 
 
 def plic_cube_volume(
@@ -173,18 +261,15 @@ def plic_cube_volume(
 ) -> float:
     """Return the liquid volume of ``n dot r <= offset`` in a centered cube."""
 
-    vector = np.abs(np.asarray(normal, dtype=np.float64))
-    vector[vector < 1.0e-4] = 0.0
-    l1 = float(np.sum(vector))
-    if not math.isfinite(l1) or l1 <= 1.0e-14:
+    weights, l1 = _prepare_plic_weights(normal)
+    if l1 <= 1.0e-14:
         return 0.0
-    weights = vector / l1
     alpha = float(offset) / l1 + 0.5
     if alpha <= 0.0:
         return 0.0
     if alpha >= 1.0:
         return 1.0
-    active = weights[weights > 1.0e-4]
+    active = weights[weights > 0.0]
     dimension = int(active.size)
     if dimension == 1:
         return alpha
@@ -198,17 +283,13 @@ def plic_cube_volume(
         else:
             result = 1.0 - (1.0 - alpha) ** 2 / (2.0 * a * b)
         return float(np.clip(result, 0.0, 1.0))
-    mx, my, mz = (float(value) for value in weights)
+    m1, m2, m3 = sorted(float(value) for value in active)
     result = (
-        _positive_power(alpha, 3)
-        - _positive_power(alpha - mx, 3)
-        - _positive_power(alpha - my, 3)
-        - _positive_power(alpha - mz, 3)
-        + _positive_power(alpha - mx - my, 3)
-        + _positive_power(alpha - mx - mz, 3)
-        + _positive_power(alpha - my - mz, 3)
-        - _positive_power(alpha - 1.0, 3)
-    ) / (6.0 * mx * my * mz)
+        _scaled_positive_cube_difference(alpha, m1)
+        - _scaled_positive_cube_difference(alpha - m2, m1)
+        - _scaled_positive_cube_difference(alpha - m3, m1)
+        + _scaled_positive_cube_difference(alpha - m2 - m3, m1)
+    ) / (6.0 * m2 * m3)
     return float(np.clip(result, 0.0, 1.0))
 
 
@@ -218,7 +299,11 @@ def plic_plane_offset(
     *,
     iterations: int = 60,
 ) -> float:
-    """Host oracle for the centered unit-cube PLIC offset."""
+    """Host oracle for the centered unit-cube PLIC offset.
+
+    ``iterations`` remains for source compatibility; the current
+    Scardovelli–Zaleski/Kawano reduced inverse is analytical.
+    """
 
     target = float(fill)
     vector = np.asarray(normal, dtype=np.float64)
@@ -226,20 +311,25 @@ def plic_plane_offset(
         raise ValueError("PLIC fill must be finite and lie in [0, 1]")
     if vector.shape != (3,) or not np.all(np.isfinite(vector)):
         raise ValueError("PLIC normal must contain three finite components")
-    magnitude = float(np.linalg.norm(vector))
-    if magnitude <= 1.0e-14:
+    if iterations <= 0:
+        raise ValueError("PLIC iterations must be positive")
+    weights, l1 = _prepare_plic_weights(vector)
+    if l1 <= 1.0e-14:
         return 0.0
-    vector = vector / magnitude
-    l1 = float(np.sum(np.abs(vector)))
-    lower = -0.5 * l1
-    upper = 0.5 * l1
-    for _ in range(iterations):
-        middle = 0.5 * (lower + upper)
-        if plic_cube_volume(vector, middle) < target:
-            lower = middle
-        else:
-            upper = middle
-    return 0.5 * (lower + upper)
+    n1, n2, n3 = sorted(float(value) for value in weights)
+    reduced_volume = 0.5 - abs(target - 0.5)
+    reduced_offset = _plic_cube_offset_reduced(
+        reduced_volume,
+        n1,
+        n2,
+        n3,
+    )
+    magnitude = l1 * (0.5 - reduced_offset)
+    if target < 0.5:
+        return -magnitude
+    if target > 0.5:
+        return magnitude
+    return 0.0
 
 
 def validate_authoritative_geometry(

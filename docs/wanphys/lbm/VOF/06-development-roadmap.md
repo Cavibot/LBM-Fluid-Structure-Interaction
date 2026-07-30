@@ -732,12 +732,12 @@ dam-break 可视化案例。P8 展示已经验收的能力，不再引入新的 
 ### 13.3 验收目标
 
 ```text
-[ ] 无窗口 smoke test 可完成且无 NaN/Inf
-[ ] 可视化入口读取 authoritative VOF 状态
-[ ] dam-break 运行时质量账本与 P7 阈值一致
-[ ] 启动方式在干净环境中可复现
-[ ] README 明确 CPU/CUDA 能力与限制
-[ ] 不引入新的物理、固体、气泡或泡沫依赖
+[x] 无窗口 smoke test 可完成且无 NaN/Inf
+[x] 可视化入口读取 authoritative VOF 状态
+[x] dam-break 运行时质量账本与 P7 阈值一致
+[x] 启动方式在当前冻结环境中可复现
+[x] README 明确 CPU/CUDA 能力与限制
+[x] 不引入新的物理、固体、气泡或泡沫依赖
 ```
 
 ## 14. 建议代码边界
@@ -836,7 +836,7 @@ BLOCKED
 | P5 | CPU_ACCEPTED | FullF donor mean、equilibrium 初始化、mass/phi 重闭合与 moving step 已冻结 |
 | P6 | CPU_ACCEPTED | authoritative normal/PLIC/curvature、epoch 与 Eq.12 已冻结 |
 | P7 | CPU_ACCEPTED | FullF/HOME、综合 ledger 与条件 CUDA 门禁已冻结；CUDA 当前不可用 |
-| P8 | NOT_STARTED | 尚无 authoritative VOF dam-break 可视化验收与启动入口 |
+| P8 | CPU_ACCEPTED | authoritative dam-break visual/headless、CSV、FullF/HOME、near-axis PLIC supersession 与启动入口已冻结 |
 
 只有状态达到 `CPU_ACCEPTED` 才能进入下一物理阶段；合并到声称支持 CUDA 的主路径前，
 还必须达到 `CUDA_ACCEPTED`。
@@ -898,6 +898,19 @@ headless quantitative dam-break smoke
 conditional CPU/CUDA identical-scenario test
 ```
 
-当前 Warp 构建 `wp.is_cuda_available()==False`，因此 P7 为 `CPU_ACCEPTED` 且明确
-`CUDA_NOT_ACCEPTED`。P8 下一步只增加 authoritative dam-break 可视化与可复现启动
-入口，不再改变 VOF 物理。
+P8 已冻结并实现：
+
+```text
+authoritative D3Q19-wrapped dam-break initializer
+FullF/HOME shared scene and bounded headless runner
+state.vof.phi volume rendering
+state.vof.cell_type/normal interface overlay
+per-step P7 diagnostics and optional CSV
+CPU CLI plus explicit CUDA availability guard
+near-axis PLIC cancellation fixed by an analytical reduced inverse
+```
+
+P0-P8 的限定范围已经完整达到 `CPU_ACCEPTED`。当前 Warp 构建
+`wp.is_cuda_available()==False`，因此设备状态仍是 `CUDA_NOT_ACCEPTED`。后续工作应先
+作为新的 Phase 重新冻结范围与门禁；不能由本路线图推导出 solid、bubble、foam、
+open boundary 或 CUDA 已受支持。

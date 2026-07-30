@@ -2,7 +2,7 @@
 
 本文是当前 LBM/VOF 能力的状态入口，严格区分 Shan-Chen 调试观察与未来的守恒
 VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
-[06-development-roadmap.md](06-development-roadmap.md)。P0-P7 当前均为
+[06-development-roadmap.md](06-development-roadmap.md)。P0-P8 当前均为
 `CPU_ACCEPTED`；冻结证据分别见 [07-p0-baseline.md](07-p0-baseline.md)、
 [08-p1-engineering-plan.md](08-p1-engineering-plan.md) 和
 [10-p2-completion-summary.md](10-p2-completion-summary.md)、
@@ -10,7 +10,8 @@ VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
 [16-p4-completion-summary.md](16-p4-completion-summary.md)、
 [19-p5-completion-summary.md](19-p5-completion-summary.md)、
 [22-p6-completion-summary.md](22-p6-completion-summary.md)、
-[25-p7-completion-summary.md](25-p7-completion-summary.md)，CUDA 尚未验收。
+[25-p7-completion-summary.md](25-p7-completion-summary.md)、
+[28-p8-completion-summary.md](28-p8-completion-summary.md)，CUDA 尚未验收。
 
 ## 1. 状态含义
 
@@ -25,6 +26,7 @@ VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
 | `KINETIC_CPU_ACCEPTED` | GAS→INTERFACE FullF kinetic 初始化与 moving step 通过 CPU 验收 |
 | `GEOMETRY_CPU_ACCEPTED` | authoritative normal/PLIC/curvature 与 Eq.12 通过 CPU 验收 |
 | `INTEGRATION_CPU_ACCEPTED` | FullF/HOME 与综合 closed-domain 场景通过 CPU 验收 |
+| `VISUAL_CPU_ACCEPTED` | authoritative dam-break 可视化、headless 与 CSV 通过 CPU 验收 |
 | `NOT_STARTED` | 尚未实现 |
 | `FAIL_FAST` | 当前只允许显式拒绝 |
 | `CUDA_NOT_ACCEPTED` | 尚未完成 CUDA 验收 |
@@ -109,8 +111,10 @@ alias。
 | `.normal` | `OBSERVE_CPU_ACCEPTED` | `InterfaceGeometry` | 调试 Parker-Youngs 法向 |
 | `.epoch/.normal_valid_epoch` | `OBSERVE_CPU_ACCEPTED` | observer/geometry | 调试状态有效期 |
 | `update_debug_mock_sc_to_vof()` | `OBSERVE_CPU_ACCEPTED` | solver | density 写出后刷新调试副本 |
-| `DebugVofView` | `OBSERVE_CPU_ACCEPTED` | view adapter | 只读渲染输入 |
-| `VofInterfaceVisualizer` | `OBSERVE_CPU_ACCEPTED` | visualization | 点云压缩、坐标转换与 normal line |
+| `DebugVofView` | `VISUAL_CPU_ACCEPTED` | view adapter | SC debug 或 authoritative VOF 的只读渲染输入 |
+| `VofInterfaceVisualizer` | `VISUAL_CPU_ACCEPTED` | visualization | 点云压缩、坐标转换与 normal line |
+| P8 dam-break scene/headless | `VISUAL_CPU_ACCEPTED` | example | FullF/HOME authoritative 场景、逐步 ledger 与 CSV |
+| P8 volume/interface render | `VISUAL_CPU_ACCEPTED` | example | 直接读取 `state.vof.phi/cell_type/normal` |
 | observation 物理不变性 | `OBSERVE_CPU_ACCEPTED` | 测试约束 | 开关不改变 populations/宏观量/force |
 | 单次 hydrodynamic closure | `EXISTING` | force pipeline | positivity 两侧均保持第一步 `u=0.5g` |
 | CUDA observation | `CUDA_NOT_ACCEPTED` | — | 当前构建没有 CUDA |
@@ -121,7 +125,7 @@ alias。
 |---|---|---|---|
 | `off` | 单相 LBM | 禁止 | 无 VOF view |
 | `shan_chen` | density | 只写 `state.debug_mock_sc_to_vof` | 只读 `DebugVofView` |
-| `vof`（P7） | `state.vof.mass/phi/cell_type` | 不得覆盖正式状态 | FullF/HOME closed-domain + constant gamma |
+| `vof`（P8） | `state.vof.mass/phi/cell_type` | 不得覆盖正式状态 | FullF/HOME closed-domain + authoritative visual |
 
 P0 数据流：
 
@@ -154,6 +158,7 @@ population 有效性或边界行为。
 | topology repair / redistribution | `TOPOLOGY_CPU_ACCEPTED` | P4 deterministic gathers |
 | new-interface kinetic initialization | `INTEGRATION_CPU_ACCEPTED` | FullF populations / HOME moments |
 | PLIC / curvature / surface tension | `GEOMETRY_CPU_ACCEPTED` | P6 geometry/free-surface pressure |
+| authoritative dam-break visual/headless | `VISUAL_CPU_ACCEPTED` | P8 example/read-only adapter |
 
 正式 VOF 状态与 `debug_vof_observation` 无关：即使不显示也必须分配。P2 的独立
 FullF fixed-topology `mass_tmp/phi_tmp/mass_delta` 仍不修改持久状态；P3 将
@@ -236,4 +241,28 @@ new HOME interfaces receive equilibrium rho/rho*u/rho*S
 unchanged LIQUID preserves conserved VOF mass and canonical phi=1
 closed-domain diagnostics require mass error<=5e-6 and zero D3Q19 L-G links
 CUDA test exists but is skipped when wp.is_cuda_available() is false
+```
+
+P8 冻结语义：
+
+```text
+dam-break initialization creates one legal D3Q19 interface layer
+visual volume density is exactly state.vof.phi
+interface overlay reads state.vof.cell_type/normal at the current geometry epoch
+headless mode creates no viewer and validates the P7 ledger after every step
+optional CSV serializes the same per-step diagnostics
+FullF and HOME share the same scene and acceptance path
+explicit unavailable CUDA requests fail before allocation
+no solid, bubble or foam physics is introduced
+```
+
+P8 对 P6 PLIC 数值实现的 supersession：
+
+```text
+unit-cube plane semantics and 1e-4 component policy remain unchanged
+float32 inclusion-exclusion bisection is replaced by the
+Scardovelli-Zaleski/Kawano symmetry-reduced analytical inverse
+the cancellation-sensitive reduced inverse executes in float64
+host volume closure uses a cancellation-safe divided-difference form
+near-axis normals around 1e-4 have a dedicated regression
 ```

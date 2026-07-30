@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import warp as wp
 
-from .state import DebugMockScToVofState
+from .state import DebugMockScToVofState, VofGridState
 
 
 @wp.kernel
@@ -64,6 +64,25 @@ class DebugVofView:
             normal=debug_mock.normal,
             epoch=debug_mock.epoch,
             source="shan_chen_mock",
+        )
+
+    @classmethod
+    def from_authoritative_vof(
+        cls,
+        vof: VofGridState,
+    ) -> DebugVofView:
+        """Adapt authoritative P6 geometry without copying or deriving fields."""
+
+        if vof.epoch < 0 or vof.geometry_epoch != vof.epoch:
+            raise ValueError(
+                "authoritative VOF visual view requires current geometry"
+            )
+        return cls(
+            phi=vof.phi,
+            cell_type=vof.cell_type,
+            normal=vof.normal,
+            epoch=vof.epoch,
+            source="authoritative_vof",
         )
 
 
