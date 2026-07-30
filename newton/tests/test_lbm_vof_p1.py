@@ -101,13 +101,20 @@ class TestVofP1ConfigurationAndState(unittest.TestCase):
         assert state.vof is not None
         state.vof.mass.assign(np.full(state.res, 0.25, dtype=np.float32))
         state.vof.phi.assign(np.full(state.res, 0.5, dtype=np.float32))
+        state.vof.pending_excess.assign(
+            np.full(state.res, 0.01, dtype=np.float32)
+        )
+        state.vof.pending_receiver_count.fill_(1)
         state.vof.cell_type.fill_(int(VofCellType.INTERFACE))
+        state.vof.reference_mass = 1.56
 
         clone = state.clone()
         assert clone.vof is not None
         for name in (
             "mass",
             "phi",
+            "pending_excess",
+            "pending_receiver_count",
             "cell_type",
             "normal",
             "plic_offset",
@@ -118,6 +125,7 @@ class TestVofP1ConfigurationAndState(unittest.TestCase):
             self.assertIsNot(source, target)
             self.assertNotEqual(int(source.ptr), int(target.ptr))
             np.testing.assert_array_equal(source.numpy(), target.numpy())
+        self.assertEqual(clone.vof.reference_mass, 1.56)
 
         clone.clear()
         validate_empty_vof_state(clone.vof)
@@ -251,11 +259,21 @@ class TestVofP1Initialization(unittest.TestCase):
 
                 state_out = domain._state_out
                 assert state_out is not None and state_out.vof is not None
-                for name in ("mass", "phi", "cell_type"):
+                for name in (
+                    "mass",
+                    "phi",
+                    "pending_excess",
+                    "pending_receiver_count",
+                    "cell_type",
+                ):
                     source = getattr(state.vof, name)
                     target = getattr(state_out.vof, name)
                     np.testing.assert_array_equal(source.numpy(), target.numpy())
                     self.assertNotEqual(int(source.ptr), int(target.ptr))
+                self.assertEqual(
+                    state.vof.reference_mass,
+                    state_out.vof.reference_mass,
+                )
                 if encoding == "fullf":
                     np.testing.assert_array_equal(
                         state.f_post.numpy(), state_out.f_post.numpy()

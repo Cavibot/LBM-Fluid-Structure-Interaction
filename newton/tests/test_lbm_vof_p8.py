@@ -153,12 +153,22 @@ class TestVofP8DamBreakState(unittest.TestCase):
 
         self.assertEqual(tuple(defaults.grid_res), (48, 12, 32))
         self.assertEqual(defaults.encoding, "fullf")
+        self.assertEqual(defaults.runtime_profile, "auto")
+        self.assertIsNone(defaults.steps_per_frame)
+        self.assertEqual(defaults.validation_interval, 60)
         self.assertEqual(explicit.viewer, "null")
         self.assertEqual(explicit.num_frames, 7)
         self.assertEqual(explicit.encoding, "home")
         self.assertEqual(tuple(explicit.grid_res), (9, 4, 7))
         self.assertAlmostEqual(explicit.surface_tension, 0.01)
         self.assertTrue(explicit.show_normals)
+
+        headless = dambreak._config_from_args(defaults, interactive=False)
+        interactive = dambreak._config_from_args(defaults, interactive=True)
+        self.assertEqual(headless.runtime_profile, "strict")
+        self.assertEqual(headless.steps_per_frame, 1)
+        self.assertEqual(interactive.runtime_profile, "device")
+        self.assertEqual(interactive.steps_per_frame, 4)
 
     def test_cuda_request_has_availability_guard(self) -> None:
         config = _config(device="cuda:0")

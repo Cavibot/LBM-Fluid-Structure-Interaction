@@ -144,15 +144,8 @@ def _oracle(
             unresolved[cell] = excess[cell]
 
     mass_final = mass_base.copy()
-    for cell in np.ndindex(shape):
-        if int(final_type[cell]) != int(VofCellType.INTERFACE):
-            continue
-        for q in range(1, 19):
-            neighbor = _neighbor(cell, q, shape, periodic)
-            if neighbor is not None:
-                mass_final[cell] += share[neighbor]
     phi_final = np.zeros(shape, dtype=np.float32)
-    phi_final[liquid] = mass_final[liquid] / density[liquid]
+    phi_final[liquid] = 1.0
     phi_final[final_interface] = (
         mass_final[final_interface] / density[final_interface]
     )
@@ -291,7 +284,10 @@ class TestVofP4TopologyAndRedistribution(unittest.TestCase):
             places=6,
         )
         self.assertAlmostEqual(
-            float(np.sum(result.mass_final.numpy(), dtype=np.float64)),
+            float(
+                np.sum(result.mass_final.numpy(), dtype=np.float64)
+                + np.sum(result.excess.numpy(), dtype=np.float64)
+            ),
             float(np.sum(mass, dtype=np.float64)),
             places=5,
         )
@@ -325,7 +321,10 @@ class TestVofP4TopologyAndRedistribution(unittest.TestCase):
             5,
         )
         self.assertAlmostEqual(
-            float(np.sum(result.mass_final.numpy(), dtype=np.float64)),
+            float(
+                np.sum(result.mass_final.numpy(), dtype=np.float64)
+                + np.sum(result.excess.numpy(), dtype=np.float64)
+            ),
             float(np.sum(mass, dtype=np.float64)),
             places=5,
         )
@@ -474,7 +473,10 @@ class TestVofP4OracleAndIntegration(unittest.TestCase):
                 np.testing.assert_array_equal(first[name], oracle_value)
             np.testing.assert_array_equal(first[name], second[name])
         self.assertAlmostEqual(
-            float(np.sum(first["mass_final"], dtype=np.float64)),
+            float(
+                np.sum(first["mass_final"], dtype=np.float64)
+                + np.sum(first["excess"], dtype=np.float64)
+            ),
             float(np.sum(mass, dtype=np.float64)),
             places=5,
         )
@@ -491,10 +493,14 @@ class TestVofP4OracleAndIntegration(unittest.TestCase):
         phi = state_in.vof.phi.numpy().copy()
         mass[center] = 1.2
         phi[center] = 1.2
+        initial_total = float(np.sum(mass, dtype=np.float64))
         state_in.vof.mass.assign(mass)
         state_in.vof.phi.assign(phi)
+        state_in.vof.reference_mass = initial_total
+        assert domain._state_out is not None
+        assert domain._state_out.vof is not None
+        domain._state_out.vof.reference_mass = initial_total
         domain.solver._vof_interface_geometry.compute(state_in.vof)
-        initial_total = float(np.sum(mass, dtype=np.float64))
 
         domain.step(1.0)
 
@@ -505,7 +511,13 @@ class TestVofP4OracleAndIntegration(unittest.TestCase):
             int(VofCellType.LIQUID),
         )
         self.assertAlmostEqual(
-            float(np.sum(domain.state.vof.mass.numpy(), dtype=np.float64)),
+            float(
+                np.sum(domain.state.vof.mass.numpy(), dtype=np.float64)
+                + np.sum(
+                    domain.state.vof.pending_excess.numpy(),
+                    dtype=np.float64,
+                )
+            ),
             initial_total,
             places=5,
         )
@@ -521,10 +533,14 @@ class TestVofP4OracleAndIntegration(unittest.TestCase):
         phi = state_in.vof.phi.numpy().copy()
         mass[center] = 1.2
         phi[center] = 1.2
+        total_before = float(np.sum(mass, dtype=np.float64))
         state_in.vof.mass.assign(mass)
         state_in.vof.phi.assign(phi)
+        state_in.vof.reference_mass = total_before
+        assert domain._state_out is not None
+        assert domain._state_out.vof is not None
+        domain._state_out.vof.reference_mass = total_before
         domain.solver._vof_interface_geometry.compute(state_in.vof)
-        total_before = float(np.sum(mass, dtype=np.float64))
 
         domain.step(1.0)
 
@@ -538,7 +554,13 @@ class TestVofP4OracleAndIntegration(unittest.TestCase):
         )
         self.assertEqual(int(np.count_nonzero(new_interface)), 5)
         self.assertAlmostEqual(
-            float(np.sum(domain.state.vof.mass.numpy(), dtype=np.float64)),
+            float(
+                np.sum(domain.state.vof.mass.numpy(), dtype=np.float64)
+                + np.sum(
+                    domain.state.vof.pending_excess.numpy(),
+                    dtype=np.float64,
+                )
+            ),
             total_before,
             places=5,
         )

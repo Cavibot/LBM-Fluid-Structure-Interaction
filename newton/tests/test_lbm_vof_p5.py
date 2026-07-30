@@ -460,10 +460,15 @@ class TestVofP5Integration(unittest.TestCase):
         phi = state.vof.phi.numpy().copy()
         mass[center] = 1.2
         phi[center] = 1.2
+        reference_mass = float(np.sum(mass, dtype=np.float64))
         state.vof.mass.assign(mass)
         state.vof.phi.assign(phi)
+        state.vof.reference_mass = reference_mass
+        assert domain._state_out is not None
+        assert domain._state_out.vof is not None
+        domain._state_out.vof.reference_mass = reference_mass
         domain.solver._vof_interface_geometry.compute(state.vof)
-        return domain, state, center, float(np.sum(mass, dtype=np.float64))
+        return domain, state, center, reference_mass
 
     def test_positive_front_commits_and_new_interface_runs_next_step(
         self,
@@ -486,7 +491,13 @@ class TestVofP5Integration(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(populations[:, active])))
         self.assertTrue(np.all(state.density.numpy()[active] > 0.0))
         self.assertAlmostEqual(
-            float(np.sum(state.vof.mass.numpy(), dtype=np.float64)),
+            float(
+                np.sum(state.vof.mass.numpy(), dtype=np.float64)
+                + np.sum(
+                    state.vof.pending_excess.numpy(),
+                    dtype=np.float64,
+                )
+            ),
             total_before,
             places=5,
         )
@@ -536,6 +547,10 @@ class TestVofP5Integration(unittest.TestCase):
         delta = float(mass[target] - state.vof.mass.numpy()[target])
         state.vof.mass.assign(mass)
         state.vof.phi.assign(phi)
+        state.vof.reference_mass = total_before + delta
+        assert domain._state_out is not None
+        assert domain._state_out.vof is not None
+        domain._state_out.vof.reference_mass = total_before + delta
         domain.solver._vof_interface_geometry.compute(state.vof)
 
         domain.step(1.0)
@@ -547,7 +562,13 @@ class TestVofP5Integration(unittest.TestCase):
         active = state.vof.cell_type.numpy() != int(VofCellType.GAS)
         self.assertTrue(np.all(np.isfinite(state.density.numpy()[active])))
         self.assertAlmostEqual(
-            float(np.sum(state.vof.mass.numpy(), dtype=np.float64)),
+            float(
+                np.sum(state.vof.mass.numpy(), dtype=np.float64)
+                + np.sum(
+                    state.vof.pending_excess.numpy(),
+                    dtype=np.float64,
+                )
+            ),
             total_before + delta,
             places=5,
         )

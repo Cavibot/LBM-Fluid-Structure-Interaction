@@ -11,7 +11,9 @@ VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
 [19-p5-completion-summary.md](19-p5-completion-summary.md)、
 [22-p6-completion-summary.md](22-p6-completion-summary.md)、
 [25-p7-completion-summary.md](25-p7-completion-summary.md)、
-[28-p8-completion-summary.md](28-p8-completion-summary.md)，CUDA 尚未验收。
+[28-p8-completion-summary.md](28-p8-completion-summary.md)。P4/P7 重分配缝隙与交互
+同步开销由 [31-fix1-completion-summary.md](31-fix1-completion-summary.md)
+正式 supersede；CUDA 尚未验收。
 
 ## 1. 状态含义
 
@@ -27,6 +29,7 @@ VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
 | `GEOMETRY_CPU_ACCEPTED` | authoritative normal/PLIC/curvature 与 Eq.12 通过 CPU 验收 |
 | `INTEGRATION_CPU_ACCEPTED` | FullF/HOME 与综合 closed-domain 场景通过 CPU 验收 |
 | `VISUAL_CPU_ACCEPTED` | authoritative dam-break 可视化、headless 与 CSV 通过 CPU 验收 |
+| `FIX_CPU_ACCEPTED` | 有界 excess side channel 与 runtime profile 通过 CPU 验收 |
 | `NOT_STARTED` | 尚未实现 |
 | `FAIL_FAST` | 当前只允许显式拒绝 |
 | `CUDA_NOT_ACCEPTED` | 尚未完成 CUDA 验收 |
@@ -40,6 +43,8 @@ vof_mass_scheme: Literal["fslbm_neighbor"] = "fslbm_neighbor"
 vof_atmosphere_pressure: float = 1 / 3
 vof_surface_tension: float = 0
 vof_transition_epsilon: float = 1e-4
+vof_runtime_profile: Literal["strict", "sampled", "device", "off"] = "strict"
+vof_validation_interval: int = 60
 ```
 
 `interface_model` 是界面物理的唯一权威选择。`force_model` 是不可由调用者传入的内部
@@ -76,8 +81,11 @@ alias。
 | `debug_vof_observation` | `OBSERVE_CPU_ACCEPTED` | 配置层 | 只控制 SC 调试观察 |
 | internal `force_model` | `EXISTING` | `LbmModel.__post_init__` | interface + gravity 的执行组合 |
 | `state.vof` | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer | VOF 模式分配的正式状态 |
-| `state.vof.mass` | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer | 唯一守恒权威 |
-| `state.vof.phi` | `AUTHORITATIVE_CPU_ACCEPTED` | `mass/density` 反算 | 派生占据率缓存 |
+| `state.vof.mass` | `FIX_CPU_ACCEPTED` | initializer/P4 | committed resident liquid mass |
+| `state.vof.pending_excess` | `FIX_CPU_ACCEPTED` | P4 clamp | 下一步由 final INTERFACE 邻居消费的 signed 总 excess |
+| `state.vof.pending_receiver_count` | `FIX_CPU_ACCEPTED` | P4 topology | pending sender 的 D3Q19 receiver 数 |
+| `state.vof.reference_mass` | `FIX_CPU_ACCEPTED` | initializer | closed-domain 初始化守恒参考 |
+| `state.vof.phi` | `FIX_CPU_ACCEPTED` | bounded mass/density | 始终位于 `[0,1]` 的几何/平流占据率缓存 |
 | `state.vof.cell_type` | `AUTHORITATIVE_CPU_ACCEPTED` | 严格 phi 分类 | GAS/INTERFACE/LIQUID 拓扑 |
 | `vof_mass_scheme` | `TRANSPORT_CPU_ACCEPTED` | 配置层 | 固定为已审计的 `fslbm_neighbor` |
 | `VofMassTransport` | `INTEGRATION_CPU_ACCEPTED` | solver scratch | 共享 logical-population 固定拓扑质量交换 |
@@ -92,7 +100,7 @@ alias。
 | `vof_transition_epsilon` | `TOPOLOGY_CPU_ACCEPTED` | 配置层 | 论文阈值，默认 `1e-4` |
 | `VofTopologyTransition` | `TOPOLOGY_CPU_ACCEPTED` | solver scratch | proposal/topology/clamp/redistribution |
 | `VofTransitionResult` | `TOPOLOGY_CPU_ACCEPTED` | solver scratch | final VOF 与 new/retired/changed masks |
-| P4 deterministic gather | `TOPOLOGY_CPU_ACCEPTED` | transition kernels | 无原地邻居写、无 atomic scatter |
+| P4 pending excess emit | `FIX_CPU_ACCEPTED` | transition kernels | 本步 bounded commit；下一步固定顺序 gather |
 | `VofKineticInitializer` | `INTEGRATION_CPU_ACCEPTED` | solver scratch | donor mean + FullF populations/HOME moments |
 | `VofKineticInitializationResult` | `KINETIC_CPU_ACCEPTED` | solver scratch | donor count 与 rho/u 初始化值 |
 | GAS→INTERFACE handoff | `KINETIC_CPU_ACCEPTED` | P4→P5 | kinetic 成功后才提交 VOF |
@@ -103,6 +111,9 @@ alias。
 | `VofInterfaceGeometry` | `GEOMETRY_CPU_ACCEPTED` | solver stage | final phi/type normal→PLIC→curvature |
 | shared logical `f_post` provider | `INTEGRATION_CPU_ACCEPTED` | solver scratch | FullF direct、HOME ten-moment decode |
 | `VofDiagnostics` | `INTEGRATION_CPU_ACCEPTED` | read-only host ledger | mass/topology/finite/speed/epoch 门禁 |
+| `VofDeviceDiagnostics` | `FIX_CPU_ACCEPTED` | device reduction | 单一 16-float64 compact readback |
+| `vof_runtime_profile` | `FIX_CPU_ACCEPTED` | solver policy | strict/sampled/device/off |
+| `vof_validation_interval` | `FIX_CPU_ACCEPTED` | sampled policy | `[30,100]`，默认 60 |
 | `LbmDomain.initialize_vof()` | `AUTHORITATIVE_CPU_ACCEPTED` | domain | candidate 双缓冲完整初始化 |
 | `validate_initialized_vof_state()` | `AUTHORITATIVE_CPU_ACCEPTED` | validator | 只读检查实际数组不变量 |
 | `DebugMockScToVofState` | `OBSERVE_CPU_ACCEPTED` | debug observer | 与正式 VOF 分离的调试容器 |
@@ -113,7 +124,7 @@ alias。
 | `update_debug_mock_sc_to_vof()` | `OBSERVE_CPU_ACCEPTED` | solver | density 写出后刷新调试副本 |
 | `DebugVofView` | `VISUAL_CPU_ACCEPTED` | view adapter | SC debug 或 authoritative VOF 的只读渲染输入 |
 | `VofInterfaceVisualizer` | `VISUAL_CPU_ACCEPTED` | visualization | 点云压缩、坐标转换与 normal line |
-| P8 dam-break scene/headless | `VISUAL_CPU_ACCEPTED` | example | FullF/HOME authoritative 场景、逐步 ledger 与 CSV |
+| P8 dam-break scene/headless | `FIX_CPU_ACCEPTED` | example | visual auto=device+4 substeps；headless auto=strict |
 | P8 volume/interface render | `VISUAL_CPU_ACCEPTED` | example | 直接读取 `state.vof.phi/cell_type/normal` |
 | observation 物理不变性 | `OBSERVE_CPU_ACCEPTED` | 测试约束 | 开关不改变 populations/宏观量/force |
 | 单次 hydrodynamic closure | `EXISTING` | force pipeline | positivity 两侧均保持第一步 `u=0.5g` |
@@ -125,7 +136,7 @@ alias。
 |---|---|---|---|
 | `off` | 单相 LBM | 禁止 | 无 VOF view |
 | `shan_chen` | density | 只写 `state.debug_mock_sc_to_vof` | 只读 `DebugVofView` |
-| `vof`（P8） | `state.vof.mass/phi/cell_type` | 不得覆盖正式状态 | FullF/HOME closed-domain + authoritative visual |
+| `vof`（FIX1） | resident mass + pending excess / bounded phi / type | 不得覆盖正式状态 | FullF/HOME closed-domain + authoritative visual |
 
 P0 数据流：
 
@@ -160,7 +171,15 @@ population 有效性或边界行为。
 | PLIC / curvature / surface tension | `GEOMETRY_CPU_ACCEPTED` | P6 geometry/free-surface pressure |
 | authoritative dam-break visual/headless | `VISUAL_CPU_ACCEPTED` | P8 example/read-only adapter |
 
-正式 VOF 状态与 `debug_vof_observation` 无关：即使不显示也必须分配。P2 的独立
+正式 VOF 状态与 `debug_vof_observation` 无关：即使不显示也必须分配。FIX1 后的
+closed-domain 守恒量为：
+
+```text
+sum(state.vof.mass) + sum(state.vof.pending_excess)
+```
+
+`pending_excess` 是一拍延迟的 sender transfer，不参与几何；`phi` 在 commit 后
+始终有界。P2 的独立
 FullF fixed-topology `mass_tmp/phi_tmp/mass_delta` 仍不修改持久状态；P3 将
 `mass_tmp` 接入完整 FullF step，并用最终 `density_out` 反算持久 `phi`。`mass`
 仍是守恒权威。P4 获得 `cell_type` 的唯一 transition 写权限，并在 scratch 中先完成
@@ -201,6 +220,7 @@ I-to-L has reference-order priority over adjacent I-to-G
 topology and redistribution are gather-only
 receivers are final D3Q19 INTERFACE neighbors
 positive and negative excess use one signed formula
+committed phi remains bounded; excess is persisted for next-step gather
 zero receiver with material excess fails before commit
 new_interface mask is the P5 kinetic handoff
 ```
@@ -239,7 +259,8 @@ P2 and P3 consume the same logical population contract
 old GAS HOME moments/macros are restored before topology transition
 new HOME interfaces receive equilibrium rho/rho*u/rho*S
 unchanged LIQUID preserves conserved VOF mass and canonical phi=1
-closed-domain diagnostics require mass error<=5e-6 and zero D3Q19 L-G links
+closed-domain diagnostics include pending excess and require mass error<=5e-6
+zero D3Q19 L-G links
 CUDA test exists but is skipped when wp.is_cuda_available() is false
 ```
 
@@ -249,11 +270,27 @@ P8 冻结语义：
 dam-break initialization creates one legal D3Q19 interface layer
 visual volume density is exactly state.vof.phi
 interface overlay reads state.vof.cell_type/normal at the current geometry epoch
-headless mode creates no viewer and validates the P7 ledger after every step
+headless auto mode creates no viewer and uses strict per-step validation
 optional CSV serializes the same per-step diagnostics
 FullF and HOME share the same scene and acceptance path
 explicit unavailable CUDA requests fail before allocation
 no solid, bubble or foam physics is introduced
+```
+
+FIX1 supersession：
+
+```text
+strict  -> every-step full host acceptance
+sampled -> full host acceptance every 30-100 steps
+device  -> device reduction + one 16-float64 readback per step
+off     -> transaction and epoch gates only
+
+interactive CLI auto -> device + 4 simulation substeps/frame
+headless CLI auto    -> strict + 1 simulation step
+
+committed phi in [0,1]
+pending excess is consumed once by next-step D3Q19 INTERFACE gather
+closed-domain mass = resident mass + pending excess
 ```
 
 P8 对 P6 PLIC 数值实现的 supersession：

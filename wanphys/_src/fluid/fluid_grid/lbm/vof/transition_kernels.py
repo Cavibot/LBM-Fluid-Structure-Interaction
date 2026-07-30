@@ -193,49 +193,18 @@ def prepare_vof_redistribution_kernel(
 
 
 @wp.kernel
-def gather_vof_redistribution_kernel(
+def finalize_bounded_vof_kernel(
     density_out: wp.array3d(dtype=float),
     final_type: wp.array3d(dtype=wp.uint8),
     mass_base: wp.array3d(dtype=float),
-    share: wp.array3d(dtype=float),
     mass_final: wp.array3d(dtype=float),
     phi_final: wp.array3d(dtype=float),
-    periodic_x: int,
-    periodic_y: int,
-    periodic_z: int,
-    nx: int,
-    ny: int,
-    nz: int,
 ) -> None:
-    """Gather neighboring sender shares in a fixed D3Q19 direction order."""
+    """Commit bounded geometry while leaving excess in the side channel."""
 
     i, j, k = wp.tid()
     kind = final_type[i, j, k]
     mass = mass_base[i, j, k]
-
-    if kind == wp.uint8(1):
-        for q in range(1, 19):
-            ni = i - direction_x(q)
-            nj = j - direction_y(q)
-            nk = k - direction_z(q)
-            outside = bool(False)
-            if ni < 0 or ni >= nx:
-                if periodic_x != 0:
-                    ni = _wrap_once(ni, nx)
-                else:
-                    outside = True
-            if nj < 0 or nj >= ny:
-                if periodic_y != 0:
-                    nj = _wrap_once(nj, ny)
-                else:
-                    outside = True
-            if nk < 0 or nk >= nz:
-                if periodic_z != 0:
-                    nk = _wrap_once(nk, nz)
-                else:
-                    outside = True
-            if not outside:
-                mass += share[ni, nj, nk]
 
     mass_final[i, j, k] = mass
     if kind == wp.uint8(0):
@@ -247,7 +216,7 @@ def gather_vof_redistribution_kernel(
 
 
 __all__ = [
-    "gather_vof_redistribution_kernel",
+    "finalize_bounded_vof_kernel",
     "prepare_vof_redistribution_kernel",
     "propose_vof_type_kernel",
     "resolve_vof_topology_kernel",

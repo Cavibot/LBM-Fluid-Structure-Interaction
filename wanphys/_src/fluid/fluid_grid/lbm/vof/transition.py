@@ -11,10 +11,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
+from ..constants import CX, CY, CZ
 from .contracts import VofCellType
 from .initialization import validate_initial_topology
 from .transition_kernels import (
-    gather_vof_redistribution_kernel,
+    finalize_bounded_vof_kernel,
     prepare_vof_redistribution_kernel,
     propose_vof_type_kernel,
     resolve_vof_topology_kernel,
@@ -59,6 +60,10 @@ def validate_p4_transition_result(
     final_type = np.asarray(result.final_type.numpy())
     mass_final = np.asarray(result.mass_final.numpy())
     phi_final = np.asarray(result.phi_final.numpy())
+    mass_base = np.asarray(result.mass_base.numpy())
+    excess = np.asarray(result.excess.numpy())
+    share = np.asarray(result.share.numpy())
+    receiver_count = np.asarray(result.receiver_count.numpy())
     unresolved = np.asarray(result.unresolved_excess.numpy())
 
     if not np.all(np.isfinite(mass_pre)):
@@ -73,6 +78,10 @@ def validate_p4_transition_result(
         raise ValueError("P4 final_type contains an unknown value")
     if not np.all(np.isfinite(mass_final)) or not np.all(np.isfinite(phi_final)):
         raise ValueError("P4 final mass and phi must be finite")
+    if not np.all(np.isfinite(excess)) or not np.all(np.isfinite(share)):
+        raise ValueError("P4 pending excess and share must be finite")
+    if np.any(receiver_count > 18):
+        raise ValueError("P4 receiver count exceeds D3Q19 degree")
     if np.any(np.abs(unresolved) > mass_tolerance):
         first = tuple(
             int(value)
@@ -87,6 +96,10 @@ def validate_p4_transition_result(
     gas = final_type == int(VofCellType.GAS)
     interface = final_type == int(VofCellType.INTERFACE)
     liquid = final_type == int(VofCellType.LIQUID)
+    if np.any(phi_final < 0.0) or np.any(phi_final > 1.0):
+        raise ValueError("P4 committed phi must lie in [0, 1]")
+    if not np.array_equal(mass_final, mass_base):
+        raise ValueError("P4 final resident mass must equal bounded mass_base")
     if np.any(mass_final[gas] != 0.0) or np.any(phi_final[gas] != 0.0):
         raise ValueError("P4 final GAS cells must have mass=0 and phi=0")
     became_liquid = (
@@ -114,6 +127,45 @@ def validate_p4_transition_result(
         rtol=mass_tolerance,
     ):
         raise ValueError("P4 final INTERFACE must satisfy mass=density*phi")
+    expected_share = np.zeros_like(share)
+    has_receiver = receiver_count > 0
+    expected_share[has_receiver] = (
+        excess[has_receiver]
+        / receiver_count[has_receiver].astype(np.float32)
+    )
+    if not np.allclose(
+        share,
+        expected_share,
+        atol=mass_tolerance,
+        rtol=mass_tolerance,
+    ):
+        raise ValueError("P4 pending excess share/count closure failed")
+    shape = tuple(int(value) for value in final_type.shape)
+    for raw_cell in np.argwhere(np.abs(excess) > mass_tolerance):
+        cell = tuple(int(value) for value in raw_cell)
+        actual_count = 0
+        for q in range(1, 19):
+            neighbor = [
+                cell[0] - CX[q],
+                cell[1] - CY[q],
+                cell[2] - CZ[q],
+            ]
+            outside = False
+            for axis in range(3):
+                if 0 <= neighbor[axis] < shape[axis]:
+                    continue
+                if not periodic[axis]:
+                    outside = True
+                    break
+                neighbor[axis] %= shape[axis]
+            if not outside and final_type[tuple(neighbor)] == int(
+                VofCellType.INTERFACE
+            ):
+                actual_count += 1
+        if actual_count != int(receiver_count[cell]):
+            raise ValueError(
+                "P4 receiver count does not match final topology"
+            )
 
     expected_new = (
         (cell_type_n == int(VofCellType.GAS))
@@ -135,12 +187,13 @@ def validate_p4_transition_result(
 
     scale = max(1.0, float(np.sqrt(mass_pre.size)))
     if not np.isclose(
-        np.sum(mass_final, dtype=np.float64),
+        np.sum(mass_final, dtype=np.float64)
+        + np.sum(excess, dtype=np.float64),
         np.sum(mass_pre, dtype=np.float64),
         atol=mass_tolerance * scale,
         rtol=mass_tolerance,
     ):
-        raise ValueError("P4 redistribution does not conserve total mass")
+        raise ValueError("P4 resident plus pending mass is not conservative")
 
 
 class VofTopologyTransition:
@@ -291,21 +344,14 @@ class VofTopologyTransition:
             device=self.device,
         )
         wp.launch(
-            gather_vof_redistribution_kernel,
+            finalize_bounded_vof_kernel,
             dim=self.shape,
             inputs=[
                 density_out,
                 self._final_type,
                 self._mass_base,
-                self._share,
                 self._mass_final,
                 self._phi_final,
-                px,
-                py,
-                pz,
-                nx,
-                ny,
-                nz,
             ],
             device=self.device,
         )
@@ -330,6 +376,8 @@ class VofTopologyTransition:
             )
         wp.copy(target.mass, self._mass_final)
         wp.copy(target.phi, self._phi_final)
+        wp.copy(target.pending_excess, self._excess)
+        wp.copy(target.pending_receiver_count, self._receiver_count)
         wp.copy(target.cell_type, self._final_type)
         target.epoch = int(source_epoch) + 1
         target.geometry_epoch = -1

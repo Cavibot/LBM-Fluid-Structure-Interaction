@@ -74,6 +74,8 @@ class AuthoritativeVofDamBreakConfig:
     dam_x_fraction: float = 1.0 / 3.0
     dam_z_fraction: float = 2.0 / 3.0
     steps_per_frame: int = 1
+    runtime_profile: str = "strict"
+    validation_interval: int = 60
     show_normals: bool = False
 
 
@@ -140,6 +142,8 @@ def _build_model(config: AuthoritativeVofDamBreakConfig) -> LbmModel:
         tau=float(config.tau),
         gravity_z=float(config.gravity_z),
         vof_surface_tension=float(config.surface_tension),
+        vof_runtime_profile=str(config.runtime_profile),
+        vof_validation_interval=int(config.validation_interval),
         enforce_population_positivity=False,
     )
 
@@ -158,14 +162,12 @@ class AuthoritativeVofDamBreakScene:
         )
         state = self.domain.initialize_vof(phi)
         assert state.vof is not None
-        self.initial_mass = float(
-            np.sum(state.vof.mass.numpy(), dtype=np.float64)
-        )
+        self.initial_mass = float(state.vof.reference_mass)
         self.step_count = 0
         self.ledger: list[VofDiagnostics] = []
 
-    def step(self, count: int = 1) -> VofDiagnostics:
-        """Advance a bounded number of lattice steps and validate every state."""
+    def step(self, count: int = 1) -> VofDiagnostics | None:
+        """Advance lattice steps and return the latest profile report."""
 
         if count <= 0:
             raise ValueError("P8 step count must be positive")
@@ -173,16 +175,9 @@ class AuthoritativeVofDamBreakScene:
         for _ in range(int(count)):
             self.domain.step(1.0)
             self.step_count += 1
-            diagnostics = collect_vof_diagnostics(
-                self.domain.state,
-                initial_mass=self.initial_mass,
-            )
-            validate_vof_diagnostics(
-                diagnostics,
-                max_lattice_speed=float(self.model.max_lattice_speed),
-            )
-            self.ledger.append(diagnostics)
-        assert diagnostics is not None
+            diagnostics = self.domain.solver.last_vof_diagnostics
+            if diagnostics is not None:
+                self.ledger.append(diagnostics)
         return diagnostics
 
 
@@ -194,6 +189,7 @@ def format_diagnostics(step: int, diagnostics: VofDiagnostics) -> str:
         f"relerr={diagnostics.relative_mass_error:.3e} "
         f"phi=[{diagnostics.phi_min:.4f},{diagnostics.phi_max:.4f}] "
         f"interface={diagnostics.interface_cell_count} "
+        f"pending={diagnostics.pending_excess_total:.3e} "
         f"vmax={diagnostics.max_velocity:.3e} "
         f"epoch={diagnostics.epoch}"
     )
@@ -211,8 +207,8 @@ def write_diagnostics_csv(
     with output.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
-        for step, diagnostics in enumerate(ledger, start=1):
-            writer.writerow({"step": step, **asdict(diagnostics)})
+        for diagnostics in ledger:
+            writer.writerow({"step": diagnostics.epoch, **asdict(diagnostics)})
     return output
 
 
@@ -230,8 +226,23 @@ def run_headless(
     scene = AuthoritativeVofDamBreakScene(config)
     for step in range(1, int(num_steps) + 1):
         diagnostics = scene.step()
-        if print_every > 0 and step % print_every == 0:
+        if (
+            diagnostics is not None
+            and print_every > 0
+            and step % print_every == 0
+        ):
             print(format_diagnostics(step, diagnostics))
+    if not scene.ledger or scene.ledger[-1].epoch != scene.step_count:
+        diagnostics = collect_vof_diagnostics(
+            scene.domain.state,
+            initial_mass=scene.initial_mass,
+        )
+        if config.runtime_profile != "off":
+            validate_vof_diagnostics(
+                diagnostics,
+                max_lattice_speed=float(scene.model.max_lattice_speed),
+            )
+        scene.ledger.append(diagnostics)
     ledger = tuple(scene.ledger)
     if csv_path is not None:
         write_diagnostics_csv(csv_path, ledger)
@@ -275,7 +286,8 @@ class AuthoritativeVofDamBreakVisualExample:
     def step(self) -> None:
         diagnostics = self.scene.step(self.config.steps_per_frame)
         if (
-            self.print_every > 0
+            diagnostics is not None
+            and self.print_every > 0
             and self.scene.step_count % self.print_every == 0
         ):
             print(format_diagnostics(self.scene.step_count, diagnostics))
@@ -301,9 +313,12 @@ class AuthoritativeVofDamBreakVisualExample:
         self.viewer.end_frame()
 
     def test_final(self) -> None:
-        diagnostics = self.diagnostics
-        if diagnostics is None:
+        if self.scene.step_count == 0:
             raise ValueError("P8 visual example did not advance")
+        diagnostics = collect_vof_diagnostics(
+            self.scene.domain.state,
+            initial_mass=self.scene.initial_mass,
+        )
         validate_vof_diagnostics(diagnostics)
 
 
@@ -350,7 +365,18 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--steps-per-frame",
         type=int,
-        default=defaults.steps_per_frame,
+        default=None,
+        help="simulation substeps per rendered frame (auto: visual=4, null=1)",
+    )
+    parser.add_argument(
+        "--runtime-profile",
+        choices=("auto", "strict", "sampled", "device", "off"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--validation-interval",
+        type=int,
+        default=defaults.validation_interval,
     )
     parser.add_argument("--print-every", type=int, default=30)
     parser.add_argument(
@@ -362,8 +388,18 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _config_from_args(args: argparse.Namespace) -> AuthoritativeVofDamBreakConfig:
+def _config_from_args(
+    args: argparse.Namespace,
+    *,
+    interactive: bool,
+) -> AuthoritativeVofDamBreakConfig:
     device = "cpu" if args.device is None else str(args.device)
+    profile = str(args.runtime_profile)
+    if profile == "auto":
+        profile = "device" if interactive else "strict"
+    steps_per_frame = args.steps_per_frame
+    if steps_per_frame is None:
+        steps_per_frame = 4 if interactive else 1
     return AuthoritativeVofDamBreakConfig(
         device=device,
         grid_res=tuple(int(value) for value in args.grid_res),
@@ -375,7 +411,9 @@ def _config_from_args(args: argparse.Namespace) -> AuthoritativeVofDamBreakConfi
         surface_tension=float(args.surface_tension),
         dam_x_fraction=float(args.dam_x_fraction),
         dam_z_fraction=float(args.dam_z_fraction),
-        steps_per_frame=int(args.steps_per_frame),
+        steps_per_frame=int(steps_per_frame),
+        runtime_profile=profile,
+        validation_interval=int(args.validation_interval),
         show_normals=bool(args.show_normals),
     )
 
@@ -387,7 +425,7 @@ def run_with_parser(parser: argparse.ArgumentParser) -> None:
     if preview.viewer == "null":
         args = parser.parse_args()
         ledger = run_headless(
-            _config_from_args(args),
+            _config_from_args(args, interactive=False),
             num_steps=int(args.num_frames),
             print_every=int(args.print_every),
             csv_path=args.csv,
@@ -398,7 +436,7 @@ def run_with_parser(parser: argparse.ArgumentParser) -> None:
     viewer, args = init_fluid_viewer(parser)
     example = AuthoritativeVofDamBreakVisualExample(
         viewer,
-        _config_from_args(args),
+        _config_from_args(args, interactive=True),
         print_every=int(args.print_every),
     )
     if bool(args.test) and hasattr(viewer, "_paused"):

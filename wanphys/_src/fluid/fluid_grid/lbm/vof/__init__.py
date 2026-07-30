@@ -4,7 +4,7 @@
 """Volume-of-fluid state, geometry, and visualization building blocks."""
 
 from .advection import VofMassTransport, VofMassTransportResult
-from .contracts import VofCellType, VofMassScheme
+from .contracts import VofCellType, VofMassScheme, VofRuntimeProfile
 from .diagnostics import (
     VofDiagnostics,
     collect_vof_diagnostics,
@@ -21,6 +21,7 @@ from .kinetic_init import (
     VofKineticInitializationResult,
     VofKineticInitializer,
 )
+from .runtime import VofDeviceDiagnostics
 from .state import DebugMockScToVofState, VofGridState
 from .surface import VofSurfaceBoundary
 from .transition import VofTopologyTransition, VofTransitionResult
@@ -33,12 +34,14 @@ __all__ = [
     "InterfaceVisualData",
     "VofCellType",
     "VofDiagnostics",
+    "VofDeviceDiagnostics",
     "VofGridState",
     "VofInterfaceVisualizer",
     "VofInterfaceGeometry",
     "VofKineticInitializationResult",
     "VofKineticInitializer",
     "VofMassScheme",
+    "VofRuntimeProfile",
     "VofMassTransport",
     "VofMassTransportResult",
     "VofSurfaceBoundary",

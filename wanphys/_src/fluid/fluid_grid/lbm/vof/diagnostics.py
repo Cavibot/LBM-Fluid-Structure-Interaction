@@ -31,6 +31,12 @@ class VofDiagnostics:
     interface_cell_count: int
     epoch: int
     geometry_epoch: int
+    pending_excess_total: float = 0.0
+    max_abs_pending_excess: float = 0.0
+    invalid_pending_excess_count: int = 0
+    illegal_cell_type_count: int = 0
+    out_of_range_phi_count: int = 0
+    invalid_surface_pressure_count: int = 0
 
 
 def _direction_pairs(
@@ -71,6 +77,10 @@ def collect_vof_diagnostics(
         raise ValueError("VOF diagnostics require authoritative state.vof")
     mass = np.asarray(state.vof.mass.numpy()).copy()
     phi = np.asarray(state.vof.phi.numpy()).copy()
+    pending_excess = np.asarray(state.vof.pending_excess.numpy()).copy()
+    pending_receiver_count = np.asarray(
+        state.vof.pending_receiver_count.numpy()
+    ).copy()
     cell_type = np.asarray(state.vof.cell_type.numpy()).copy()
     density = np.asarray(state.density.numpy()).copy()
     velocity = tuple(
@@ -81,8 +91,13 @@ def collect_vof_diagnostics(
     normal = np.asarray(state.vof.normal.numpy()).copy()
     offset = np.asarray(state.vof.plic_offset.numpy()).copy()
 
-    total_mass = float(np.sum(mass, dtype=np.float64))
-    reference_mass = total_mass if initial_mass is None else float(initial_mass)
+    pending_total = float(np.sum(pending_excess, dtype=np.float64))
+    total_mass = float(np.sum(mass, dtype=np.float64)) + pending_total
+    reference_mass = (
+        float(state.vof.reference_mass)
+        if initial_mass is None
+        else float(initial_mass)
+    )
     denominator = max(abs(reference_mass), 1.0e-30)
     relative_error = abs(total_mass - reference_mass) / denominator
 
@@ -107,7 +122,16 @@ def collect_vof_diagnostics(
             )
         )
 
-    finite_fields = (mass, phi, density, curvature, normal, offset, *velocity)
+    finite_fields = (
+        mass,
+        phi,
+        pending_excess,
+        density,
+        curvature,
+        normal,
+        offset,
+        *velocity,
+    )
     non_finite = sum(
         int(values.size - np.count_nonzero(np.isfinite(values)))
         for values in finite_fields
@@ -117,6 +141,30 @@ def collect_vof_diagnostics(
         np.count_nonzero((~np.isfinite(density) | (density <= 0.0)) & active)
     )
     speed = np.sqrt(sum(component * component for component in velocity))
+    invalid_pending = int(
+        np.count_nonzero(
+            (pending_receiver_count > 18)
+            | (
+                (np.abs(pending_excess) > 2.0e-6)
+                & (pending_receiver_count == 0)
+            )
+        )
+    )
+    legal_type = np.isin(cell_type, np.array([0, 1, 2], dtype=np.uint8))
+    illegal_type_count = int(cell_type.size - np.count_nonzero(legal_type))
+    out_of_range_phi = int(
+        np.count_nonzero((phi < -3.0e-6) | (phi > 1.0 + 3.0e-6))
+    )
+    interface = cell_type == 1
+    rho_g = 3.0 * (
+        float(state.model.vof_atmosphere_pressure)
+        - 2.0
+        * float(state.model.vof_surface_tension)
+        * curvature[interface]
+    )
+    invalid_surface_pressure = int(
+        np.count_nonzero((~np.isfinite(rho_g)) | (rho_g <= 0.0))
+    )
 
     return VofDiagnostics(
         total_mass=total_mass,
@@ -132,6 +180,12 @@ def collect_vof_diagnostics(
         interface_cell_count=int(np.count_nonzero(cell_type == 1)),
         epoch=int(state.vof.epoch),
         geometry_epoch=int(state.vof.geometry_epoch),
+        pending_excess_total=pending_total,
+        max_abs_pending_excess=float(np.max(np.abs(pending_excess))),
+        invalid_pending_excess_count=invalid_pending,
+        illegal_cell_type_count=illegal_type_count,
+        out_of_range_phi_count=out_of_range_phi,
+        invalid_surface_pressure_count=invalid_surface_pressure,
     )
 
 
@@ -154,7 +208,18 @@ def validate_vof_diagnostics(
     if diagnostics.phi_min < -phi_tolerance or diagnostics.phi_max > (
         1.0 + phi_tolerance
     ):
-        raise ValueError("P7 committed phi lies outside [0, 1]")
+        raise ValueError(
+            "P7 committed phi lies outside [0, 1]: "
+            f"[{diagnostics.phi_min}, {diagnostics.phi_max}]"
+        )
+    if diagnostics.invalid_pending_excess_count != 0:
+        raise ValueError("FIX1 pending excess routing is invalid")
+    if diagnostics.illegal_cell_type_count != 0:
+        raise ValueError("FIX1 committed cell_type contains an unknown value")
+    if diagnostics.out_of_range_phi_count != 0:
+        raise ValueError("FIX1 committed phi has out-of-range cells")
+    if diagnostics.invalid_surface_pressure_count != 0:
+        raise ValueError("FIX1 interface surface pressure is invalid")
     if diagnostics.invalid_liquid_gas_adjacency_count != 0:
         raise ValueError("P7 committed topology contains LIQUID-GAS adjacency")
     if diagnostics.non_finite_count != 0:

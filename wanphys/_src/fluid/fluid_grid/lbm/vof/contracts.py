@@ -20,6 +20,15 @@ class VofMassScheme(str, Enum):
     FSLBM_NEIGHBOR = "fslbm_neighbor"
 
 
+class VofRuntimeProfile(str, Enum):
+    """Validation and synchronization policy for authoritative VOF steps."""
+
+    STRICT = "strict"
+    SAMPLED = "sampled"
+    DEVICE = "device"
+    OFF = "off"
+
+
 def normalize_vof_mass_scheme(value: str | VofMassScheme) -> VofMassScheme:
     """Return the sole P2 scheme or reject an unaudited alternative."""
 
@@ -34,8 +43,26 @@ def normalize_vof_mass_scheme(value: str | VofMassScheme) -> VofMassScheme:
         ) from exc
 
 
+def normalize_vof_runtime_profile(
+    value: str | VofRuntimeProfile,
+) -> VofRuntimeProfile:
+    """Return a frozen VOF runtime profile or reject an unknown policy."""
+
+    if isinstance(value, VofRuntimeProfile):
+        return value
+    try:
+        return VofRuntimeProfile(str(value).lower())
+    except ValueError as exc:
+        expected = ", ".join(repr(item.value) for item in VofRuntimeProfile)
+        raise ValueError(
+            f"Unknown VOF runtime profile {value!r}; expected one of {expected}"
+        ) from exc
+
+
 __all__ = [
     "VofCellType",
     "VofMassScheme",
+    "VofRuntimeProfile",
     "normalize_vof_mass_scheme",
+    "normalize_vof_runtime_profile",
 ]

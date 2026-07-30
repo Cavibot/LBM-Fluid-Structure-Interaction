@@ -21,7 +21,10 @@ from .contracts import (
     resolve_force_model,
     validate_capability,
 )
-from .vof.contracts import normalize_vof_mass_scheme
+from .vof.contracts import (
+    normalize_vof_mass_scheme,
+    normalize_vof_runtime_profile,
+)
 
 
 @dataclass
@@ -69,6 +72,12 @@ class LbmModel(FluidGridModelBase):
 
     vof_transition_epsilon: float = 1.0e-4
     """P4 interface conversion threshold from the free-surface paper."""
+
+    vof_runtime_profile: str = "strict"
+    """VOF validation policy: strict, sampled, device, or off."""
+
+    vof_validation_interval: int = 60
+    """Full-validation cadence for sampled VOF runtime, in lattice steps."""
 
     force_model: str = field(init=False, default=ForceModel.NONE.value)
     """Normalized internal force-pipeline combination; not caller configuration."""
@@ -390,6 +399,18 @@ class LbmModel(FluidGridModelBase):
         self.vof_mass_scheme = normalize_vof_mass_scheme(
             self.vof_mass_scheme
         ).value
+        self.vof_runtime_profile = normalize_vof_runtime_profile(
+            self.vof_runtime_profile
+        ).value
+        if isinstance(self.vof_validation_interval, bool) or not isinstance(
+            self.vof_validation_interval,
+            int,
+        ):
+            raise TypeError("vof_validation_interval must be an integer")
+        if not 30 <= self.vof_validation_interval <= 100:
+            raise ValueError(
+                "vof_validation_interval must lie in [30, 100]"
+            )
         if self.collision is not None:
             canonical_collision, used_alias = normalize_collision(self.collision)
             if used_alias:

@@ -837,6 +837,7 @@ BLOCKED
 | P6 | CPU_ACCEPTED | authoritative normal/PLIC/curvature、epoch 与 Eq.12 已冻结 |
 | P7 | CPU_ACCEPTED | FullF/HOME、综合 ledger 与条件 CUDA 门禁已冻结；CUDA 当前不可用 |
 | P8 | CPU_ACCEPTED | authoritative dam-break visual/headless、CSV、FullF/HOME、near-axis PLIC supersession 与启动入口已冻结 |
+| FIX1 | CPU_ACCEPTED | bounded pending-excess、strict/sampled/device/off、compact reduction 与 interactive substeps 已冻结 |
 
 只有状态达到 `CPU_ACCEPTED` 才能进入下一物理阶段；合并到声称支持 CUDA 的主路径前，
 还必须达到 `CUDA_ACCEPTED`。
@@ -910,7 +911,41 @@ CPU CLI plus explicit CUDA availability guard
 near-axis PLIC cancellation fixed by an analytical reduced inverse
 ```
 
-P0-P8 的限定范围已经完整达到 `CPU_ACCEPTED`。当前 Warp 构建
+P0-P8 与 FIX1 修复范围已经完整达到 `CPU_ACCEPTED`。当前 Warp 构建
 `wp.is_cuda_available()==False`，因此设备状态仍是 `CUDA_NOT_ACCEPTED`。后续工作应先
 作为新的 Phase 重新冻结范围与门禁；不能由本路线图推导出 solid、bubble、foam、
 open boundary 或 CUDA 已受支持。
+
+## 19. FIX1 冻结入口
+
+P4/P7 的 equal-share committed-phi 缝隙由 FIX1 supersede：
+
+```text
+old:
+  clamp sender
+  same-step gather to receivers
+  receiver may overshoot
+  P7 rejects committed phi
+
+FIX1:
+  clamp resident mass and bounded phi
+  persist signed pending_excess + receiver_count
+  next P2 step gathers pending exactly once
+  conserve sum(resident mass + pending excess)
+```
+
+运行时同步策略：
+
+```text
+strict  every-step full host acceptance
+sampled full host acceptance every 30-100 steps
+device  device reduction and one compact diagnostics readback
+off     transaction/epoch gates only
+```
+
+P8 `auto` 在 interactive viewer 使用 `device` 和 4 simulation substeps/frame；
+null/headless 使用 `strict`。冻结证据见：
+
+- [30-fix1-engineering-plan.md](30-fix1-engineering-plan.md)；
+- [31-fix1-completion-summary.md](31-fix1-completion-summary.md)；
+- [32-fix1-change-architecture.md](32-fix1-change-architecture.md)。

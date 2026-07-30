@@ -123,7 +123,7 @@ def _assert_cross_encoding(
         first.vof.cell_type.numpy(),
         second.vof.cell_type.numpy(),
     )
-    for name in ("mass", "phi", "curvature"):
+    for name in ("mass", "phi", "pending_excess", "curvature"):
         np.testing.assert_allclose(
             getattr(first.vof, name).numpy(),
             getattr(second.vof, name).numpy(),
@@ -257,6 +257,11 @@ class TestVofP7LogicalPopulationAndHome(unittest.TestCase):
             phi[center] = np.float32(1.2)
             state.vof.mass.assign(mass)
             state.vof.phi.assign(phi)
+            reference_mass = float(np.sum(mass, dtype=np.float64))
+            state.vof.reference_mass = reference_mass
+            assert domain._state_out is not None
+            assert domain._state_out.vof is not None
+            domain._state_out.vof.reference_mass = reference_mass
             domain.solver._vof_interface_geometry.compute(state.vof)
             domain.step(1.0)
 
@@ -483,7 +488,7 @@ class TestVofP7IntegratedAcceptance(unittest.TestCase):
                 cpu.state.vof.cell_type.numpy(),
                 cuda.state.vof.cell_type.numpy(),
             )
-            for name in ("mass", "phi", "curvature"):
+            for name in ("mass", "phi", "pending_excess", "curvature"):
                 np.testing.assert_allclose(
                     getattr(cpu.state.vof, name).numpy(),
                     getattr(cuda.state.vof, name).numpy(),

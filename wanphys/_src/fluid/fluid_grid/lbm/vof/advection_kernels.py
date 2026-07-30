@@ -32,9 +32,12 @@ def advect_vof_mass_fullf_fixed_topology_kernel(
     mass_n: wp.array3d(dtype=float),
     phi_n: wp.array3d(dtype=float),
     cell_type_n: wp.array3d(dtype=wp.uint8),
+    pending_excess_n: wp.array3d(dtype=float),
+    pending_receiver_count_n: wp.array3d(dtype=wp.uint8),
     mass_tmp: wp.array3d(dtype=float),
     phi_tmp: wp.array3d(dtype=float),
     mass_delta: wp.array3d(dtype=float),
+    received_excess: wp.array3d(dtype=float),
     periodic_x: int,
     periodic_y: int,
     periodic_z: int,
@@ -53,7 +56,11 @@ def advect_vof_mass_fullf_fixed_topology_kernel(
 
     i, j, k = wp.tid()
     center_type = cell_type_n[i, j, k]
-    center_mass = mass_n[i, j, k]
+    delayed = float(0.0)
+    if pending_receiver_count_n[i, j, k] == wp.uint8(0):
+        # Reference-compatible zero-receiver fallback: retain sub-tolerance
+        # roundoff locally so it is retried rather than silently discarded.
+        delayed = pending_excess_n[i, j, k]
     delta = float(0.0)
     center_index = i * ny * nz + j * nz + k
 
@@ -82,6 +89,13 @@ def advect_vof_mass_fullf_fixed_topology_kernel(
 
             if not outside:
                 source_type = cell_type_n[si, sj, sk]
+                if center_type == wp.uint8(1):
+                    receiver_count = pending_receiver_count_n[si, sj, sk]
+                    if receiver_count > wp.uint8(0):
+                        delayed += (
+                            pending_excess_n[si, sj, sk]
+                            / float(receiver_count)
+                        )
                 weight = float(0.0)
                 if center_type == wp.uint8(2):
                     if source_type != wp.uint8(0):
@@ -101,8 +115,9 @@ def advect_vof_mass_fullf_fixed_topology_kernel(
                     ]
                     delta += weight * (incoming - outgoing)
 
-    updated_mass = center_mass + delta
+    updated_mass = mass_n[i, j, k] + delayed + delta
     mass_delta[i, j, k] = delta
+    received_excess[i, j, k] = delayed
     mass_tmp[i, j, k] = updated_mass
     phi_tmp[i, j, k] = updated_mass / density_n[i, j, k]
 
@@ -114,6 +129,8 @@ def finalize_fixed_topology_vof_kernel(
     cell_type_n: wp.array3d(dtype=wp.uint8),
     mass_out: wp.array3d(dtype=float),
     phi_out: wp.array3d(dtype=float),
+    pending_excess_out: wp.array3d(dtype=float),
+    pending_receiver_count_out: wp.array3d(dtype=wp.uint8),
     cell_type_out: wp.array3d(dtype=wp.uint8),
 ) -> None:
     """Commit P2 mass against P3 output density without changing topology."""
@@ -127,6 +144,8 @@ def finalize_fixed_topology_vof_kernel(
         mass = mass_tmp[i, j, k]
         mass_out[i, j, k] = mass
         phi_out[i, j, k] = mass / density_out[i, j, k]
+    pending_excess_out[i, j, k] = 0.0
+    pending_receiver_count_out[i, j, k] = wp.uint8(0)
     cell_type_out[i, j, k] = kind
 
 

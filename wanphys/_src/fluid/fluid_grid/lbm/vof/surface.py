@@ -78,12 +78,15 @@ class VofSurfaceBoundary:
         state_in: LbmStateBase,
         logical_f_post_n: wp.array,
         f_star: wp.array,
+        *,
+        validate: bool = True,
     ) -> None:
         """Complete Eq. (11) from an encoding-independent logical population."""
 
         if state_in.vof is None:
             raise ValueError("P7 surface completion requires state.vof storage")
-        self.validate_pressure_state(state_in)
+        if validate:
+            self.validate_pressure_state(state_in)
         nx, ny, nz = self.shape
         px, py, pz = self.periodic
         wp.launch(

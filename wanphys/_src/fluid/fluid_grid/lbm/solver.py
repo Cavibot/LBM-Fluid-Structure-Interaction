@@ -19,7 +19,13 @@ from .contracts import CollisionContext, CollisionSpace, ForceModel, collision_c
 from .model import LbmModel
 from .state import FullFLbmState, HomeLbmState, LbmStateBase
 from .vof.advection import VofMassTransport, VofMassTransportResult
+from .vof.contracts import VofRuntimeProfile
 from .vof.debug import DebugMockScToVofObserver
+from .vof.diagnostics import (
+    VofDiagnostics,
+    collect_vof_diagnostics,
+    validate_vof_diagnostics,
+)
 from .vof.geometry import VofInterfaceGeometry
 from .vof.initialization import (
     initialize_vof_fields,
@@ -27,6 +33,7 @@ from .vof.initialization import (
     validate_no_solid_cells,
 )
 from .vof.kinetic_init import VofKineticInitializer
+from .vof.runtime import VofDeviceDiagnostics
 from .vof.surface import VofSurfaceBoundary
 from .vof.transition import VofTopologyTransition
 
@@ -172,6 +179,22 @@ class LbmSolver(FluidGridSolverBase):
                 dtype=float,
                 device=self.device,
             )
+        self._vof_runtime_profile = VofRuntimeProfile(
+            model.vof_runtime_profile
+        )
+        self._vof_device_diagnostics = None
+        if (
+            model.interface_model == "vof"
+            and self._vof_runtime_profile is VofRuntimeProfile.DEVICE
+        ):
+            self._vof_device_diagnostics = VofDeviceDiagnostics(
+                (self.nx, self.ny, self.nz),
+                self.device,
+                model._periodic_ints,
+                atmosphere_pressure=float(model.vof_atmosphere_pressure),
+                surface_tension=float(model.vof_surface_tension),
+            )
+        self._last_vof_diagnostics: VofDiagnostics | None = None
 
         self._collision_name = model.resolved_collision
         self._collision_contract = collision_contract(model.encoding, self._collision_name)
@@ -448,6 +471,11 @@ class LbmSolver(FluidGridSolverBase):
         is_vof = self.model.interface_model == "vof"
         if is_vof and type(state_in) is not type(state_out):
             raise TypeError("P7 VOF step requires matching persistent encodings")
+        full_vof_validation = False
+        if is_vof:
+            self._validate_vof_transaction_source(state_in, state_out)
+            full_vof_validation = self._vof_full_validation_required(state_in)
+            self._last_vof_diagnostics = None
         logical_f_post = None
         if is_vof:
             if self._vof_mass_transport is None:
@@ -459,7 +487,11 @@ class LbmSolver(FluidGridSolverBase):
             if self._vof_kinetic_initializer is None:
                 raise RuntimeError("VOF kinetic initializer was not allocated")
             logical_f_post = self._vof_postcollision_populations(state_in)
-            self._vof_mass_transport.compute(state_in, logical_f_post)
+            self._vof_mass_transport.compute(
+                state_in,
+                logical_f_post,
+                validate=full_vof_validation,
+            )
 
         del contacts, control, dt
         self._copy_boundary_fields(state_in, state_out)
@@ -474,6 +506,7 @@ class LbmSolver(FluidGridSolverBase):
                 state_in,
                 logical_f_post,
                 self._f_star,
+                validate=full_vof_validation,
             )
         if self.model.use_cut_link:
             if isinstance(state_in, FullFLbmState):
@@ -698,6 +731,7 @@ class LbmSolver(FluidGridSolverBase):
                 self._vof_mass_transport.result.mass_tmp,
                 state_out.density,
                 state_in.vof.cell_type,
+                validate=full_vof_validation,
             )
             initializer_kwargs = {
                 "gravity": (
@@ -710,6 +744,7 @@ class LbmSolver(FluidGridSolverBase):
                     self.model.enforce_population_positivity
                 ),
                 "population_floor": float(self.model.population_floor),
+                "validate": full_vof_validation,
             }
             if isinstance(state_out, FullFLbmState):
                 self._vof_kinetic_initializer.initialize_fullf(
@@ -733,9 +768,108 @@ class LbmSolver(FluidGridSolverBase):
                 state_out.vof,
                 source_epoch=state_in.vof.epoch,
             )
-            self._vof_interface_geometry.compute(state_out.vof)
+            state_out.vof.reference_mass = state_in.vof.reference_mass
+            self._vof_interface_geometry.compute(
+                state_out.vof,
+                validate=full_vof_validation,
+            )
             self._write_mac_velocities(state_out)
+            self._validate_vof_transaction_target(state_in, state_out)
+            if full_vof_validation:
+                diagnostics = collect_vof_diagnostics(
+                    state_out,
+                    initial_mass=state_in.vof.reference_mass,
+                    periodic=tuple(
+                        bool(value) for value in self.model._periodic_ints
+                    ),
+                )
+                validate_vof_diagnostics(
+                    diagnostics,
+                    max_lattice_speed=float(self.model.max_lattice_speed),
+                )
+                self._last_vof_diagnostics = diagnostics
+            elif self._vof_runtime_profile is VofRuntimeProfile.DEVICE:
+                if self._vof_device_diagnostics is None:
+                    raise RuntimeError(
+                        "VOF device runtime diagnostics were not allocated"
+                    )
+                diagnostics = self._vof_device_diagnostics.collect(state_out)
+                validate_vof_diagnostics(
+                    diagnostics,
+                    max_lattice_speed=float(self.model.max_lattice_speed),
+                )
+                self._last_vof_diagnostics = diagnostics
         self.update_debug_mock_sc_to_vof(state_out)
+
+    @property
+    def last_vof_diagnostics(self) -> VofDiagnostics | None:
+        """Return the latest strict/sampled/device report, if one was emitted."""
+
+        return self._last_vof_diagnostics
+
+    def _vof_full_validation_required(
+        self,
+        state_in: LbmStateBase,
+    ) -> bool:
+        """Resolve the current step's host-validation policy."""
+
+        if self._vof_runtime_profile is VofRuntimeProfile.STRICT:
+            return True
+        if self._vof_runtime_profile is not VofRuntimeProfile.SAMPLED:
+            return False
+        if state_in.vof is None:
+            raise ValueError("sampled VOF validation requires state.vof")
+        next_epoch = int(state_in.vof.epoch) + 1
+        return next_epoch % int(self.model.vof_validation_interval) == 0
+
+    @staticmethod
+    def _validate_vof_transaction_source(
+        state_in: LbmStateBase,
+        state_out: LbmStateBase,
+    ) -> None:
+        """Apply the profile-independent pre-write buffer and epoch gates."""
+
+        if state_in is state_out:
+            raise ValueError("VOF transaction requires distinct state buffers")
+        if state_in.vof is None or state_out.vof is None:
+            raise ValueError("VOF transaction requires two authoritative states")
+        if state_in.vof.epoch < 0:
+            raise ValueError("VOF transaction source must be initialized")
+        if state_in.vof.geometry_epoch != state_in.vof.epoch:
+            raise ValueError("VOF transaction source geometry is stale")
+        if not np.isfinite(state_in.vof.reference_mass):
+            raise ValueError("VOF reference mass must be finite")
+        if state_out.vof.reference_mass != state_in.vof.reference_mass:
+            raise ValueError("VOF transaction buffers disagree on reference mass")
+        for name in (
+            "mass",
+            "phi",
+            "pending_excess",
+            "pending_receiver_count",
+            "cell_type",
+            "normal",
+            "plic_offset",
+            "curvature",
+        ):
+            source = getattr(state_in.vof, name)
+            target = getattr(state_out.vof, name)
+            if source is target or int(source.ptr) == int(target.ptr):
+                raise ValueError(f"VOF transaction buffer {name} aliases")
+
+    @staticmethod
+    def _validate_vof_transaction_target(
+        state_in: LbmStateBase,
+        state_out: LbmStateBase,
+    ) -> None:
+        """Apply the profile-independent pre-swap epoch gates."""
+
+        assert state_in.vof is not None and state_out.vof is not None
+        if state_out.vof.epoch != state_in.vof.epoch + 1:
+            raise ValueError("VOF transaction target epoch did not advance once")
+        if state_out.vof.geometry_epoch != state_out.vof.epoch:
+            raise ValueError("VOF transaction target geometry is stale")
+        if state_out.vof.reference_mass != state_in.vof.reference_mass:
+            raise ValueError("VOF transaction changed reference mass")
 
     def _copy_boundary_fields(self, state_in: LbmStateBase, state_out: LbmStateBase) -> None:
         for name in ("solid_phi", "solid_body_id", "vel_solid_u", "vel_solid_v", "vel_solid_w"):

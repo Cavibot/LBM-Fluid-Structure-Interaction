@@ -26,11 +26,21 @@ def validate_empty_vof_state(vof: VofGridState) -> None:
 
     mass = np.asarray(vof.mass.numpy())
     phi = np.asarray(vof.phi.numpy())
+    pending_excess = np.asarray(vof.pending_excess.numpy())
+    pending_receiver_count = np.asarray(
+        vof.pending_receiver_count.numpy()
+    )
     cell_type = np.asarray(vof.cell_type.numpy())
     if not np.all(np.isfinite(mass)) or not np.all(mass == 0.0):
         raise ValueError("empty VOF mass must be finite and exactly zero")
     if not np.all(np.isfinite(phi)) or not np.all(phi == 0.0):
         raise ValueError("empty VOF phi must be finite and exactly zero")
+    if not np.all(np.isfinite(pending_excess)) or not np.all(
+        pending_excess == 0.0
+    ):
+        raise ValueError("empty VOF pending excess must be finite and zero")
+    if not np.all(pending_receiver_count == 0):
+        raise ValueError("empty VOF pending receiver count must be zero")
     if not np.all(cell_type == int(VofCellType.GAS)):
         raise ValueError("empty VOF cell_type must be GAS at every cell")
     if not np.all(np.asarray(vof.normal.numpy()) == 0.0):
@@ -41,6 +51,8 @@ def validate_empty_vof_state(vof: VofGridState) -> None:
         raise ValueError("empty VOF curvature must be exactly zero")
     if vof.epoch != -1 or vof.geometry_epoch != -1:
         raise ValueError("empty VOF epochs must both equal -1")
+    if vof.reference_mass != 0.0:
+        raise ValueError("empty VOF reference mass must equal zero")
 
 
 def validate_initialized_vof_state(
@@ -60,12 +72,18 @@ def validate_initialized_vof_state(
     density = np.asarray(state.density.numpy())
     mass = np.asarray(state.vof.mass.numpy())
     phi = np.asarray(state.vof.phi.numpy())
+    pending_excess = np.asarray(state.vof.pending_excess.numpy())
+    pending_receiver_count = np.asarray(
+        state.vof.pending_receiver_count.numpy()
+    )
     cell_type = np.asarray(state.vof.cell_type.numpy())
     expected_shape = tuple(int(value) for value in state.res)
     for name, values in (
         ("density", density),
         ("mass", mass),
         ("phi", phi),
+        ("pending_excess", pending_excess),
+        ("pending_receiver_count", pending_receiver_count),
         ("cell_type", cell_type),
     ):
         if values.shape != expected_shape:
@@ -77,6 +95,12 @@ def validate_initialized_vof_state(
         raise ValueError("initialized VOF mass must be finite and non-negative")
     if not np.all(np.isfinite(phi)) or np.any(phi < 0.0) or np.any(phi > 1.0):
         raise ValueError("initialized VOF phi must be finite and lie in [0, 1]")
+    if not np.all(np.isfinite(pending_excess)) or np.any(
+        pending_excess != 0.0
+    ):
+        raise ValueError("initialized VOF pending excess must be finite and zero")
+    if np.any(pending_receiver_count != 0):
+        raise ValueError("initialized VOF pending receiver count must be zero")
 
     legal_types = np.array(
         [
@@ -100,6 +124,14 @@ def validate_initialized_vof_state(
         raise ValueError("LIQUID cells must have phi=1")
     if not np.allclose(mass, density * phi, atol=atol, rtol=rtol):
         raise ValueError("initialized VOF must satisfy mass ~= density * phi")
+    total_mass = float(np.sum(mass, dtype=np.float64))
+    if not np.isclose(
+        state.vof.reference_mass,
+        total_mass,
+        atol=atol,
+        rtol=rtol,
+    ):
+        raise ValueError("initialized VOF reference mass does not match mass")
 
     validate_initial_topology(cell_type, periodic=periodic)
     from .geometry import validate_authoritative_geometry
@@ -118,6 +150,8 @@ def validate_vof_buffer_pair(
     for name in (
         "mass",
         "phi",
+        "pending_excess",
+        "pending_receiver_count",
         "cell_type",
         "normal",
         "plic_offset",
@@ -133,6 +167,8 @@ def validate_vof_buffer_pair(
         raise ValueError("VOF buffer epochs differ")
     if state_in.vof.geometry_epoch != state_out.vof.geometry_epoch:
         raise ValueError("VOF buffer geometry epochs differ")
+    if state_in.vof.reference_mass != state_out.vof.reference_mass:
+        raise ValueError("VOF buffer reference masses differ")
 
 
 def validate_p3_fixed_topology_state(

@@ -226,6 +226,11 @@ def initialize_vof_fields(
         ],
         device=target.device,
     )
+    target.pending_excess.zero_()
+    target.pending_receiver_count.zero_()
+    target.reference_mass = float(
+        np.sum(target.mass.numpy(), dtype=np.float64)
+    )
 
 
 __all__ = [

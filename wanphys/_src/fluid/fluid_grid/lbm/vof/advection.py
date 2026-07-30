@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
+from ..constants import CX, CY, CZ
 from .advection_kernels import (
     advect_vof_mass_fullf_fixed_topology_kernel,
     finalize_fixed_topology_vof_kernel,
@@ -32,6 +33,7 @@ class VofMassTransportResult:
     mass_tmp: wp.array
     phi_tmp: wp.array
     mass_delta: wp.array
+    received_excess: wp.array
 
 
 def validate_p2_transport_input(
@@ -64,11 +66,49 @@ def validate_p2_transport_input(
 
     mass = np.asarray(state.vof.mass.numpy())
     phi = np.asarray(state.vof.phi.numpy())
+    pending_excess = np.asarray(state.vof.pending_excess.numpy())
+    pending_receiver_count = np.asarray(
+        state.vof.pending_receiver_count.numpy()
+    )
     cell_type = np.asarray(state.vof.cell_type.numpy())
     if not np.all(np.isfinite(mass)):
         raise ValueError("P2 input mass must be finite")
     if not np.all(np.isfinite(phi)):
         raise ValueError("P2 input phi must be finite")
+    if not np.all(np.isfinite(pending_excess)):
+        raise ValueError("P2 input pending excess must be finite")
+    if np.any(pending_receiver_count > 18):
+        raise ValueError("P2 pending receiver count exceeds D3Q19 degree")
+    unresolved = (
+        (np.abs(pending_excess) > 2.0e-6)
+        & (pending_receiver_count == 0)
+    )
+    if np.any(unresolved):
+        raise ValueError("P2 material pending excess has no receiver")
+    shape = tuple(int(value) for value in state.res)
+    for raw_cell in np.argwhere(np.abs(pending_excess) > 2.0e-6):
+        cell = tuple(int(value) for value in raw_cell)
+        actual_count = 0
+        for q in range(1, 19):
+            neighbor = [
+                cell[0] - CX[q],
+                cell[1] - CY[q],
+                cell[2] - CZ[q],
+            ]
+            outside = False
+            for axis in range(3):
+                if 0 <= neighbor[axis] < shape[axis]:
+                    continue
+                if not periodic[axis]:
+                    outside = True
+                    break
+                neighbor[axis] %= shape[axis]
+            if not outside and cell_type[tuple(neighbor)] == 1:
+                actual_count += 1
+        if actual_count != int(pending_receiver_count[cell]):
+            raise ValueError(
+                "P2 pending receiver count does not match current topology"
+            )
     legal = np.isin(cell_type, np.array([0, 1, 2], dtype=np.uint8))
     if not np.all(legal):
         raise ValueError("P2 input cell_type contains an unknown value")
@@ -106,10 +146,16 @@ class VofMassTransport:
         self._mass_tmp = wp.zeros(self.shape, dtype=float, device=device)
         self._phi_tmp = wp.zeros(self.shape, dtype=float, device=device)
         self._mass_delta = wp.zeros(self.shape, dtype=float, device=device)
+        self._received_excess = wp.zeros(
+            self.shape,
+            dtype=float,
+            device=device,
+        )
         self.result = VofMassTransportResult(
             mass_tmp=self._mass_tmp,
             phi_tmp=self._phi_tmp,
             mass_delta=self._mass_delta,
+            received_excess=self._received_excess,
         )
 
     def compute_fullf(
@@ -159,9 +205,12 @@ class VofMassTransport:
                 state.vof.mass,
                 state.vof.phi,
                 state.vof.cell_type,
+                state.vof.pending_excess,
+                state.vof.pending_receiver_count,
                 self._mass_tmp,
                 self._phi_tmp,
                 self._mass_delta,
+                self._received_excess,
                 px,
                 py,
                 pz,
@@ -192,10 +241,13 @@ class VofMassTransport:
                 state_in.vof.cell_type,
                 state_out.vof.mass,
                 state_out.vof.phi,
+                state_out.vof.pending_excess,
+                state_out.vof.pending_receiver_count,
                 state_out.vof.cell_type,
             ],
             device=self.device,
         )
+        state_out.vof.reference_mass = state_in.vof.reference_mass
 
 
 __all__ = [

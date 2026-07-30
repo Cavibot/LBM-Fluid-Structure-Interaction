@@ -253,6 +253,67 @@ class TestVofP2LinkWeights(unittest.TestCase):
 
 
 class TestVofP2ConservationAndOracle(unittest.TestCase):
+    def test_pending_excess_is_gathered_once_by_interface_neighbors(
+        self,
+    ) -> None:
+        shape = (3, 3, 3)
+        phi = np.full(shape, 0.5, dtype=np.float32)
+        domain = _domain_from_phi(phi)
+        state = domain.state
+        assert state.vof is not None
+        source = (1, 1, 1)
+        pending = np.zeros(shape, dtype=np.float32)
+        pending[source] = np.float32(0.18)
+        receiver_count = np.zeros(shape, dtype=np.uint8)
+        receiver_count[source] = np.uint8(18)
+        state.vof.pending_excess.assign(pending)
+        state.vof.pending_receiver_count.assign(receiver_count)
+
+        result = domain.solver.compute_vof_mass_transport(state)
+        received = result.received_excess.numpy()
+
+        self.assertAlmostEqual(
+            float(np.sum(received, dtype=np.float64)),
+            0.18,
+            places=6,
+        )
+        self.assertEqual(int(np.count_nonzero(received)), 18)
+        self.assertAlmostEqual(
+            float(np.sum(result.mass_tmp.numpy(), dtype=np.float64)),
+            float(
+                np.sum(state.vof.mass.numpy(), dtype=np.float64)
+                + np.sum(pending, dtype=np.float64)
+            ),
+            places=6,
+        )
+
+    def test_subtolerance_zero_receiver_pending_is_retained_locally(
+        self,
+    ) -> None:
+        shape = (3, 3, 3)
+        domain = _domain_from_phi(
+            np.full(shape, 0.5, dtype=np.float32)
+        )
+        state = domain.state
+        assert state.vof is not None
+        center = (1, 1, 1)
+        pending = np.zeros(shape, dtype=np.float32)
+        pending[center] = np.float32(1.0e-7)
+        state.vof.pending_excess.assign(pending)
+
+        result = domain.solver.compute_vof_mass_transport(state)
+
+        self.assertAlmostEqual(
+            float(result.received_excess.numpy()[center]),
+            1.0e-7,
+            places=12,
+        )
+        self.assertAlmostEqual(
+            float(np.sum(result.received_excess.numpy(), dtype=np.float64)),
+            float(np.sum(pending, dtype=np.float64)),
+            places=12,
+        )
+
     def test_periodic_random_field_matches_oracle_and_conserves_mass(self) -> None:
         shape = (4, 3, 3)
         periodic = (True, True, True)

@@ -264,6 +264,7 @@ class VofKineticInitializer:
         max_lattice_speed: float,
         enforce_population_positivity: bool,
         population_floor: float,
+        validate: bool = True,
     ) -> VofKineticInitializationResult:
         """Compute and validate donor averages without changing kinetic state."""
 
@@ -282,16 +283,18 @@ class VofKineticInitializer:
                 raise ValueError(
                     f"P5 {name} shape {array.shape} does not match {self.shape}"
                 )
-        old_type_host = np.asarray(cell_type_n.numpy())
-        final_type_host = np.asarray(transition.final_type.numpy())
-        new_interface_host = np.asarray(transition.new_interface.numpy())
-        expected_new = (
-            (old_type_host == 0) & (final_type_host == 1)
-        ).astype(np.uint8)
-        if not np.array_equal(new_interface_host, expected_new):
-            raise ValueError(
-                "P5 new_interface mask must equal old GAS -> final INTERFACE"
-            )
+        new_interface_host = None
+        if validate:
+            old_type_host = np.asarray(cell_type_n.numpy())
+            final_type_host = np.asarray(transition.final_type.numpy())
+            new_interface_host = np.asarray(transition.new_interface.numpy())
+            expected_new = (
+                (old_type_host == 0) & (final_type_host == 1)
+            ).astype(np.uint8)
+            if not np.array_equal(new_interface_host, expected_new):
+                raise ValueError(
+                    "P5 new_interface mask must equal old GAS -> final INTERFACE"
+                )
         nx, ny, nz = self.shape
         px, py, pz = self.periodic
         wp.launch(
@@ -319,15 +322,17 @@ class VofKineticInitializer:
             ],
             device=self.device,
         )
-        validate_p5_prepared_kinetic(
-            new_interface_host,
-            self.result,
-            max_lattice_speed=float(max_lattice_speed),
-            enforce_population_positivity=bool(
-                enforce_population_positivity
-            ),
-            population_floor=float(population_floor),
-        )
+        if validate:
+            assert new_interface_host is not None
+            validate_p5_prepared_kinetic(
+                new_interface_host,
+                self.result,
+                max_lattice_speed=float(max_lattice_speed),
+                enforce_population_positivity=bool(
+                    enforce_population_positivity
+                ),
+                population_floor=float(population_floor),
+            )
         return self.result
 
     def initialize_fullf(
@@ -340,6 +345,7 @@ class VofKineticInitializer:
         max_lattice_speed: float,
         enforce_population_positivity: bool,
         population_floor: float,
+        validate: bool = True,
     ) -> VofKineticInitializationResult:
         """Prepare, write, and validate new-interface FullF state."""
 
@@ -350,6 +356,7 @@ class VofKineticInitializer:
             max_lattice_speed=max_lattice_speed,
             enforce_population_positivity=enforce_population_positivity,
             population_floor=population_floor,
+            validate=validate,
         )
         gx, gy, gz = (float(value) for value in gravity)
         nx, ny, nz = self.shape
@@ -381,12 +388,13 @@ class VofKineticInitializer:
             ],
             device=self.device,
         )
-        validate_p5_initialized_state(
-            state_out,
-            transition,
-            result,
-            gravity=(gx, gy, gz),
-        )
+        if validate:
+            validate_p5_initialized_state(
+                state_out,
+                transition,
+                result,
+                gravity=(gx, gy, gz),
+            )
         return result
 
     def initialize_home(
@@ -399,6 +407,7 @@ class VofKineticInitializer:
         max_lattice_speed: float,
         enforce_population_positivity: bool,
         population_floor: float,
+        validate: bool = True,
     ) -> VofKineticInitializationResult:
         """Prepare, write, and validate new-interface HOME equilibrium moments."""
 
@@ -409,6 +418,7 @@ class VofKineticInitializer:
             max_lattice_speed=max_lattice_speed,
             enforce_population_positivity=enforce_population_positivity,
             population_floor=population_floor,
+            validate=validate,
         )
         gx, gy, gz = (float(value) for value in gravity)
         wp.launch(
@@ -436,12 +446,13 @@ class VofKineticInitializer:
             ],
             device=self.device,
         )
-        validate_p5_initialized_state(
-            state_out,
-            transition,
-            result,
-            gravity=(gx, gy, gz),
-        )
+        if validate:
+            validate_p5_initialized_state(
+                state_out,
+                transition,
+                result,
+                gravity=(gx, gy, gz),
+            )
         return result
 
 
