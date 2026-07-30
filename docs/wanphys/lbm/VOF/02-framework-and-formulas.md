@@ -65,28 +65,28 @@
 
 论文 Eq. (7) 中：
 
-\[
+$$
 \rho=\sum_i f_i,
 \qquad
 \rho\mathbf{u}
 =
 \sum_i\mathbf{c}_if_i+\frac12\mathbf{F}.
 \tag{7}
-\]
+$$
 
 所以必须区分：
 
-\[
+$$
 \mathbf{j}_{raw}=\sum_i\mathbf{c}_if_i
-\]
+$$
 
 和：
 
-\[
+$$
 \mathbf{u}_{physical}
 =
 \frac{\mathbf{j}_{raw}+\mathbf{F}/2}{\rho}.
-\]
+$$
 
 论文 HOME 状态保存的是物理 `u`。如果项目适配层保存 `j_raw`，只允许在明确的
 closure 中加一次 `F/2`。
@@ -124,7 +124,7 @@ closure 中加一次 `F/2`。
 
 论文 Eq. (16)-(17)：
 
-\[
+$$
 f_i
 =
 \rho w_i
@@ -141,9 +141,9 @@ T_{\alpha\beta\gamma}
 }{2c_s^6}
 \right],
 \tag{16}
-\]
+$$
 
-\[
+$$
 T_{\alpha\beta\gamma}
 =
 S_{\alpha\beta}u_\gamma
@@ -154,7 +154,7 @@ S_{\beta\gamma}u_\alpha
 -
 2u_\alpha u_\beta u_\gamma.
 \tag{17}
-\]
+$$
 
 FullF 适配路径直接读取持久 population。无论编码为何，下游统一消费 logical
 `f_i^n`。
@@ -163,9 +163,9 @@ FullF 适配路径直接读取持久 population。无论编码为何，下游统
 
 对目标 fluid/interface 节点 `x` 和方向 `i`，来源为：
 
-\[
+$$
 \mathbf{y}=\mathbf{x}-\mathbf{c}_i.
-\]
+$$
 
 工程层统一解析：
 
@@ -183,7 +183,7 @@ domain boundary       -> 项目 domain BC
 
 论文 Eq. (11)：
 
-\[
+$$
 f_i^*(\mathbf{x},t)
 =
 f_i^{eq}(\rho_g,\mathbf{u}(\mathbf{x},t))
@@ -192,7 +192,7 @@ f_{\bar i}^{eq}(\rho_g,\mathbf{u}(\mathbf{x},t))
 -
 f_{\bar i}(\mathbf{x},t).
 \tag{11}
-\]
+$$
 
 其中对向 `f_bar(x,t)`：
 
@@ -201,33 +201,33 @@ f_{\bar i}(\mathbf{x},t).
 
 核心自由表面密度：
 
-\[
+$$
 \rho_g
 =
 \frac{p_b-2\gamma\kappa}{c_s^2}.
 \tag{12}
-\]
+$$
 
 无封闭 bubble 时：
 
-\[
+$$
 p_b=p_{atmos}.
-\]
+$$
 
 泡沫模式：
 
-\[
+$$
 \rho_g
 =
 \frac{p_b-2\gamma\kappa-\Pi_{disj}}{c_s^2}.
 \tag{41}
-\]
+$$
 
 必须验证：
 
-\[
+$$
 \rho_g>0
-\]
+$$
 
 并定义超出稳定范围时的 fail-fast 或 limiter 策略。论文未给出该保护策略。
 
@@ -235,19 +235,19 @@ p_b=p_{atmos}.
 
 完整 `f*` 后计算：
 
-\[
+$$
 \rho^*=\sum_i f_i^*,
 \qquad
 \mathbf{j}^*=\sum_i\mathbf{c}_i f_i^*.
-\]
+$$
 
 项目 collision closure 使用：
 
-\[
+$$
 \mathbf{u}_{collision}
 =
 \frac{\mathbf{j}^*+\mathbf{F}^*/2}{\rho^*}.
-\]
+$$
 
 论文 HOME 表达中则按 Eq. (18)-(21) 直接更新持久 moments。
 
@@ -255,18 +255,18 @@ p_b=p_{atmos}.
 
 项目中建议明确：
 
-\[
+$$
 \mathbf{F}^*
 =
 \rho^*\mathbf{g}+\mathbf{F}_{user}.
-\]
+$$
 
 这是当前工程外力接口；论文只使用抽象 external force `F`，没有规定 provider
 组合方式。
 
 论文高阶碰撞是：
 
-\[
+$$
 \boldsymbol{\Omega}
 =
 -\mathbf{M}^{-1}
@@ -276,23 +276,23 @@ p_b=p_{atmos}.
 \left(\mathbf{I}-\frac12\mathbf{R}\right)\mathbf{K}
 \right].
 \tag{13}
-\]
+$$
 
 论文持久 HOME 输出：
 
-\[
+$$
 \rho^{n+1}=\rho^*,
 \tag{18}
-\]
+$$
 
-\[
+$$
 u_\alpha^{n+1}
 =
 u_\alpha^*
 +
 \frac{F_\alpha}{2\rho^*}.
 \tag{19}
-\]
+$$
 
 Eq. (20)-(21) 更新二阶速度矩 `S`。完整实现应直接参照论文，不在本概览中重新
 抄写所有分量闭式式子，避免索引转录错误。
@@ -301,7 +301,7 @@ Eq. (20)-(21) 更新二阶速度矩 `S`。完整实现应直接参照论文，�
 
 ### 5.1 论文质量更新
 
-\[
+$$
 \phi^{n+1}(\mathbf{x})
 =
 \phi^n(\mathbf{x})
@@ -311,19 +311,19 @@ Eq. (20)-(21) 更新二阶速度矩 `S`。完整实现应直接参照论文，�
 \theta_i^n(\mathbf{x})
 q_i^n(\mathbf{x}),
 \tag{9}
-\]
+$$
 
-\[
+$$
 q_i^n(\mathbf{x})
 =
 f_{\bar i}^n(\mathbf{x}+\mathbf{c}_i)
 -
 f_i^n(\mathbf{x}).
-\]
+$$
 
 按论文印刷 Eq. (10)：
 
-\[
+$$
 \theta_i^n(\mathbf{x})=
 \begin{cases}
 1,&\mathbf{x}\in L,\\
@@ -333,13 +333,13 @@ f_i^n(\mathbf{x}).
 &\mathbf{x}\in I.
 \end{cases}
 \tag{10}
-\]
+$$
 
 如果实现持久 `mass`，必须证明它与 Eq. (9) 等价，并在每步输出维持：
 
-\[
+$$
 mass=\rho_{full}\phi.
-\]
+$$
 
 不能同时再使用 PLIC swept-volume 更新同一份 `mass/phi`。
 
@@ -347,9 +347,9 @@ mass=\rho_{full}\phi.
 
 论文给出：
 
-\[
+$$
 \epsilon_\phi=10^{-4}.
-\]
+$$
 
 对 interface：
 
@@ -423,25 +423,25 @@ gas/interface -> fluid
 
 ### 7.2 体积和压力
 
-\[
+$$
 V_i
 =
 \sum_{\mathbf{x}\in b_i}(1-\phi_\mathbf{x}),
 \tag{23}
-\]
+$$
 
-\[
+$$
 V_i^0
 \mathrel{+}=
 (1-\phi_\mathbf{x})
 \frac{p_{i_{old}}^{old}}{p_{atmos}},
 \tag{24}
-\]
+$$
 
-\[
+$$
 p_i=p_{atmos}\frac{V_i^0}{V_i}.
 \tag{25}
-\]
+$$
 
 累计 `V` 和 `V0` 使用双精度 atomic add。每个 G/I 节点保存新旧 bubble label。
 cut-cell 不参加 CCL，其气压按大气压力处理。
@@ -462,14 +462,14 @@ cut-cell 不参加 CCL，其气压按大气压力处理。
 
 每步在 streaming 前计算：
 
-\[
+$$
 \Pi_{disj}=
 \begin{cases}
 0,&d>d_{max},\\
 k_\pi(1-d/d_{max}),&d\le d_{max}.
 \end{cases}
 \tag{40}
-\]
+$$
 
 然后由 Eq. (41) 进入自由表面密度。流体 collision 后运行 D3Q7
 advection-diffusion，相关公式为 Eq. (33)-(39)、(42)。
