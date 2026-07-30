@@ -67,6 +67,9 @@ class LbmModel(FluidGridModelBase):
     vof_surface_tension: float = 0.0
     """Surface-tension coefficient; authoritative nonzero support begins in P6."""
 
+    vof_transition_epsilon: float = 1.0e-4
+    """P4 interface conversion threshold from the free-surface paper."""
+
     force_model: str = field(init=False, default=ForceModel.NONE.value)
     """Normalized internal force-pipeline combination; not caller configuration."""
 
@@ -419,6 +422,10 @@ class LbmModel(FluidGridModelBase):
             raise ValueError("vof_surface_tension must be finite")
         if float(self.vof_surface_tension) < 0.0:
             raise ValueError("vof_surface_tension must be >= 0")
+        if not math.isfinite(float(self.vof_transition_epsilon)):
+            raise ValueError("vof_transition_epsilon must be finite")
+        if not 0.0 <= float(self.vof_transition_epsilon) < 0.5:
+            raise ValueError("vof_transition_epsilon must lie in [0, 0.5)")
         if (
             resolved_interface is InterfaceModel.VOF
             and float(self.vof_surface_tension) != 0.0

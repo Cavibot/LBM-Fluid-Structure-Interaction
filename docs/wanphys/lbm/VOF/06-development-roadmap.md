@@ -501,12 +501,12 @@ mass_before_transition
 ### 9.5 退出门禁
 
 ```text
-[ ] 候选生成只读旧状态
-[ ] 最终 L-G 非法邻接为零
-[ ] clamp 不丢失 excess mass
-[ ] 重分配无原地并发写冲突
-[ ] 类型转换前后质量闭合
-[ ] 新 interface 已被准确列出供 P5 初始化
+[x] 候选生成只读旧状态
+[x] 最终 L-G 非法邻接为零
+[x] clamp 不丢失 excess mass
+[x] 重分配无原地并发写冲突
+[x] 类型转换前后质量闭合
+[x] 新 interface 已被准确列出供 P5 初始化
 ```
 
 ## 10. P5：新界面 kinetic 初始化
@@ -831,7 +831,7 @@ BLOCKED
 | P1 | CPU_ACCEPTED | authoritative 状态、初始化、双缓冲和 fail-fast 已冻结 |
 | P2 | CPU_ACCEPTED | FullF fixed-topology mass transport、旧 density 时间层、gas-link zero flux 已冻结 |
 | P3 | CPU_ACCEPTED | FullF fixed-topology Eq.11、gamma=0 surface step 与事务门禁已冻结 |
-| P4 | NOT_STARTED | 无 transition/topology/redistribution |
+| P4 | CPU_ACCEPTED | deterministic transition、topology gather、signed redistribution 与 P5 handoff 已冻结 |
 | P5 | NOT_STARTED | 无通用 GAS→INTERFACE kinetic 初始化 |
 | P6 | NOT_STARTED | observation normal 已有，但正式 PLIC/curvature 未完成 |
 | P7 | NOT_STARTED | 尚无完整自由表面集成验收 |
@@ -853,6 +853,17 @@ phi(n+1) closes with density_out
 required type transitions fail before current-buffer swap
 ```
 
-P4 下一步必须先冻结 transition threshold、拓扑修复邻域、冲突优先级、正负 excess
-定义、重分配权重与 zero-receiver 策略，再实现 deterministic multi-pass
-transition/redistribution。只有完成 P4-P6 后才能声明移动自由表面能够正确推进。
+P4 已冻结并实现：
+
+```text
+epsilon_phi = 1e-4
+D3Q19 topology gather
+reference-order I-to-L conflict priority
+signed equal-share redistribution
+zero-receiver fail-fast
+exact new_interface handoff
+```
+
+P5 下一步必须冻结新界面邻居资格、rho/u 时间层与权重、FullF equilibrium
+初始化、zero-neighbor 策略以及 kinetic/VOF commit 顺序。只有完成 P5-P6 后才能
+声明移动自由表面能够正确推进。

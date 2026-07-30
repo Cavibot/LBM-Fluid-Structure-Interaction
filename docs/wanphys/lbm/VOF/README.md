@@ -1,9 +1,9 @@
 # LBM VOF 当前能力与开发入口
 
-当前仓库已经冻结 authoritative VOF 的 P1 状态/初始化、P2 FullF 固定拓扑质量
-transport 和 P3 零表面张力自由面边界。FullF 可以执行固定拓扑完整 step；需要
-类型变化时会在当前缓冲区交换前失败，等待 P4。Shan-Chen 调试观察路径继续与正式
-VOF 完全隔离。
+当前仓库已经冻结 authoritative VOF 的 P1 状态/初始化、P2 FullF 质量 transport、
+P3 零表面张力自由面边界和 P4 类型转换/守恒重分配。P4 能形成完整 transition
+scratch；没有 GAS→INTERFACE 时可提交 FullF step，出现新界面则在当前缓冲区交换前
+等待 P5 kinetic 初始化。Shan-Chen 调试观察路径继续与正式 VOF 完全隔离。
 
 ## 当前 API
 
@@ -84,10 +84,9 @@ dam-break 示例的相关参数为：
 - P1 authoritative `state.vof`：`CPU_ACCEPTED`；
 - P2 FullF fixed-topology mass transport：`CPU_ACCEPTED`；
 - P3 FullF fixed-topology gamma=0 surface step：`CPU_ACCEPTED`；
+- P4 deterministic topology/redistribution：`CPU_ACCEPTED`；
 - HOME mass transport：P7；
-- moving-interface authoritative VOF step：等待 P4/P5；
-- 物理 GAS/INTERFACE/LIQUID 类型转换；
-- excess/deficit mass redistribution；
+- GAS→INTERFACE 后可提交的 moving-interface step：等待 P5；
 - new-interface kinetic initialization；
 - PLIC、curvature 与表面张力；
 - bubble pressure、moving-solid VOF coupling 和 foam。
@@ -111,3 +110,6 @@ dam-break 示例的相关参数为：
 - [12-p3-engineering-plan.md](12-p3-engineering-plan.md)：P3 决策、实现和验收计划；
 - [13-p3-completion-summary.md](13-p3-completion-summary.md)：P3 完成与 CPU 验收总结；
 - [14-p3-change-architecture.md](14-p3-change-architecture.md)：P3 改动文件与关键架构新旧对比。
+- [15-p4-engineering-plan.md](15-p4-engineering-plan.md)：P4 决策、实现和验收计划；
+- [16-p4-completion-summary.md](16-p4-completion-summary.md)：P4 完成与 CPU 验收总结；
+- [17-p4-change-architecture.md](17-p4-change-architecture.md)：P4 改动文件与关键架构新旧对比。

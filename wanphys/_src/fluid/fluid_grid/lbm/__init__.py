@@ -29,6 +29,8 @@ from .vof import (
     VofMassTransport,
     VofMassTransportResult,
     VofSurfaceBoundary,
+    VofTopologyTransition,
+    VofTransitionResult,
 )
 
 __all__ = [
@@ -58,4 +60,6 @@ __all__ = [
     "VofMassTransport",
     "VofMassTransportResult",
     "VofSurfaceBoundary",
+    "VofTopologyTransition",
+    "VofTransitionResult",
 ]

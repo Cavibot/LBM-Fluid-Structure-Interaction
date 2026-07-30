@@ -26,7 +26,7 @@ from .vof.initialization import (
     validate_no_solid_cells,
 )
 from .vof.surface import VofSurfaceBoundary
-from .vof.validation import validate_p3_fixed_topology_state
+from .vof.transition import VofTopologyTransition
 
 
 class LbmSolver(FluidGridSolverBase):
@@ -139,6 +139,14 @@ class LbmSolver(FluidGridSolverBase):
                 self.device,
                 model._periodic_ints,
                 float(model.vof_atmosphere_pressure),
+            )
+        self._vof_topology_transition = None
+        if model.interface_model == "vof":
+            self._vof_topology_transition = VofTopologyTransition(
+                (self.nx, self.ny, self.nz),
+                self.device,
+                model._periodic_ints,
+                float(model.vof_transition_epsilon),
             )
 
         self._collision_name = model.resolved_collision
@@ -431,6 +439,8 @@ class LbmSolver(FluidGridSolverBase):
                 raise RuntimeError("VOF mass transport was not allocated")
             if self._vof_surface_boundary is None:
                 raise RuntimeError("VOF surface boundary was not allocated")
+            if self._vof_topology_transition is None:
+                raise RuntimeError("VOF topology transition was not allocated")
             self._vof_mass_transport.compute_fullf(state_in)
 
         del contacts, control, dt
@@ -658,18 +668,21 @@ class LbmSolver(FluidGridSolverBase):
             assert isinstance(state_out, FullFLbmState)
             assert self._vof_surface_boundary is not None
             assert self._vof_mass_transport is not None
+            assert self._vof_topology_transition is not None
             self._vof_surface_boundary.restore_gas(state_in, state_out)
-            self._vof_mass_transport.finalize_fixed_topology(
-                state_in,
-                state_out,
+            if state_in.vof is None or state_out.vof is None:
+                raise RuntimeError("P4 VOF step requires authoritative storage")
+            transition = self._vof_topology_transition.compute(
+                self._vof_mass_transport.result.mass_tmp,
+                state_out.density,
+                state_in.vof.cell_type,
             )
-            validate_p3_fixed_topology_state(
-                state_in,
-                state_out,
-                periodic=tuple(
-                    bool(value) for value in self.model._periodic_ints
-                ),
-            )
+            if np.any(np.asarray(transition.new_interface.numpy()) != 0):
+                raise NotImplementedError(
+                    "P4 resolved GAS-to-INTERFACE transitions, but their "
+                    "kinetic initialization is deferred to P5"
+                )
+            self._vof_topology_transition.commit(state_out.vof)
         self.update_debug_mock_sc_to_vof(state_out)
 
     def _copy_boundary_fields(self, state_in: LbmStateBase, state_out: LbmStateBase) -> None:

@@ -312,31 +312,27 @@ class TestVofP3IntegratedStep(unittest.TestCase):
             for actual_field, expected_field in zip(actual, snapshot, strict=True):
                 np.testing.assert_array_equal(actual_field, expected_field)
 
-    def test_phi_violation_raises_without_current_buffer_swap(self) -> None:
+    def test_invalid_input_raises_without_current_buffer_swap(self) -> None:
         shape = (3, 3, 3)
         phi = np.full(shape, 0.5, dtype=np.float32)
-        phi[1, 1, 1] = 0.99
         domain = LbmDomain(_model(shape, periodic=(True, True, True)))
         state_in = domain.initialize_vof(phi)
         state_out = domain._state_out
         assert state_in.vof is not None and state_out is not None
-        populations = state_in.f_post.numpy().reshape((19, *shape)).copy()
-        populations[2, 1, 1, 1] += np.float32(0.3)
-        state_in.f_post.assign(populations.reshape(-1))
-        density = state_in.density.numpy().copy()
-        density[1, 1, 1] = np.float32(1.3)
-        state_in.density.assign(density)
         mass = state_in.vof.mass.numpy().copy()
-        mass[1, 1, 1] = np.float32(1.3 * 0.99)
+        mass[1, 1, 1] = np.float32(np.nan)
         state_in.vof.mass.assign(mass)
         mass_before = state_in.vof.mass.numpy().copy()
 
-        with self.assertRaisesRegex(ValueError, "0<phi<1"):
+        with self.assertRaisesRegex(ValueError, "mass must be finite"):
             domain.step(1.0)
 
         self.assertIs(domain._state_in, state_in)
         self.assertIs(domain._state_out, state_out)
-        np.testing.assert_array_equal(state_in.vof.mass.numpy(), mass_before)
+        np.testing.assert_array_equal(
+            state_in.vof.mass.numpy(),
+            mass_before,
+        )
 
 
 if __name__ == "__main__":

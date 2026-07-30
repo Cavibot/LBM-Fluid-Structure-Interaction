@@ -65,8 +65,6 @@ def validate_p2_transport_input(
         raise ValueError("P2 input mass must be finite")
     if not np.all(np.isfinite(phi)):
         raise ValueError("P2 input phi must be finite")
-    if np.any(phi < 0.0) or np.any(phi > 1.0):
-        raise ValueError("P2 input phi must lie in [0, 1]")
     legal = np.isin(cell_type, np.array([0, 1, 2], dtype=np.uint8))
     if not np.all(legal):
         raise ValueError("P2 input cell_type contains an unknown value")
@@ -75,6 +73,12 @@ def validate_p2_transport_input(
     density = np.asarray(state.density.numpy())
     if not np.allclose(mass, density * phi, atol=1.0e-6, rtol=1.0e-5):
         raise ValueError("P2 input must satisfy mass ~= density * phi")
+    gas = cell_type == 0
+    liquid = cell_type == 2
+    if np.any(mass[gas] != 0.0) or np.any(phi[gas] != 0.0):
+        raise ValueError("P2 input GAS cells must have mass=0 and phi=0")
+    if not np.allclose(phi[liquid], 1.0, atol=2.0e-6, rtol=2.0e-5):
+        raise ValueError("P2 input LIQUID cells must have phi approximately 1")
 
 
 class VofMassTransport:

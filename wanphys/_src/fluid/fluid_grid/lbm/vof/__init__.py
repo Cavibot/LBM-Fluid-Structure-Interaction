@@ -8,6 +8,7 @@ from .contracts import VofCellType, VofMassScheme
 from .geometry import InterfaceGeometry
 from .state import DebugMockScToVofState, VofGridState
 from .surface import VofSurfaceBoundary
+from .transition import VofTopologyTransition, VofTransitionResult
 from .visualization import DebugVofView, InterfaceVisualData, VofInterfaceVisualizer
 
 __all__ = [
@@ -22,4 +23,6 @@ __all__ = [
     "VofMassTransport",
     "VofMassTransportResult",
     "VofSurfaceBoundary",
+    "VofTopologyTransition",
+    "VofTransitionResult",
 ]
