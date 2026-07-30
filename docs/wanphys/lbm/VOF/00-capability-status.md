@@ -2,8 +2,9 @@
 
 本文是当前 LBM/VOF 能力的状态入口，严格区分 Shan-Chen 调试观察与未来的守恒
 VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
-[06-development-roadmap.md](06-development-roadmap.md)。P0 当前为 `CPU_ACCEPTED`；
-冻结证据见 [07-p0-baseline.md](07-p0-baseline.md)，CUDA 尚未验收。
+[06-development-roadmap.md](06-development-roadmap.md)。P0 与 P1 当前均为
+`CPU_ACCEPTED`；冻结证据分别见 [07-p0-baseline.md](07-p0-baseline.md) 和
+[08-p1-engineering-plan.md](08-p1-engineering-plan.md)，CUDA 尚未验收。
 
 ## 1. 状态含义
 
@@ -11,6 +12,7 @@ VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
 |---|---|
 | `EXISTING` | 当前 API/契约已经存在 |
 | `OBSERVE_CPU_ACCEPTED` | 调试观察路径已有 CPU 针对性测试；不是 VOF 物理验收 |
+| `AUTHORITATIVE_CPU_ACCEPTED` | authoritative 状态与初始化通过 CPU 验收；不代表可推进 |
 | `NOT_STARTED` | 尚未实现 |
 | `FAIL_FAST` | 当前只允许显式拒绝 |
 | `CUDA_NOT_ACCEPTED` | 尚未完成 CUDA 验收 |
@@ -30,15 +32,18 @@ off        + no gravity -> none
 off        + gravity    -> gravity
 shan_chen  + no gravity -> shan_chen
 shan_chen  + gravity    -> gravity+shan_chen
-vof                      -> NotImplementedError (P0)
+vof         + no gravity -> none
+vof         + gravity    -> gravity
 ```
 
 必要的拒绝规则：
 
 - 未知 `interface_model`：`ValueError`；
-- `off + debug_vof_observation`：`ValueError`；
+- 非 Shan-Chen 模式配置 `debug_vof_observation=True`：`ValueError`；
 - 非 Shan-Chen 模式配置非零 `G`：`ValueError`；
-- `interface_model="vof"`：`NotImplementedError`。
+- VOF 配置 moving-wall 或 cut-link：`NotImplementedError`；
+- VOF 请求 `requires_grad=True`：`NotImplementedError`；
+- VOF 调用 `step()`：`NotImplementedError`。
 
 旧字段 `vof_debug_labels` 和调用者可配置的 `force_model` 均已删除，没有 deprecated
 alias。
@@ -50,7 +55,12 @@ alias。
 | `interface_model` | `EXISTING` | 配置层 | 选择 `off/shan_chen/vof` |
 | `debug_vof_observation` | `OBSERVE_CPU_ACCEPTED` | 配置层 | 只控制 SC 调试观察 |
 | internal `force_model` | `EXISTING` | `LbmModel.__post_init__` | interface + gravity 的执行组合 |
-| `state.vof` | `NOT_STARTED` | P1 VOF stepper | 为 authoritative VOF 保留；P0 恒为 `None` |
+| `state.vof` | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer | VOF 模式分配的正式状态 |
+| `state.vof.mass` | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer | 唯一守恒权威 |
+| `state.vof.phi` | `AUTHORITATIVE_CPU_ACCEPTED` | `mass/density` 反算 | 派生占据率缓存 |
+| `state.vof.cell_type` | `AUTHORITATIVE_CPU_ACCEPTED` | 严格 phi 分类 | GAS/INTERFACE/LIQUID 拓扑 |
+| `LbmDomain.initialize_vof()` | `AUTHORITATIVE_CPU_ACCEPTED` | domain | candidate 双缓冲完整初始化 |
+| `validate_initialized_vof_state()` | `AUTHORITATIVE_CPU_ACCEPTED` | validator | 只读检查实际数组不变量 |
 | `DebugMockScToVofState` | `OBSERVE_CPU_ACCEPTED` | debug observer | 与正式 VOF 分离的调试容器 |
 | `state.debug_mock_sc_to_vof.phi` | `OBSERVE_CPU_ACCEPTED` | density mapping | density 派生的有界显示填充率 |
 | `.cell_type` | `OBSERVE_CPU_ACCEPTED` | debug classifier | 调试 GAS/INTERFACE/LIQUID 标签 |
@@ -69,7 +79,7 @@ alias。
 |---|---|---|---|
 | `off` | 单相 LBM | 禁止 | 无 VOF view |
 | `shan_chen` | density | 只写 `state.debug_mock_sc_to_vof` | 只读 `DebugVofView` |
-| `vof`（P1+） | `state.vof.mass/phi/cell_type` | 不得覆盖正式状态 | 只读 authoritative view |
+| `vof`（P1） | `state.vof.mass/phi/cell_type` | 不得覆盖正式状态 | authoritative view 尚未接入 |
 
 P0 数据流：
 
@@ -89,8 +99,10 @@ population 有效性或边界行为。
 
 | 能力 | 状态 | 未来权威写入者 |
 |---|---|---|
-| physical VOF mode | `FAIL_FAST` | VOF stepper |
-| `mass/phi/cell_type` | `NOT_STARTED` | mass transport / transition |
+| physical VOF construction/initialization | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer |
+| physical VOF time stepping | `FAIL_FAST` | future VOF stepper |
+| `mass/phi/cell_type` initialization | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer |
+| mass advection / transition writes | `NOT_STARTED` | mass transport / transition |
 | authoritative normal | `NOT_STARTED` | geometry step |
 | logical population provider | `NOT_STARTED` | FullF/HOME adapter |
 | gas-to-interface completion | `FAIL_FAST` | surface boundary step |
@@ -98,5 +110,6 @@ population 有效性或边界行为。
 | new-interface kinetic initialization | `NOT_STARTED` | initialization step |
 | PLIC / curvature / surface tension | `NOT_STARTED` | geometry/free-surface pressure |
 
-正式 VOF 状态必须与 `debug_vof_observation` 无关：即使不显示，也必须分配并演化。
-`mass` 是计划中的守恒权威；`phi` 与 `cell_type` 不得由独立的第二权威写入。
+正式 VOF 状态与 `debug_vof_observation` 无关：即使不显示也必须分配。P1 只允许
+初始化、复制、清理和检查，时间推进在 solver 最前端 fail-fast。`mass` 是守恒权威；
+`phi` 与 `cell_type` 不得由独立的第二权威写入。

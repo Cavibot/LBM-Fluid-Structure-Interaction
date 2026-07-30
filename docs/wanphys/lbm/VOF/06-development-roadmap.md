@@ -221,71 +221,62 @@ phi 与 mass 属于同一时间层
 
 ### 6.2 开发内容
 
-正式状态至少包括：
+P1 正式持久状态严格只有：
 
 ```text
-phi
 mass
+phi
 cell_type
-normal
-plic_offset
-curvature
-vof_epoch
-geometry_epoch
 ```
 
-正式配置至少包括：
-
-```text
-epsilon_phi
-atmosphere_pressure
-surface_tension
-invalid_state_policy
-geometry_cache_policy
-```
+`normal/PLIC/curvature/epoch` 在 P6 首次消费时加入；`atmosphere_pressure` 在 P3、
+`epsilon_phi` 在 P4、`surface_tension` 在 P6 首次消费时加入。P1 不保存无消费者的
+配置或缓存。
 
 还需要：
 
 - 明确 `mass` 和 `phi` 的权威关系及时间语义；
 - 明确 gas kinetic 无效、interface/liquid kinetic 有效；
 - 使用现有 `state_in/state_out` 完成 VOF 双缓冲；
-- 提供从 `phi`、SDF 或规则几何初始化的正式 API；
-- 初始化 `mass/phi/type/kinetic/geometry epoch`；
+- 提供从预计算 `phi0` 初始化的正式 API；
+- 先初始化 LBM kinetic/density，再初始化 `mass/phi/type`；
+- 使用 candidate state，成功后才提交两个 domain buffer；
 - authoritative `state.vof` 的分配不依赖 `debug_vof_observation`；
-- clone、clear、copy、reset 和 state swap 覆盖所有 VOF 字段。
+- clone、clear、copy 覆盖三个正式 VOF 数组；
+- P1 的 `step()` 在任何状态写入前 fail-fast。
 
 ### 6.3 必须先做出的设计决策
 
-在 P2 编码前必须有记录：
+P1 已冻结：
 
 ```text
 谁是守恒权威：mass
-phi 如何由 mass 与选定密度语义得到
-rho 使用 n、n+1 还是明确的 reference/full density
-初始化时 mass = ? 的精确定义
-mass scheme 选择严格 paper Eq.9-10 还是经典 FSLBM/Lehmann 变体
-interface-gas 格链上的 logical population/flux 从哪里取得
+初始化 density：LBM 实际写出的统一 state.density
+初始化关系：mass0 = density0 * phi_input
+phi0：立即由 mass0 / density0 反算
+cell_type：float32 phi 的精确 0/1 分类
+gas kinetic：无效，正式 VOF 物理路径禁止读取
 ```
 
-该决策必须证明与论文 Eq. (9) 等价或明确标为项目适配，不能同时独立更新
-`mass` 和 `phi`。若采用经典 FSLBM/Lehmann 变体，必须补充其原始来源，不能把它
-标成论文 Eq. (10)。
+在 P2 编码前仍必须冻结：
 
-论文印刷 Eq. (9) 在 interface-gas 格链上写到了 gas 侧 population，但正式 VOF
-又把 gas kinetic 视为无效。因此还必须二选一并给出证据：
+```text
+mass scheme 选择严格 paper Eq.9-10 还是经典 FSLBM/Lehmann 变体
+interface-gas 格链上的 logical population/flux 从哪里取得
+质量子步使用的 rho 时间层
+```
 
-- 选定的 mass scheme 令 gas-link 质量交换为零；或
-- 用经过审计的自由表面公式构造该格链所需的 logical population。
-
-无论采用哪一种，都禁止从 gas 单元的持久 kinetic storage 读取“碰巧存在”的值。
+该 P2 决策必须证明与论文 Eq. (9) 等价或明确标为项目适配。无论采用哪一种，都禁止
+从 gas 单元的持久 kinetic storage 读取“碰巧存在”的值。
 
 ### 6.4 验收目标
 
 - 两个 LBM state buffer 中均存在独立 VOF 状态。
 - clone/copy 后逐字段相等，且不存在共享可变数组。
-- clear/reset 后字段和 epoch 回到定义值。
-- state swap 后 kinetic 与 VOF 保持同一时间层。
+- clear 后三个正式数组回到全 GAS 零质量状态。
+- 首次或重复初始化失败时不提交半初始化 candidate。
 - 初始化后：
+  - 所有 density 有限且大于零；
   - `phi` 有限；
   - `0 <= phi <= 1`；
   - `mass` 与选定关系一致；
@@ -296,11 +287,11 @@ interface-gas 格链上的 logical population/flux 从哪里取得
 ### 6.5 退出门禁
 
 ```text
-[ ] mass/phi 权威与时间语义已冻结
-[ ] 正式 VOF 初始化可重复
-[ ] 所有生命周期测试通过
-[ ] VOF/SC 非法组合被拒绝
-[ ] 尚未启用质量平流和自由面补全
+[x] mass/phi 初始化权威与时间语义已冻结
+[x] 正式 VOF 初始化可重复且事务式提交
+[x] 所有生命周期测试通过
+[x] VOF/SC 非法组合被拒绝
+[x] 尚未启用质量平流和自由面补全
 ```
 
 ## 7. P2：固定拓扑的守恒质量平流
@@ -808,8 +799,8 @@ BLOCKED
 
 | 阶段 | 当前状态 | 说明 |
 |---|---|---|
-| P0 | IN_PROGRESS | observation state、normal、visualization 和 CPU 测试已有 |
-| P1 | NOT_STARTED | 尚无正式 mode/config，`mass/PLIC/curvature` 未完成 |
+| P0 | CPU_ACCEPTED | observation/debug 边界和旧 LBM CPU 基线已冻结 |
+| P1 | CPU_ACCEPTED | authoritative 状态、初始化、双缓冲和 fail-fast 已冻结 |
 | P2 | NOT_STARTED | 无 authoritative mass advection |
 | P3 | NOT_STARTED | `surface_completion` 仍为 fail-fast 占位 |
 | P4 | NOT_STARTED | 无 transition/topology/redistribution |
@@ -820,35 +811,17 @@ BLOCKED
 只有状态达到 `CPU_ACCEPTED` 才能进入下一物理阶段；合并到声称支持 CUDA 的主路径前，
 还必须达到 `CUDA_ACCEPTED`。
 
-## 17. 推荐的最近三个提交
+## 17. 下一阶段入口
 
-### 提交 1：正式模式与状态契约
-
-```text
-增加 VofConfig 和 free_surface mode
-增加 mass/plic_offset/curvature
-冻结 mass scheme、mass/phi 关系和 gas-link population 语义
-完成 clone/clear/copy/reset/swap 测试
-正式 VOF 与 Shan-Chen 冲突时 fail-fast
-不改变 solver physics
-```
-
-### 提交 2：正式初始化
+P2 开始前先提交质量交换 ADR，然后实现固定类型 Eq. (9)-(10)：
 
 ```text
-从 phi/SDF 初始化 mass/type
-初始化 active kinetic
-建立 mass/phi/type invariant checker
-加入 state epoch 测试
-```
-
-### 提交 3：固定类型 Eq.9-10
-
-```text
+冻结 mass scheme、rho 时间层和 gas-link logical population 语义
 只实现 FullF 质量平流
 不转换、不 clamp、不重分配
 加入单格链手算和 NumPy oracle
 加入周期域总质量守恒测试
 ```
 
-完成这三个提交后，项目才真正从 observation VOF 进入 authoritative VOF。
+P1 已经使项目从 observation-only 进入可安全初始化的 authoritative VOF；只有完成
+P2-P6 后才能声明自由表面能够正确推进。

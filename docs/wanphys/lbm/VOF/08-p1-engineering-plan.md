@@ -7,7 +7,7 @@
 | 阶段 | P1 |
 | 类型 | 可执行代码工程计划 |
 | 前置阶段 | P0 `CPU_ACCEPTED` |
-| 当前实施状态 | `IMPLEMENTED_CPU_VERIFIED`；等待提交冻结 |
+| 当前实施状态 | `CPU_ACCEPTED` |
 | 目标状态 | `CPU_ACCEPTED` |
 | 物理范围 | authoritative VOF 状态、初始化、双缓冲和不变量 |
 | 明确不包含 | 固体、气泡、泡沫、质量平流、自由面补全、类型转换、几何、表面张力 |
@@ -696,32 +696,32 @@ uv run python -m unittest newton.tests.test_lbm_vof_p1 -v
 ### 10.1 配置与分配
 
 ```text
-[ ] interface_model="vof" 可以构造 model/domain
-[ ] vof + debug_vof_observation 被拒绝
-[ ] vof + non-zero G 被拒绝
-[ ] off/shan_chen 的 P0 分配行为不变
-[ ] VOF FullF/Home 都分配 VofGridState
-[ ] VOF requires_grad 被拒绝
+[x] interface_model="vof" 可以构造 model/domain
+[x] vof + debug_vof_observation 被拒绝
+[x] vof + non-zero G 被拒绝
+[x] off/shan_chen 的 P0 分配行为不变
+[x] VOF FullF/Home 都分配 VofGridState
+[x] VOF requires_grad 被拒绝
 ```
 
 ### 10.2 状态生命周期
 
 ```text
-[ ] 构造后是 canonical all-GAS
-[ ] clear 后恢复 canonical all-GAS
-[ ] copy_to 只复制三个数组
-[ ] clone 数值相同
-[ ] clone 的三个数组全部不共享
-[ ] VOF state 不能复制到无 VOF storage 的 state
+[x] 构造后是 canonical all-GAS
+[x] clear 后恢复 canonical all-GAS
+[x] copy_to 只复制三个数组
+[x] clone 数值相同
+[x] clone 的三个数组全部不共享
+[x] VOF state 不能复制到无 VOF storage 的 state
 ```
 
 ### 10.3 LBM 初始化边界
 
 ```text
-[ ] FullF initialize_equilibrium 后 state.density == rho0
-[ ] HOME initialize_equilibrium 后 state.density == rho0
-[ ] VOF 初始化只读取 state.density
-[ ] 修改 API rho0 后仍以实际 state.density 计算 mass
+[x] FullF initialize_equilibrium 后 state.density == rho0
+[x] HOME initialize_equilibrium 后 state.density == rho0
+[x] VOF 初始化只读取 state.density
+[x] 修改 API rho0 后仍以实际 state.density 计算 mass
 ```
 
 最后一项应通过构造一个测试替身或可控的 initialized density 验证，不能仅因为当前
@@ -730,26 +730,26 @@ uv run python -m unittest newton.tests.test_lbm_vof_p1 -v
 ### 10.4 phi0 输入
 
 ```text
-[ ] 合法 shape 和 dtype
-[ ] phi0=0 -> GAS/mass0/phi0
-[ ] phi0=1 -> LIQUID/mass=density/phi1
-[ ] 0<phi0<1 -> INTERFACE/mass=density*phi
-[ ] NaN/Inf 被拒绝
-[ ] phi0<0 或 phi0>1 被拒绝
-[ ] shape mismatch 被拒绝
-[ ] 任意 solid cell 被拒绝，与该 cell 的 phi0 无关
+[x] 合法 shape 和 dtype
+[x] phi0=0 -> GAS/mass0/phi0
+[x] phi0=1 -> LIQUID/mass=density/phi1
+[x] 0<phi0<1 -> INTERFACE/mass=density*phi
+[x] NaN/Inf 被拒绝
+[x] phi0<0 或 phi0>1 被拒绝
+[x] shape mismatch 被拒绝
+[x] 任意 solid cell 被拒绝，与该 cell 的 phi0 无关
 ```
 
 ### 10.5 topology
 
 ```text
-[ ] LIQUID-INTERFACE-GAS 合法
-[ ] face-direction L-G 被拒绝
-[ ] edge-direction L-G 被拒绝
-[ ] periodic seam L-G 被拒绝
-[ ] 错误包含 count 和首个 cell/方向
-[ ] 多个不连通 GAS 区域不触发额外分析
-[ ] 全液体、无 GAS 的初始化合法
+[x] LIQUID-INTERFACE-GAS 合法
+[x] face-direction L-G 被拒绝
+[x] edge-direction L-G 被拒绝
+[x] periodic seam L-G 被拒绝
+[x] 错误包含 count 和首个 cell/方向
+[x] 多个不连通 GAS 区域不触发额外分析
+[x] 全液体、无 GAS 的初始化合法
 ```
 
 D3Q19 不包含三轴 corner link；P1 不应使用 D3Q27 的 26 邻居规则替代项目格链。
@@ -757,11 +757,11 @@ D3Q19 不包含三轴 corner link；P1 不应使用 D3Q27 的 26 邻居规则替
 ### 10.6 双缓冲和门禁
 
 ```text
-[ ] domain.initialize_vof 初始化两个 buffer
-[ ] 两个 buffer 数值相同且 storage 独立
-[ ] domain.step() 在任何状态写入前 fail-fast
-[ ] step 失败后两个 buffer 未交换
-[ ] step 失败后 VOF 和 kinetic 数组未改变
+[x] domain.initialize_vof 初始化两个 buffer
+[x] 两个 buffer 数值相同且 storage 独立
+[x] domain.step() 在任何状态写入前 fail-fast
+[x] step 失败后两个 buffer 未交换
+[x] step 失败后 VOF 和 kinetic 数组未改变
 ```
 
 ### 10.7 P0 回归
@@ -829,23 +829,23 @@ clone state_in 到 state_out
 ## 12. P1 退出门禁
 
 ```text
-[ ] VofGridState 只有 mass/phi/cell_type
-[ ] off/shan_chen/vof 分配矩阵正确
-[ ] FullF/Home 都通过同一 state.density 初始化契约
-[ ] mass 使用实际初始化后的 density
-[ ] phi0 立即通过 mass/density 反算并规范化
-[ ] GAS/INTERFACE/LIQUID 不变量通过
-[ ] D3Q19 L-G 邻接和 periodic seam 检查通过
-[ ] 任意 solid domain 在初始化期 fail-fast
-[ ] GAS 连通性和气泡压力不在 P1 中推断
-[ ] 首次/重复初始化都使用成功后提交的 candidate buffer
-[ ] state_in/state_out 数值相同、storage 独立
-[ ] clear/copy/clone 只处理三个数组
-[ ] requires_grad 明确 fail-fast
-[ ] domain.step 在状态修改前 fail-fast
-[ ] P1 针对性测试全部通过
-[ ] P0 CPU 基线全部通过
-[ ] capability status 与 P1 冻结记录已更新
+[x] VofGridState 只有 mass/phi/cell_type
+[x] off/shan_chen/vof 分配矩阵正确
+[x] FullF/Home 都通过同一 state.density 初始化契约
+[x] mass 使用实际初始化后的 density
+[x] phi0 立即通过 mass/density 反算并规范化
+[x] GAS/INTERFACE/LIQUID 不变量通过
+[x] D3Q19 L-G 邻接和 periodic seam 检查通过
+[x] 任意 solid domain 在初始化期 fail-fast
+[x] GAS 连通性和气泡压力不在 P1 中推断
+[x] 首次/重复初始化都使用成功后提交的 candidate buffer
+[x] state_in/state_out 数值相同、storage 独立
+[x] clear/copy/clone 只处理三个数组
+[x] requires_grad 明确 fail-fast
+[x] domain.step 在状态修改前 fail-fast
+[x] P1 针对性测试全部通过
+[x] P0 CPU 基线全部通过
+[x] capability status 与 P1 冻结记录已更新
 ```
 
 ## 13. P1 完成后允许的声明
@@ -896,7 +896,8 @@ P2 第一次需要 `f_i^n(x)` 时，才增加 FullF/HOME logical population 的�
 |---|---|
 | 验收日期 | 2026-07-30 |
 | 基础 HEAD | `981d944158e02c7ad70a773bd212123e427b6ce5` |
-| 工作区状态 | P1 已实现并通过 CPU 测试，尚未提交冻结 |
+| P1 实现提交 | `bf3b823bc3f1ab5d057fda91333b69130f7702e5` |
+| 阶段状态 | `CPU_ACCEPTED` |
 | P1 针对性测试 | 18 项通过 |
 | P0 冻结回归 | 39 项核心 + 6 项 directional 全部通过 |
 | Ruff | P1 变更 Python 文件 `F/I` 检查通过 |
@@ -915,5 +916,6 @@ P0 回归命令继续使用 [07-p0-baseline.md](07-p0-baseline.md) 的 39 项固
 uv run python -m unittest newton.tests.test_lbm_directional_streaming -v
 ```
 
-当前状态可以声明 `IMPLEMENTED_CPU_VERIFIED`，但只有在形成提交并记录对应代码 SHA
-之后才能升级为冻结的 `CPU_ACCEPTED`。
+P1 已形成独立实现提交并记录代码 SHA，状态冻结为 `CPU_ACCEPTED`。P2 开始前仍需
+冻结质量交换 scheme、质量子步 density 时间层和 interface-gas logical population
+语义；这些不反向扩大 P1。
