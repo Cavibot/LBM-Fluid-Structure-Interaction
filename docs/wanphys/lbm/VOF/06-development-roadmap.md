@@ -105,6 +105,7 @@ bubble/foam
 | P5 | 新界面 kinetic 初始化 | 新流体格点怎样获得合法状态 | P4 |
 | P6 | PLIC、曲率与表面张力 | 界面形状及毛细压力是什么 | P5 |
 | P7 | 综合验收、HOME 与设备扩展 | 各模块组合后是否仍然正确 | P6 |
+| P8 | 可视化 dam-break | 最终能力如何被复现、观察和启动 | P7 |
 
 任何阶段只有在其退出门禁全部满足后，才能进入下一阶段的正式实现。
 
@@ -358,13 +359,13 @@ oracle 测试：
 ### 7.5 退出门禁
 
 ```text
-[ ] 固定类型单步手算全部通过
-[ ] 周期/封闭域总质量守恒
-[ ] boundary flux 记账闭合
-[ ] NumPy oracle 逐格匹配
-[ ] mass scheme 来源和 gas-link 语义已被测试锁定
-[ ] 没有读取 gas kinetic storage
-[ ] 任意 phi 越界会被观测而非静默修复
+[x] 固定类型单步手算全部通过
+[x] 周期/封闭域总质量守恒
+[x] 当前支持边界的零质量通量语义已锁定
+[x] NumPy oracle 逐格匹配
+[x] mass scheme 来源和 gas-link 语义已被测试锁定
+[x] 没有读取 gas kinetic storage
+[x] 任意 phi 越界会被观测而非静默修复
 ```
 
 ## 8. P3：零表面张力自由面 LBM 边界
@@ -425,11 +426,11 @@ interface 仍能获得完整 populations。第一版固定大气压力并令
 ### 8.5 退出门禁
 
 ```text
-[ ] 所有 gas-to-interface 链补全且方向正确
-[ ] gas kinetic 垃圾值不影响结果
-[ ] gamma=0 平面自由面稳定
-[ ] rho_g 非法值有明确失败策略
-[ ] 质量平流守恒没有被 surface completion 破坏
+[x] 所有 gas-to-interface 链补全且方向正确
+[x] gas kinetic 垃圾值不影响结果
+[x] gamma=0 平面自由面稳定
+[x] rho_g 非法值有明确失败策略
+[x] 质量平流守恒没有被 surface completion 破坏
 ```
 
 ## 9. P4：类型转换与守恒质量重分配
@@ -711,7 +712,34 @@ interface_cell_count
 [ ] 不包含 bubble、moving solid 或 foam 隐式依赖
 ```
 
-## 13. 建议代码边界
+## 13. P8：可视化 dam-break
+
+### 13.1 阶段概要
+
+在 P7 完成综合物理与设备验收后，新增一个用户可直接启动的 authoritative VOF
+dam-break 可视化案例。P8 展示已经验收的能力，不再引入新的 VOF 物理。
+
+### 13.2 开发内容
+
+- 新增独立 authoritative VOF dam-break 示例；
+- 使用最终 `state.vof.phi/cell_type` 生成可视化，而不是 SC debug observation；
+- 提供可重复的小网格 smoke/无窗口测试；
+- 提供 CPU 启动命令、参数说明和可选 CUDA 启动方式；
+- 运行时显示或记录质量误差、界面格点数、`phi` 范围和最大速度；
+- 默认场景不包含气泡、泡沫、移动固体或流固耦合。
+
+### 13.3 验收目标
+
+```text
+[ ] 无窗口 smoke test 可完成且无 NaN/Inf
+[ ] 可视化入口读取 authoritative VOF 状态
+[ ] dam-break 运行时质量账本与 P7 阈值一致
+[ ] 启动方式在干净环境中可复现
+[ ] README 明确 CPU/CUDA 能力与限制
+[ ] 不引入新的物理、固体、气泡或泡沫依赖
+```
+
+## 14. 建议代码边界
 
 建议保持 `LbmSolver` 只负责顶层调度，VOF 物理由独立模块拥有：
 
@@ -736,7 +764,7 @@ lbm/vof/
 生产 kernel 可以按模块拆分，也可以在正确性冻结后融合。Python 调度层必须保留清晰
 阶段边界和可单独调用的测试入口。
 
-## 14. Solver 最终调度契约
+## 15. Solver 最终调度契约
 
 完成 P6 后，单步建议固定为：
 
@@ -766,7 +794,7 @@ lbm/vof/
 - 下一步 Eq. (12) 读取刚完成的同 epoch curvature；
 - 普通 domain boundary 与 gas surface boundary 必须有明确优先级。
 
-## 15. 验收阈值管理
+## 16. 验收阈值管理
 
 本文定义必须测什么，不凭空固定所有数值阈值。每个 benchmark 开始编码前，应在独立
 acceptance 文件冻结：
@@ -782,7 +810,7 @@ acceptance 文件冻结：
 
 阈值不能在看到失败结果后临时放宽。若确需调整，必须记录原因、旧值、新值和证据。
 
-## 16. 阶段状态表
+## 17. 阶段状态表
 
 建议使用以下状态：
 
@@ -802,27 +830,29 @@ BLOCKED
 | P0 | CPU_ACCEPTED | observation/debug 边界和旧 LBM CPU 基线已冻结 |
 | P1 | CPU_ACCEPTED | authoritative 状态、初始化、双缓冲和 fail-fast 已冻结 |
 | P2 | CPU_ACCEPTED | FullF fixed-topology mass transport、旧 density 时间层、gas-link zero flux 已冻结 |
-| P3 | NOT_STARTED | `surface_completion` 仍为 fail-fast 占位 |
+| P3 | CPU_ACCEPTED | FullF fixed-topology Eq.11、gamma=0 surface step 与事务门禁已冻结 |
 | P4 | NOT_STARTED | 无 transition/topology/redistribution |
 | P5 | NOT_STARTED | 无通用 GAS→INTERFACE kinetic 初始化 |
 | P6 | NOT_STARTED | observation normal 已有，但正式 PLIC/curvature 未完成 |
 | P7 | NOT_STARTED | 尚无完整自由表面集成验收 |
+| P8 | NOT_STARTED | 尚无 authoritative VOF dam-break 可视化验收与启动入口 |
 
 只有状态达到 `CPU_ACCEPTED` 才能进入下一物理阶段；合并到声称支持 CUDA 的主路径前，
 还必须达到 `CUDA_ACCEPTED`。
 
-## 17. 下一阶段入口
+## 18. 下一阶段入口
 
-P2 已完成并冻结：
+P3 已完成并冻结：
 
 ```text
-scheme = fslbm_neighbor
-density = state n
-interface-gas mass flux = 0
-FullF transport writes scratch only
-NumPy oracle and periodic conservation accepted
+Eq.11 uses pull source x-c_q and local opposite population
+rho_g = p_atmos/c_s^2, gamma = 0
+FullF fixed-topology step is available
+gas kinetic storage is never a physical input
+phi(n+1) closes with density_out
+required type transitions fail before current-buffer swap
 ```
 
-P3 下一步把 Eq. (11) 的固定大气压、零表面张力 gas-to-interface reconstruction
-接入 streaming，并在 fixed topology 下形成第一个完整 LBM+VOF step。只有完成
-P3-P6 后才能声明自由表面能够正确推进。
+P4 下一步必须先冻结 transition threshold、拓扑修复邻域、冲突优先级、正负 excess
+定义、重分配权重与 zero-receiver 策略，再实现 deterministic multi-pass
+transition/redistribution。只有完成 P4-P6 后才能声明移动自由表面能够正确推进。

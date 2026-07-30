@@ -25,6 +25,8 @@ from .vof.initialization import (
     prepare_initial_vof,
     validate_no_solid_cells,
 )
+from .vof.surface import VofSurfaceBoundary
+from .vof.validation import validate_p3_fixed_topology_state
 
 
 class LbmSolver(FluidGridSolverBase):
@@ -129,6 +131,14 @@ class LbmSolver(FluidGridSolverBase):
                 (self.nx, self.ny, self.nz),
                 self.device,
                 model._periodic_ints,
+            )
+        self._vof_surface_boundary = None
+        if model.interface_model == "vof":
+            self._vof_surface_boundary = VofSurfaceBoundary(
+                (self.nx, self.ny, self.nz),
+                self.device,
+                model._periodic_ints,
+                float(model.vof_atmosphere_pressure),
             )
 
         self._collision_name = model.resolved_collision
@@ -376,6 +386,28 @@ class LbmSolver(FluidGridSolverBase):
             )
         return self._vof_mass_transport.compute_fullf(state_in)
 
+    def compute_vof_surface_populations(
+        self,
+        state_in: LbmStateBase,
+    ) -> wp.array:
+        """Form P3 streamed FullF populations with Eq. (11) completion."""
+
+        if self.model.interface_model != "vof":
+            raise ValueError(
+                "compute_vof_surface_populations requires interface_model='vof'"
+            )
+        if not isinstance(state_in, FullFLbmState):
+            raise NotImplementedError(
+                "P3 authoritative VOF surface completion supports FullF only; "
+                "HOME is deferred to P7"
+            )
+        if self._vof_surface_boundary is None:
+            raise RuntimeError("VOF surface boundary was not allocated")
+        px, py, pz = self.model._periodic_ints
+        self._stream_to_populations(state_in, px, py, pz)
+        self._vof_surface_boundary.complete_fullf(state_in, self._f_star)
+        return self._f_star
+
     def step(
         self,
         state_in: LbmStateBase,
@@ -385,18 +417,32 @@ class LbmSolver(FluidGridSolverBase):
         control: Any | None = None,
     ) -> None:
         """Advance ``post-collision -> stream -> collide -> post-collision``."""
-        if self.model.interface_model == "vof":
+        is_vof = self.model.interface_model == "vof"
+        if is_vof and (
+            not isinstance(state_in, FullFLbmState)
+            or not isinstance(state_out, FullFLbmState)
+        ):
             raise NotImplementedError(
-                "P2 supports authoritative VOF initialization and isolated "
-                "fixed-topology mass transport only; complete VOF time "
-                "stepping requires P3 surface completion"
+                "P3 authoritative VOF time stepping supports FullF only; "
+                "HOME is deferred to P7"
             )
+        if is_vof:
+            if self._vof_mass_transport is None:
+                raise RuntimeError("VOF mass transport was not allocated")
+            if self._vof_surface_boundary is None:
+                raise RuntimeError("VOF surface boundary was not allocated")
+            self._vof_mass_transport.compute_fullf(state_in)
+
         del contacts, control, dt
         self._copy_boundary_fields(state_in, state_out)
         px, py, pz = self.model._periodic_ints
 
         # 1. StateProvider + StreamingEngine always form logical populations.
         self._stream_to_populations(state_in, px, py, pz)
+        if is_vof:
+            assert isinstance(state_in, FullFLbmState)
+            assert self._vof_surface_boundary is not None
+            self._vof_surface_boundary.complete_fullf(state_in, self._f_star)
         if self.model.use_cut_link:
             if isinstance(state_in, FullFLbmState):
                 cut_link_kernel = streaming.apply_fullf_cut_link_transport_kernel
@@ -607,6 +653,23 @@ class LbmSolver(FluidGridSolverBase):
             self._encode_populations_to_home(output_f, state_out)
 
         self._write_observables(state_out)
+        if is_vof:
+            assert isinstance(state_in, FullFLbmState)
+            assert isinstance(state_out, FullFLbmState)
+            assert self._vof_surface_boundary is not None
+            assert self._vof_mass_transport is not None
+            self._vof_surface_boundary.restore_gas(state_in, state_out)
+            self._vof_mass_transport.finalize_fixed_topology(
+                state_in,
+                state_out,
+            )
+            validate_p3_fixed_topology_state(
+                state_in,
+                state_out,
+                periodic=tuple(
+                    bool(value) for value in self.model._periodic_ints
+                ),
+            )
         self.update_debug_mock_sc_to_vof(state_out)
 
     def _copy_boundary_fields(self, state_in: LbmStateBase, state_out: LbmStateBase) -> None:

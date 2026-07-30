@@ -133,7 +133,7 @@ class TestVofP2Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown VOF mass scheme"):
             _model((3, 2, 2), scheme="paper_center")
 
-    def test_p2_is_fullf_only_and_complete_step_still_fails_before_writes(
+    def test_p2_is_fullf_only_and_home_step_still_fails_before_writes(
         self,
     ) -> None:
         shape = (3, 2, 2)
@@ -142,17 +142,19 @@ class TestVofP2Contracts(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "deferred to P7"):
             home.solver.compute_vof_mass_transport(home.state)
 
-        fullf = _domain_from_phi(phi)
-        state_before = fullf.state.clone()
-        with self.assertRaisesRegex(NotImplementedError, "requires P3"):
-            fullf.step(1.0)
-        np.testing.assert_array_equal(
-            fullf.state.f_post.numpy(), state_before.f_post.numpy()
-        )
-        assert fullf.state.vof is not None and state_before.vof is not None
+        state_before = home.state.clone()
+        with self.assertRaisesRegex(NotImplementedError, "deferred to P7"):
+            home.step(1.0)
+        assert home.state.vof is not None and state_before.vof is not None
+        for actual, expected in zip(
+            home.state.kinetic_fields,
+            state_before.kinetic_fields,
+            strict=True,
+        ):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
         for name in ("mass", "phi", "cell_type"):
             np.testing.assert_array_equal(
-                getattr(fullf.state.vof, name).numpy(),
+                getattr(home.state.vof, name).numpy(),
                 getattr(state_before.vof, name).numpy(),
             )
 

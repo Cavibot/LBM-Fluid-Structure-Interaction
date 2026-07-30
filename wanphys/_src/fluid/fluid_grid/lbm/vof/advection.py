@@ -11,7 +11,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
-from .advection_kernels import advect_vof_mass_fullf_fixed_topology_kernel
+from .advection_kernels import (
+    advect_vof_mass_fullf_fixed_topology_kernel,
+    finalize_fixed_topology_vof_kernel,
+)
 from .initialization import (
     validate_initial_topology,
     validate_initialized_density,
@@ -147,6 +150,29 @@ class VofMassTransport:
             device=self.device,
         )
         return self.result
+
+    def finalize_fixed_topology(
+        self,
+        state_in: FullFLbmState,
+        state_out: FullFLbmState,
+    ) -> None:
+        """Commit the latest provisional mass using P3 output density."""
+
+        if state_in.vof is None or state_out.vof is None:
+            raise ValueError("P3 fixed-topology commit requires VOF storage")
+        wp.launch(
+            finalize_fixed_topology_vof_kernel,
+            dim=self.shape,
+            inputs=[
+                self._mass_tmp,
+                state_out.density,
+                state_in.vof.cell_type,
+                state_out.vof.mass,
+                state_out.vof.phi,
+                state_out.vof.cell_type,
+            ],
+            device=self.device,
+        )
 
 
 __all__ = [

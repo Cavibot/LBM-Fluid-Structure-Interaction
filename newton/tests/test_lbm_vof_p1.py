@@ -372,20 +372,25 @@ class TestVofP1Initialization(unittest.TestCase):
         ordinary_walls = LbmDomain(_vof_model())
         ordinary_walls.initialize_vof(_layered_phi())
 
-    def test_step_fails_before_mutation_or_buffer_swap(self) -> None:
-        domain = LbmDomain(_vof_model())
+    def test_home_step_fails_before_mutation_or_buffer_swap_until_p7(self) -> None:
+        domain = LbmDomain(_vof_model(encoding="home"))
         state_in = domain.initialize_vof(_layered_phi())
         state_out = domain._state_out
         assert state_in.vof is not None and state_out is not None
-        f_before = state_in.f_post.numpy().copy()
+        kinetic_before = tuple(
+            field.numpy().copy() for field in state_in.kinetic_fields
+        )
         mass_before = state_in.vof.mass.numpy().copy()
 
-        with self.assertRaisesRegex(NotImplementedError, "time stepping"):
+        with self.assertRaisesRegex(NotImplementedError, "deferred to P7"):
             domain.step(1.0)
 
         self.assertIs(domain._state_in, state_in)
         self.assertIs(domain._state_out, state_out)
-        np.testing.assert_array_equal(state_in.f_post.numpy(), f_before)
+        for field, expected in zip(
+            state_in.kinetic_fields, kinetic_before, strict=True
+        ):
+            np.testing.assert_array_equal(field.numpy(), expected)
         np.testing.assert_array_equal(state_in.vof.mass.numpy(), mass_before)
 
     def test_uniform_initial_conditions_must_survive_float32_conversion(self) -> None:

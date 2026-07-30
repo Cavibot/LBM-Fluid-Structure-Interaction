@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from dataclasses import dataclass, field
 
@@ -59,6 +60,12 @@ class LbmModel(FluidGridModelBase):
 
     vof_mass_scheme: str = "fslbm_neighbor"
     """Authoritative VOF mass exchange; P2 freezes the FSLBM neighbour scheme."""
+
+    vof_atmosphere_pressure: float = 1.0 / 3.0
+    """P3 atmospheric pressure in lattice units; ``c_s^2`` gives ``rho_g=1``."""
+
+    vof_surface_tension: float = 0.0
+    """Surface-tension coefficient; authoritative nonzero support begins in P6."""
 
     force_model: str = field(init=False, default=ForceModel.NONE.value)
     """Normalized internal force-pipeline combination; not caller configuration."""
@@ -404,6 +411,33 @@ class LbmModel(FluidGridModelBase):
                 "P1 authoritative VOF does not support moving-wall or cut-link "
                 "solid boundaries"
             )
+        if not math.isfinite(float(self.vof_atmosphere_pressure)):
+            raise ValueError("vof_atmosphere_pressure must be finite")
+        if float(self.vof_atmosphere_pressure) <= 0.0:
+            raise ValueError("vof_atmosphere_pressure must be > 0")
+        if not math.isfinite(float(self.vof_surface_tension)):
+            raise ValueError("vof_surface_tension must be finite")
+        if float(self.vof_surface_tension) < 0.0:
+            raise ValueError("vof_surface_tension must be >= 0")
+        if (
+            resolved_interface is InterfaceModel.VOF
+            and float(self.vof_surface_tension) != 0.0
+        ):
+            raise NotImplementedError(
+                "P3 authoritative VOF requires vof_surface_tension=0; "
+                "nonzero surface tension is deferred to P6"
+            )
+        if resolved_interface is InterfaceModel.VOF:
+            unsupported_vof_boundaries = tuple(
+                name
+                for name in (self.boundary_models or ())
+                if name in {"zou_he", "pressure", "convective"}
+            )
+            if unsupported_vof_boundaries:
+                raise NotImplementedError(
+                    "P3 authoritative VOF supports periodic and static "
+                    "bounce-back domain boundaries only"
+                )
         if (
             resolved_interface is not InterfaceModel.SHAN_CHEN
             and float(self.G) != 0.0

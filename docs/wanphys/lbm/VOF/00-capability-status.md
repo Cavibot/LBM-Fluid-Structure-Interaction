@@ -2,10 +2,11 @@
 
 本文是当前 LBM/VOF 能力的状态入口，严格区分 Shan-Chen 调试观察与未来的守恒
 VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
-[06-development-roadmap.md](06-development-roadmap.md)。P0、P1 与 P2 当前均为
+[06-development-roadmap.md](06-development-roadmap.md)。P0-P3 当前均为
 `CPU_ACCEPTED`；冻结证据分别见 [07-p0-baseline.md](07-p0-baseline.md)、
 [08-p1-engineering-plan.md](08-p1-engineering-plan.md) 和
-[10-p2-completion-summary.md](10-p2-completion-summary.md)，CUDA 尚未验收。
+[10-p2-completion-summary.md](10-p2-completion-summary.md)、
+[13-p3-completion-summary.md](13-p3-completion-summary.md)，CUDA 尚未验收。
 
 ## 1. 状态含义
 
@@ -15,6 +16,7 @@ VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
 | `OBSERVE_CPU_ACCEPTED` | 调试观察路径已有 CPU 针对性测试；不是 VOF 物理验收 |
 | `AUTHORITATIVE_CPU_ACCEPTED` | authoritative 状态与初始化通过 CPU 验收；不代表可推进 |
 | `TRANSPORT_CPU_ACCEPTED` | 独立 fixed-topology transport 通过 CPU 验收；不代表完整 step 可运行 |
+| `SURFACE_CPU_ACCEPTED` | FullF fixed-topology、零表面张力自由面 step 通过 CPU 验收 |
 | `NOT_STARTED` | 尚未实现 |
 | `FAIL_FAST` | 当前只允许显式拒绝 |
 | `CUDA_NOT_ACCEPTED` | 尚未完成 CUDA 验收 |
@@ -25,6 +27,8 @@ VOF。公式依据见 [01-paper-audit.md](01-paper-audit.md)，阶段门禁见
 interface_model: Literal["off", "shan_chen", "vof"] = "off"
 debug_vof_observation: bool = False
 vof_mass_scheme: Literal["fslbm_neighbor"] = "fslbm_neighbor"
+vof_atmosphere_pressure: float = 1 / 3
+vof_surface_tension: float = 0
 ```
 
 `interface_model` 是界面物理的唯一权威选择。`force_model` 是不可由调用者传入的内部
@@ -46,8 +50,11 @@ vof         + gravity    -> gravity
 - 非 Shan-Chen 模式配置非零 `G`：`ValueError`；
 - VOF 配置 moving-wall 或 cut-link：`NotImplementedError`；
 - VOF 请求 `requires_grad=True`：`NotImplementedError`；
-- VOF 调用完整 `step()`：`NotImplementedError`，等待 P3 surface completion。
-- P2 HOME mass transport：`NotImplementedError`，等待 P7。
+- VOF 配置非正/非有限大气压力：`ValueError`；
+- VOF 配置非零表面张力：`NotImplementedError`，等待 P6；
+- VOF 配置开口 domain boundary：`NotImplementedError`，等待 P7；
+- HOME authoritative VOF step：`NotImplementedError`，等待 P7；
+- FullF step 中需要类型变化：验证失败，等待 P4。
 
 旧字段 `vof_debug_labels` 和调用者可配置的 `force_model` 均已删除，没有 deprecated
 alias。
@@ -66,7 +73,13 @@ alias。
 | `vof_mass_scheme` | `TRANSPORT_CPU_ACCEPTED` | 配置层 | 固定为已审计的 `fslbm_neighbor` |
 | `VofMassTransport` | `TRANSPORT_CPU_ACCEPTED` | solver scratch | 无副作用 FullF 固定拓扑质量交换 |
 | `mass_tmp/phi_tmp/mass_delta` | `TRANSPORT_CPU_ACCEPTED` | P2 transport | 旧时间层 provisional scratch，不是持久状态 |
-| `compute_vof_mass_transport()` | `TRANSPORT_CPU_ACCEPTED` | solver | 独立 P2 调度；完整 step 仍关闭 |
+| `compute_vof_mass_transport()` | `TRANSPORT_CPU_ACCEPTED` | solver | 独立 P2 transport 测试入口 |
+| `vof_atmosphere_pressure` | `SURFACE_CPU_ACCEPTED` | 配置层 | 固定气相压力，默认 `c_s^2` |
+| `vof_surface_tension` | `SURFACE_CPU_ACCEPTED` | 配置层 | P3 必须为零，非零留给 P6 |
+| `VofSurfaceBoundary` | `SURFACE_CPU_ACCEPTED` | solver stage | Eq.11 gas-to-interface population 补全 |
+| `compute_vof_surface_populations()` | `SURFACE_CPU_ACCEPTED` | solver | 独立 FullF pull + Eq.11 测试入口 |
+| FullF fixed-topology `step()` | `SURFACE_CPU_ACCEPTED` | solver/domain | gamma=0；成功后才交换双缓冲 |
+| `validate_p3_fixed_topology_state()` | `SURFACE_CPU_ACCEPTED` | validator | 越界/非法 topology 在 buffer swap 前失败 |
 | `LbmDomain.initialize_vof()` | `AUTHORITATIVE_CPU_ACCEPTED` | domain | candidate 双缓冲完整初始化 |
 | `validate_initialized_vof_state()` | `AUTHORITATIVE_CPU_ACCEPTED` | validator | 只读检查实际数组不变量 |
 | `DebugMockScToVofState` | `OBSERVE_CPU_ACCEPTED` | debug observer | 与正式 VOF 分离的调试容器 |
@@ -87,7 +100,7 @@ alias。
 |---|---|---|---|
 | `off` | 单相 LBM | 禁止 | 无 VOF view |
 | `shan_chen` | density | 只写 `state.debug_mock_sc_to_vof` | 只读 `DebugVofView` |
-| `vof`（P1） | `state.vof.mass/phi/cell_type` | 不得覆盖正式状态 | authoritative view 尚未接入 |
+| `vof`（P3） | `state.vof.mass/phi/cell_type` | 不得覆盖正式状态 | FullF 固定拓扑 step 可用 |
 
 P0 数据流：
 
@@ -108,7 +121,7 @@ population 有效性或边界行为。
 | 能力 | 状态 | 未来权威写入者 |
 |---|---|---|
 | physical VOF construction/initialization | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer |
-| physical VOF time stepping | `FAIL_FAST` | P3-P6 VOF stepper |
+| physical VOF time stepping | `SURFACE_CPU_ACCEPTED` | P3 FullF fixed-topology stepper |
 | `mass/phi/cell_type` initialization | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer |
 | FullF fixed-topology mass advection | `TRANSPORT_CPU_ACCEPTED` | P2 mass transport scratch |
 | HOME fixed-topology mass advection | `NOT_STARTED` | P7 logical population provider |
@@ -116,15 +129,15 @@ population 有效性或边界行为。
 | authoritative normal | `NOT_STARTED` | geometry step |
 | FullF logical population access for mass flux | `TRANSPORT_CPU_ACCEPTED` | P2 direct FullF access |
 | shared FullF/HOME logical population provider | `NOT_STARTED` | P7 adapter |
-| gas-to-interface completion | `FAIL_FAST` | surface boundary step |
+| gas-to-interface completion | `SURFACE_CPU_ACCEPTED` | P3 `VofSurfaceBoundary` |
 | topology repair / redistribution | `NOT_STARTED` | transition steps |
 | new-interface kinetic initialization | `NOT_STARTED` | initialization step |
 | PLIC / curvature / surface tension | `NOT_STARTED` | geometry/free-surface pressure |
 
-正式 VOF 状态与 `debug_vof_observation` 无关：即使不显示也必须分配。P2 在 P1
-基础上允许独立计算 FullF fixed-topology `mass_tmp/phi_tmp/mass_delta`，但 transport
-不得修改持久状态；完整时间推进仍在 solver 最前端 fail-fast。`mass` 是守恒权威；
-`phi` 与 `cell_type` 不得由独立的第二权威写入。
+正式 VOF 状态与 `debug_vof_observation` 无关：即使不显示也必须分配。P2 的独立
+FullF fixed-topology `mass_tmp/phi_tmp/mass_delta` 仍不修改持久状态；P3 将
+`mass_tmp` 接入完整 FullF step，并用最终 `density_out` 反算持久 `phi`。`mass`
+仍是守恒权威；P3 不允许改变 `cell_type`。
 
 P2 冻结语义：
 
@@ -134,4 +147,16 @@ mass/density/populations/phi read at n
 interface-gas mass flux = 0
 gas kinetic storage is never read for VOF mass
 non-periodic out-of-domain VOF mass flux = 0
+```
+
+P3 冻结语义：
+
+```text
+rho_g = vof_atmosphere_pressure / c_s^2
+surface_tension = 0
+Eq.11 reads type/velocity/opposite population at n
+surface completion overwrites only GAS -> INTERFACE pull links
+gas persistent kinetic storage is not a physical input
+phi(n+1) = mass_tmp / density_out
+topology remains fixed; required transitions fail before buffer swap
 ```

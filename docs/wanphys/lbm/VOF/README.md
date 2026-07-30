@@ -1,9 +1,9 @@
 # LBM VOF 当前能力与开发入口
 
-当前仓库已经冻结 authoritative VOF 的 P1 状态/初始化与 P2 FullF 固定拓扑质量
-transport。P2 transport 只写 solver scratch，不修改持久状态；P3 自由面 population
-补全完成前，完整 authoritative VOF `step()` 仍 fail-fast。Shan-Chen 调试观察路径
-继续与正式 VOF 完全隔离。
+当前仓库已经冻结 authoritative VOF 的 P1 状态/初始化、P2 FullF 固定拓扑质量
+transport 和 P3 零表面张力自由面边界。FullF 可以执行固定拓扑完整 step；需要
+类型变化时会在当前缓冲区交换前失败，等待 P4。Shan-Chen 调试观察路径继续与正式
+VOF 完全隔离。
 
 ## 当前 API
 
@@ -32,9 +32,9 @@ debug_vof_observation = false / true
 gravity = independent
 ```
 
-`force_model` 仅是内部派生结果，调用者不能配置。`interface_model="vof"` 可以执行
-P1 初始化和 P2 独立质量 transport，但完整 `step()` 会 `NotImplementedError`，
-防止把尚无 surface completion 的路径误当成正式自由面求解器。
+`force_model` 仅是内部派生结果，调用者不能配置。`interface_model="vof"` 的 P3
+首版要求 FullF、`vof_surface_tension=0` 以及 periodic/static bounce-back domain
+boundary；HOME 和开口 VOF domain boundary 会 fail-fast。
 
 ## 状态隔离
 
@@ -83,10 +83,10 @@ dam-break 示例的相关参数为：
 
 - P1 authoritative `state.vof`：`CPU_ACCEPTED`；
 - P2 FullF fixed-topology mass transport：`CPU_ACCEPTED`；
+- P3 FullF fixed-topology gamma=0 surface step：`CPU_ACCEPTED`；
 - HOME mass transport：P7；
-- 完整 authoritative VOF step：等待 P3；
+- moving-interface authoritative VOF step：等待 P4/P5；
 - 物理 GAS/INTERFACE/LIQUID 类型转换；
-- free-surface population reconstruction；
 - excess/deficit mass redistribution；
 - new-interface kinetic initialization；
 - PLIC、curvature 与表面张力；
@@ -102,9 +102,12 @@ dam-break 示例的相关参数为：
   气泡、固体与泡沫扩展；
 - [04-sequence-diagrams.md](04-sequence-diagrams.md)：算法时序；
 - [05-control-flow-diagrams.md](05-control-flow-diagrams.md)：控制流；
-- [06-development-roadmap.md](06-development-roadmap.md)：P0-P7 开发门禁；
+- [06-development-roadmap.md](06-development-roadmap.md)：P0-P8 开发门禁；
 - [07-p0-baseline.md](07-p0-baseline.md)：P0 冻结提交、环境与固定回归记录；
 - [08-p1-engineering-plan.md](08-p1-engineering-plan.md)：P1 authoritative 状态、初始化、双缓冲、测试与提交拆分；
 - [09-p2-engineering-plan.md](09-p2-engineering-plan.md)：P2 决策、实现和验收计划；
 - [10-p2-completion-summary.md](10-p2-completion-summary.md)：P2 完成与 CPU 验收总结；
 - [11-p2-change-architecture.md](11-p2-change-architecture.md)：P2 改动文件与关键架构新旧对比。
+- [12-p3-engineering-plan.md](12-p3-engineering-plan.md)：P3 决策、实现和验收计划；
+- [13-p3-completion-summary.md](13-p3-completion-summary.md)：P3 完成与 CPU 验收总结；
+- [14-p3-change-architecture.md](14-p3-change-architecture.md)：P3 改动文件与关键架构新旧对比。

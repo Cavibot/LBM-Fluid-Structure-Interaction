@@ -107,4 +107,30 @@ def advect_vof_mass_fullf_fixed_topology_kernel(
     phi_tmp[i, j, k] = updated_mass / density_n[i, j, k]
 
 
-__all__ = ["advect_vof_mass_fullf_fixed_topology_kernel"]
+@wp.kernel
+def finalize_fixed_topology_vof_kernel(
+    mass_tmp: wp.array3d(dtype=float),
+    density_out: wp.array3d(dtype=float),
+    cell_type_n: wp.array3d(dtype=wp.uint8),
+    mass_out: wp.array3d(dtype=float),
+    phi_out: wp.array3d(dtype=float),
+    cell_type_out: wp.array3d(dtype=wp.uint8),
+) -> None:
+    """Commit P2 mass against P3 output density without changing topology."""
+
+    i, j, k = wp.tid()
+    kind = cell_type_n[i, j, k]
+    if kind == wp.uint8(0):
+        mass_out[i, j, k] = 0.0
+        phi_out[i, j, k] = 0.0
+    else:
+        mass = mass_tmp[i, j, k]
+        mass_out[i, j, k] = mass
+        phi_out[i, j, k] = mass / density_out[i, j, k]
+    cell_type_out[i, j, k] = kind
+
+
+__all__ = [
+    "advect_vof_mass_fullf_fixed_topology_kernel",
+    "finalize_fixed_topology_vof_kernel",
+]

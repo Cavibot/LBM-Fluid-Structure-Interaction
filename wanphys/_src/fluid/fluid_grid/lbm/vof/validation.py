@@ -113,8 +113,59 @@ def validate_vof_buffer_pair(
             raise ValueError(f"VOF buffer {name} values differ")
 
 
+def validate_p3_fixed_topology_state(
+    state_in: LbmStateBase,
+    state_out: LbmStateBase,
+    *,
+    periodic: tuple[bool, bool, bool],
+    atol: float = 2.0e-6,
+    rtol: float = 2.0e-5,
+) -> None:
+    """Validate a committed P3 state while requiring unchanged topology."""
+
+    if state_in.vof is None or state_out.vof is None:
+        raise ValueError("P3 validation requires VOF storage on both states")
+    input_type = np.asarray(state_in.vof.cell_type.numpy())
+    output_type = np.asarray(state_out.vof.cell_type.numpy())
+    if not np.array_equal(input_type, output_type):
+        raise ValueError("P3 fixed-topology step changed cell_type")
+
+    density = np.asarray(state_out.density.numpy())
+    mass = np.asarray(state_out.vof.mass.numpy())
+    phi = np.asarray(state_out.vof.phi.numpy())
+    if not np.all(np.isfinite(mass)) or not np.all(np.isfinite(phi)):
+        raise ValueError("P3 output mass and phi must be finite")
+
+    gas = output_type == int(VofCellType.GAS)
+    interface = output_type == int(VofCellType.INTERFACE)
+    liquid = output_type == int(VofCellType.LIQUID)
+    active = interface | liquid
+    if not np.all(np.isfinite(density[active])) or np.any(density[active] <= 0.0):
+        raise ValueError("P3 active density must be finite and positive")
+    if np.any(mass[gas] != 0.0) or np.any(phi[gas] != 0.0):
+        raise ValueError("P3 GAS cells must retain mass=0 and phi=0")
+    if np.any(phi[interface] <= 0.0) or np.any(phi[interface] >= 1.0):
+        raise ValueError(
+            "P3 fixed topology requires every INTERFACE to remain in 0<phi<1; "
+            "type transitions begin in P4"
+        )
+    if not np.allclose(phi[liquid], 1.0, atol=atol, rtol=rtol):
+        raise ValueError(
+            "P3 fixed topology requires LIQUID phi to remain approximately 1"
+        )
+    if not np.allclose(
+        mass[active],
+        density[active] * phi[active],
+        atol=atol,
+        rtol=rtol,
+    ):
+        raise ValueError("P3 active cells must satisfy mass ~= density * phi")
+    validate_initial_topology(output_type, periodic=periodic)
+
+
 __all__ = [
     "validate_empty_vof_state",
     "validate_initialized_vof_state",
+    "validate_p3_fixed_topology_state",
     "validate_vof_buffer_pair",
 ]

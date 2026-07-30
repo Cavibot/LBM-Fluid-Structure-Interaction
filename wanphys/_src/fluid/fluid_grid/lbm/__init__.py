@@ -28,6 +28,7 @@ from .vof import (
     VofMassScheme,
     VofMassTransport,
     VofMassTransportResult,
+    VofSurfaceBoundary,
 )
 
 __all__ = [
@@ -56,4 +57,5 @@ __all__ = [
     "VofMassScheme",
     "VofMassTransport",
     "VofMassTransportResult",
+    "VofSurfaceBoundary",
 ]
