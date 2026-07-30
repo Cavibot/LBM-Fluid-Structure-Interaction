@@ -25,6 +25,9 @@ from .vof import (
     VofCellType,
     VofGridState,
     VofInterfaceVisualizer,
+    VofMassScheme,
+    VofMassTransport,
+    VofMassTransportResult,
 )
 
 __all__ = [
@@ -50,4 +53,7 @@ __all__ = [
     "VofCellType",
     "VofGridState",
     "VofInterfaceVisualizer",
+    "VofMassScheme",
+    "VofMassTransport",
+    "VofMassTransportResult",
 ]

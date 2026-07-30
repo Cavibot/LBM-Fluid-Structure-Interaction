@@ -3,7 +3,8 @@
 
 """Volume-of-fluid state, geometry, and visualization building blocks."""
 
-from .contracts import VofCellType
+from .advection import VofMassTransport, VofMassTransportResult
+from .contracts import VofCellType, VofMassScheme
 from .geometry import InterfaceGeometry
 from .state import DebugMockScToVofState, VofGridState
 from .visualization import DebugVofView, InterfaceVisualData, VofInterfaceVisualizer
@@ -16,4 +17,7 @@ __all__ = [
     "VofCellType",
     "VofGridState",
     "VofInterfaceVisualizer",
+    "VofMassScheme",
+    "VofMassTransport",
+    "VofMassTransportResult",
 ]

@@ -801,7 +801,7 @@ BLOCKED
 |---|---|---|
 | P0 | CPU_ACCEPTED | observation/debug 边界和旧 LBM CPU 基线已冻结 |
 | P1 | CPU_ACCEPTED | authoritative 状态、初始化、双缓冲和 fail-fast 已冻结 |
-| P2 | NOT_STARTED | 无 authoritative mass advection |
+| P2 | CPU_ACCEPTED | FullF fixed-topology mass transport、旧 density 时间层、gas-link zero flux 已冻结 |
 | P3 | NOT_STARTED | `surface_completion` 仍为 fail-fast 占位 |
 | P4 | NOT_STARTED | 无 transition/topology/redistribution |
 | P5 | NOT_STARTED | 无通用 GAS→INTERFACE kinetic 初始化 |
@@ -813,15 +813,16 @@ BLOCKED
 
 ## 17. 下一阶段入口
 
-P2 开始前先提交质量交换 ADR，然后实现固定类型 Eq. (9)-(10)：
+P2 已完成并冻结：
 
 ```text
-冻结 mass scheme、rho 时间层和 gas-link logical population 语义
-只实现 FullF 质量平流
-不转换、不 clamp、不重分配
-加入单格链手算和 NumPy oracle
-加入周期域总质量守恒测试
+scheme = fslbm_neighbor
+density = state n
+interface-gas mass flux = 0
+FullF transport writes scratch only
+NumPy oracle and periodic conservation accepted
 ```
 
-P1 已经使项目从 observation-only 进入可安全初始化的 authoritative VOF；只有完成
-P2-P6 后才能声明自由表面能够正确推进。
+P3 下一步把 Eq. (11) 的固定大气压、零表面张力 gas-to-interface reconstruction
+接入 streaming，并在 fixed topology 下形成第一个完整 LBM+VOF step。只有完成
+P3-P6 后才能声明自由表面能够正确推进。

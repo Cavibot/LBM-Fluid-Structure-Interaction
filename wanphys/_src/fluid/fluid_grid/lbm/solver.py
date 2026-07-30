@@ -18,6 +18,7 @@ from .constants import BC_OUTFLOW
 from .contracts import CollisionContext, CollisionSpace, ForceModel, collision_contract
 from .model import LbmModel
 from .state import FullFLbmState, HomeLbmState, LbmStateBase
+from .vof.advection import VofMassTransport, VofMassTransportResult
 from .vof.debug import DebugMockScToVofObserver
 from .vof.initialization import (
     initialize_vof_fields,
@@ -120,6 +121,13 @@ class LbmSolver(FluidGridSolverBase):
                 float(model.vof_debug_rho_gas),
                 float(model.vof_debug_rho_liquid),
                 float(model.vof_debug_epsilon),
+                model._periodic_ints,
+            )
+        self._vof_mass_transport = None
+        if model.interface_model == "vof":
+            self._vof_mass_transport = VofMassTransport(
+                (self.nx, self.ny, self.nz),
+                self.device,
                 model._periodic_ints,
             )
 
@@ -349,6 +357,25 @@ class LbmSolver(FluidGridSolverBase):
     # Main step
     # ------------------------------------------------------------------
 
+    def compute_vof_mass_transport(
+        self,
+        state_in: LbmStateBase,
+    ) -> VofMassTransportResult:
+        """Compute the P2 fixed-topology mass stage without mutating state."""
+
+        if self.model.interface_model != "vof":
+            raise ValueError(
+                "compute_vof_mass_transport requires interface_model='vof'"
+            )
+        if self._vof_mass_transport is None:
+            raise RuntimeError("VOF mass transport was not allocated")
+        if not isinstance(state_in, FullFLbmState):
+            raise NotImplementedError(
+                "P2 authoritative VOF mass transport supports FullF only; "
+                "HOME transport is deferred to P7"
+            )
+        return self._vof_mass_transport.compute_fullf(state_in)
+
     def step(
         self,
         state_in: LbmStateBase,
@@ -360,8 +387,9 @@ class LbmSolver(FluidGridSolverBase):
         """Advance ``post-collision -> stream -> collide -> post-collision``."""
         if self.model.interface_model == "vof":
             raise NotImplementedError(
-                "P1 supports authoritative VOF initialization only; "
-                "VOF time stepping is not implemented"
+                "P2 supports authoritative VOF initialization and isolated "
+                "fixed-topology mass transport only; complete VOF time "
+                "stepping requires P3 surface completion"
             )
         del contacts, control, dt
         self._copy_boundary_fields(state_in, state_out)

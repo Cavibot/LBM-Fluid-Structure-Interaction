@@ -1,7 +1,9 @@
 # LBM VOF 当前能力与开发入口
 
-当前仓库实现了 Shan-Chen density 的只读调试观察，但尚未实现守恒自由表面 VOF。
-调试路径不会参与 streaming、forcing、collision 或 boundary。
+当前仓库已经冻结 authoritative VOF 的 P1 状态/初始化与 P2 FullF 固定拓扑质量
+transport。P2 transport 只写 solver scratch，不修改持久状态；P3 自由面 population
+补全完成前，完整 authoritative VOF `step()` 仍 fail-fast。Shan-Chen 调试观察路径
+继续与正式 VOF 完全隔离。
 
 ## 当前 API
 
@@ -30,14 +32,22 @@ debug_vof_observation = false / true
 gravity = independent
 ```
 
-`force_model` 仅是内部派生结果，调用者不能配置。`interface_model="vof"` 在 P0 会
-`NotImplementedError`，防止把未完成能力误当成正式 VOF。
+`force_model` 仅是内部派生结果，调用者不能配置。`interface_model="vof"` 可以执行
+P1 初始化和 P2 独立质量 transport，但完整 `step()` 会 `NotImplementedError`，
+防止把尚无 surface completion 的路径误当成正式自由面求解器。
 
 ## 状态隔离
 
-```python
-state.vof is None  # P0；为 authoritative VOF 保留
+`interface_model="vof"` 分配 authoritative：
+
+```text
+state.vof.mass
+state.vof.phi
+state.vof.cell_type
 ```
+
+P2 的 `mass_tmp/phi_tmp/mass_delta` 由 solver-owned `VofMassTransport` 持有，不进入
+state clone/copy/checkpoint。
 
 只有 `interface_model="shan_chen"` 且 `debug_vof_observation=True` 时才分配：
 
@@ -69,10 +79,12 @@ dam-break 示例的相关参数为：
 --vof-debug-no-normals
 ```
 
-## 尚未实现
+## 当前阶段边界
 
-- authoritative `state.vof`；
-- `mass` 与守恒质量平流；
+- P1 authoritative `state.vof`：`CPU_ACCEPTED`；
+- P2 FullF fixed-topology mass transport：`CPU_ACCEPTED`；
+- HOME mass transport：P7；
+- 完整 authoritative VOF step：等待 P3；
 - 物理 GAS/INTERFACE/LIQUID 类型转换；
 - free-surface population reconstruction；
 - excess/deficit mass redistribution；
@@ -92,4 +104,7 @@ dam-break 示例的相关参数为：
 - [05-control-flow-diagrams.md](05-control-flow-diagrams.md)：控制流；
 - [06-development-roadmap.md](06-development-roadmap.md)：P0-P7 开发门禁；
 - [07-p0-baseline.md](07-p0-baseline.md)：P0 冻结提交、环境与固定回归记录；
-- [08-p1-engineering-plan.md](08-p1-engineering-plan.md)：P1 authoritative 状态、初始化、双缓冲、测试与提交拆分。
+- [08-p1-engineering-plan.md](08-p1-engineering-plan.md)：P1 authoritative 状态、初始化、双缓冲、测试与提交拆分；
+- [09-p2-engineering-plan.md](09-p2-engineering-plan.md)：P2 决策、实现和验收计划；
+- [10-p2-completion-summary.md](10-p2-completion-summary.md)：P2 完成与 CPU 验收总结；
+- [11-p2-change-architecture.md](11-p2-change-architecture.md)：P2 改动文件与关键架构新旧对比。

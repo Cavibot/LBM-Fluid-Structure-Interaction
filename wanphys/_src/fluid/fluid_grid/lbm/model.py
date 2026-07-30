@@ -20,6 +20,7 @@ from .contracts import (
     resolve_force_model,
     validate_capability,
 )
+from .vof.contracts import normalize_vof_mass_scheme
 
 
 @dataclass
@@ -55,6 +56,9 @@ class LbmModel(FluidGridModelBase):
 
     interface_model: str = "off"
     """Authoritative interface physics: ``off``, ``shan_chen``, or ``vof``."""
+
+    vof_mass_scheme: str = "fslbm_neighbor"
+    """Authoritative VOF mass exchange; P2 freezes the FSLBM neighbour scheme."""
 
     force_model: str = field(init=False, default=ForceModel.NONE.value)
     """Normalized internal force-pipeline combination; not caller configuration."""
@@ -373,6 +377,9 @@ class LbmModel(FluidGridModelBase):
         self.encoding = normalize_encoding(self.encoding).value
         resolved_interface = normalize_interface_model(self.interface_model)
         self.interface_model = resolved_interface.value
+        self.vof_mass_scheme = normalize_vof_mass_scheme(
+            self.vof_mass_scheme
+        ).value
         if self.collision is not None:
             canonical_collision, used_alias = normalize_collision(self.collision)
             if used_alias:
