@@ -949,3 +949,23 @@ null/headless 使用 `strict`。冻结证据见：
 - [30-fix1-engineering-plan.md](30-fix1-engineering-plan.md)；
 - [31-fix1-completion-summary.md](31-fix1-completion-summary.md)；
 - [32-fix1-change-architecture.md](32-fix1-change-architecture.md)。
+
+## 20. FIX2 部分修复入口
+
+RTX 4070 SUPER `64^3` epoch-832 trace 证明旧 P4 proposal 遗漏 Home-FSLBM 的
+no-LIQUID/no-GAS 邻域分类，同时旧 validator 禁止已经存在于 state schema 中的
+material zero-receiver retry。FIX2 已在 CPU 上实现：
+
+```text
+old INTERFACE + no GAS    -> proposed LIQUID
+old INTERFACE + no LIQUID -> proposed GAS
+zero receiver + exact zero actual count -> retained pending, local retry
+stored count != actual count             -> fail-fast
+```
+
+状态保持 `PARTIALLY_RESOLVED`，未解决 residual age/stall、永久孤立 sender 最终去向、
+D3Q19/D3Q27 完全等价和修复后 CUDA 长跑。工程记录见：
+
+- [33-fix2-engineering-plan.md](33-fix2-engineering-plan.md)；
+- [34-fix2-completion-summary.md](34-fix2-completion-summary.md)；
+- [35-fix2-change-architecture.md](35-fix2-change-architecture.md)。

@@ -14,10 +14,11 @@ class VofGridState:
     """Authoritative VOF state, pending mass transfer, and derived geometry.
 
     ``mass`` is the committed resident liquid mass. ``pending_excess`` is a
-    signed, one-step delayed transfer scheduled for
-    ``pending_receiver_count`` D3Q19 INTERFACE neighbors.  Their sum is the
-    closed-domain conservative ledger.  ``phi`` remains strictly bounded for
-    geometry and mass-flux weights.
+    signed delayed transfer scheduled for ``pending_receiver_count`` D3Q19
+    INTERFACE neighbors.  A zero count retains the transfer at its sender for
+    a later topology retry.  Resident plus pending mass is the closed-domain
+    conservative ledger.  ``phi`` remains strictly bounded for geometry and
+    mass-flux weights.
 
     P6 adds an epoch-scoped geometry cache: liquid-to-gas ``normal``,
     centered unit-cube ``plic_offset`` and mean ``curvature``.

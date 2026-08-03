@@ -79,12 +79,6 @@ def validate_p2_transport_input(
         raise ValueError("P2 input pending excess must be finite")
     if np.any(pending_receiver_count > 18):
         raise ValueError("P2 pending receiver count exceeds D3Q19 degree")
-    unresolved = (
-        (np.abs(pending_excess) > 2.0e-6)
-        & (pending_receiver_count == 0)
-    )
-    if np.any(unresolved):
-        raise ValueError("P2 material pending excess has no receiver")
     shape = tuple(int(value) for value in state.res)
     for raw_cell in np.argwhere(np.abs(pending_excess) > 2.0e-6):
         cell = tuple(int(value) for value in raw_cell)

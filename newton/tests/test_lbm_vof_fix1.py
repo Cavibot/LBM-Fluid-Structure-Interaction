@@ -8,6 +8,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import (
@@ -100,7 +101,7 @@ class TestVofFix1RuntimeContracts(unittest.TestCase):
         assert report is not None
         self.assertEqual(report.epoch, 30)
 
-    def test_device_skips_full_host_stage_checks_and_reads_16_scalars(
+    def test_device_skips_full_host_stage_checks_and_reads_33_scalars(
         self,
     ) -> None:
         domain = _domain("device")
@@ -118,7 +119,7 @@ class TestVofFix1RuntimeContracts(unittest.TestCase):
         runtime = domain.solver._vof_device_diagnostics
         self.assertIsNotNone(runtime)
         assert runtime is not None
-        self.assertEqual(tuple(runtime.metrics.shape), (16,))
+        self.assertEqual(tuple(runtime.metrics.shape), (33,))
 
         host = collect_vof_diagnostics(domain.state)
         self.assertAlmostEqual(report.total_mass, host.total_mass, places=8)
@@ -128,6 +129,87 @@ class TestVofFix1RuntimeContracts(unittest.TestCase):
             report.invalid_liquid_gas_adjacency_count,
             host.invalid_liquid_gas_adjacency_count,
         )
+
+    def test_device_reports_and_accepts_zero_receiver_pending_route(self) -> None:
+        domain = _domain("device")
+        state = domain.state
+        assert state.vof is not None
+        pending = np.asarray(state.vof.pending_excess.numpy()).copy()
+        cell = (4, 1, 2)
+        pending[cell] = 0.125
+        wp.copy(
+            state.vof.pending_excess,
+            wp.array(pending, dtype=float, device=state.vof.device),
+        )
+        state.vof.reference_mass += 0.125
+        previous = np.asarray(state.vof.cell_type.numpy()).copy()
+        proposed = previous.copy()
+        previous[3, 1, 2] = 1
+        proposed[3, 1, 2] = 2
+
+        runtime = domain.solver._vof_device_diagnostics
+        assert runtime is not None
+        report = runtime.collect(
+            state,
+            previous_cell_type=wp.array(
+                previous,
+                dtype=wp.uint8,
+                device=state.vof.device,
+            ),
+            proposed_cell_type=wp.array(
+                proposed,
+                dtype=wp.uint8,
+                device=state.vof.device,
+            ),
+        )
+        self.assertEqual(report.pending_zero_receiver_count, 1)
+        self.assertEqual(report.pending_receiver_mismatch_count, 0)
+        self.assertEqual(report.first_invalid_pending_cell, cell)
+        self.assertAlmostEqual(report.first_invalid_pending_excess, 0.125)
+        self.assertEqual(
+            report.first_invalid_pending_stored_receiver_count,
+            0,
+        )
+        self.assertEqual(
+            report.first_invalid_pending_actual_receiver_count,
+            0,
+        )
+        self.assertEqual(report.first_invalid_pending_final_interface_mask, 0)
+        self.assertEqual(
+            report.first_invalid_pending_previous_interface_mask & 1,
+            1,
+        )
+        self.assertEqual(
+            report.first_invalid_pending_proposed_liquid_mask & 1,
+            1,
+        )
+        self.assertEqual(
+            report.first_invalid_pending_neighbor_valid_mask,
+            (1 << 18) - 1,
+        )
+        validate_vof_diagnostics(report)
+
+    def test_device_rejects_pending_receiver_count_mismatch(self) -> None:
+        domain = _domain("device")
+        state = domain.state
+        assert state.vof is not None
+        source = (2, 1, 2)
+        pending = np.asarray(state.vof.pending_excess.numpy()).copy()
+        pending[source] = 0.125
+        state.vof.pending_excess.assign(pending)
+        state.vof.reference_mass += 0.125
+
+        runtime = domain.solver._vof_device_diagnostics
+        assert runtime is not None
+        report = runtime.collect(state)
+        self.assertEqual(report.pending_zero_receiver_count, 0)
+        self.assertEqual(report.pending_receiver_mismatch_count, 1)
+        self.assertEqual(report.first_invalid_pending_cell, source)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"receiver count does not match topology",
+        ):
+            validate_vof_diagnostics(report)
 
     def test_off_keeps_transaction_and_epoch_gates(self) -> None:
         domain = _domain("off")

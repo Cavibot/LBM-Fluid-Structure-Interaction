@@ -255,3 +255,30 @@ off profile 的 material acceptance
 
 FIX1 的代码、测试、Plan、完成总结和改动架构说明位于同一个唯一提交中。提交身份以
 包含本文件的 `git log` 记录为准。
+
+## 12. Post-freeze CUDA failure trace
+
+The compact device diagnostics now use 33 float64 scalars.  A first pass
+reduces invariant counts and the first failing linear index; a one-thread
+device pass then snapshots only that sender and its D3Q19 neighborhood.  The
+host exception decodes every valid direction as:
+
+```text
+q + offset : old > proposed > final
+```
+
+The report separately exposes material zero-receiver and receiver-count
+mismatch totals.  It includes the center transition, pending value, stored and
+actual receiver counts, and six 18-bit neighbor type masks.  No full grid is
+read back and no redistribution behavior changes.
+
+Targeted CPU verification after this extension:
+
+```text
+Ran 7 tests
+OK (skipped=1 CUDA)
+```
+
+The user-provided RTX 4070 SUPER run already validated the preceding detailed
+cell/count report.  The new neighborhood snapshot still requires a CUDA rerun
+before it can be marked CUDA accepted.

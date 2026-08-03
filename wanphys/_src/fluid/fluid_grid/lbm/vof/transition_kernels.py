@@ -27,17 +27,51 @@ def propose_vof_type_kernel(
     cell_type_n: wp.array3d(dtype=wp.uint8),
     proposed_type: wp.array3d(dtype=wp.uint8),
     epsilon: float,
+    periodic_x: int,
+    periodic_y: int,
+    periodic_z: int,
+    nx: int,
+    ny: int,
+    nz: int,
 ) -> None:
-    """Classify only old INTERFACE cells using the paper thresholds."""
+    """Classify old INTERFACE cells by fill and active-neighbor closure."""
 
     i, j, k = wp.tid()
     kind = cell_type_n[i, j, k]
     proposal = kind
     if kind == wp.uint8(1):
         phi_pre = mass_pre[i, j, k] / density_out[i, j, k]
-        if phi_pre >= 1.0 + epsilon:
+        has_liquid = int(0)
+        has_gas = int(0)
+        for q in range(1, 19):
+            ni = i - direction_x(q)
+            nj = j - direction_y(q)
+            nk = k - direction_z(q)
+            outside = bool(False)
+            if ni < 0 or ni >= nx:
+                if periodic_x != 0:
+                    ni = _wrap_once(ni, nx)
+                else:
+                    outside = True
+            if nj < 0 or nj >= ny:
+                if periodic_y != 0:
+                    nj = _wrap_once(nj, ny)
+                else:
+                    outside = True
+            if nk < 0 or nk >= nz:
+                if periodic_z != 0:
+                    nk = _wrap_once(nk, nz)
+                else:
+                    outside = True
+            if not outside:
+                neighbor_type = cell_type_n[ni, nj, nk]
+                if neighbor_type == wp.uint8(2):
+                    has_liquid = 1
+                elif neighbor_type == wp.uint8(0):
+                    has_gas = 1
+        if phi_pre >= 1.0 + epsilon or has_gas == 0:
             proposal = wp.uint8(2)
-        elif phi_pre <= 0.0 - epsilon:
+        elif phi_pre <= 0.0 - epsilon or has_liquid == 0:
             proposal = wp.uint8(0)
     proposed_type[i, j, k] = proposal
 
@@ -137,7 +171,7 @@ def prepare_vof_redistribution_kernel(
     ny: int,
     nz: int,
 ) -> None:
-    """Canonicalize by final type and prepare equal per-interface shares."""
+    """Canonicalize and retain zero-receiver excess for a later retry."""
 
     i, j, k = wp.tid()
     kind = final_type[i, j, k]

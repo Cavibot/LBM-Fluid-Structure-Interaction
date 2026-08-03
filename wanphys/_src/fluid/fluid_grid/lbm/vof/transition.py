@@ -82,15 +82,14 @@ def validate_p4_transition_result(
         raise ValueError("P4 pending excess and share must be finite")
     if np.any(receiver_count > 18):
         raise ValueError("P4 receiver count exceeds D3Q19 degree")
-    if np.any(np.abs(unresolved) > mass_tolerance):
-        first = tuple(
-            int(value)
-            for value in np.argwhere(np.abs(unresolved) > mass_tolerance)[0]
-        )
-        raise ValueError(
-            "P4 excess mass has no final INTERFACE receiver; "
-            f"first cell={first}, excess={float(unresolved[first])}"
-        )
+    expected_unresolved = np.where(receiver_count == 0, excess, 0.0)
+    if not np.allclose(
+        unresolved,
+        expected_unresolved,
+        atol=mass_tolerance,
+        rtol=mass_tolerance,
+    ):
+        raise ValueError("P4 retained zero-receiver excess is inconsistent")
 
     validate_initial_topology(final_type, periodic=periodic)
     gas = final_type == int(VofCellType.GAS)
@@ -298,6 +297,12 @@ class VofTopologyTransition:
                 cell_type_n,
                 self._proposed_type,
                 self.epsilon,
+                px,
+                py,
+                pz,
+                nx,
+                ny,
+                nz,
             ],
             device=self.device,
         )

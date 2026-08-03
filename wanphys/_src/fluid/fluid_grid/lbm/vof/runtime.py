@@ -37,16 +37,19 @@ def initialize_vof_device_metrics_kernel(
     metrics: wp.array(dtype=wp.float64),
     epoch: int,
     geometry_epoch: int,
+    cell_count: int,
 ) -> None:
     """Initialize the single compact diagnostics structure on device."""
 
     if wp.tid() == 0:
-        for index in range(16):
+        for index in range(33):
             metrics[index] = wp.float64(0.0)
         metrics[1] = wp.float64(1.0e30)
         metrics[2] = wp.float64(-1.0e30)
         metrics[14] = wp.float64(epoch)
         metrics[15] = wp.float64(geometry_epoch)
+        metrics[18] = wp.float64(cell_count)
+        metrics[19] = wp.float64(cell_count)
 
 
 @wp.kernel
@@ -194,11 +197,107 @@ def reduce_vof_device_diagnostics_kernel(
                 if invalid_pair:
                     wp.atomic_add(metrics, 5, wp.float64(1.0))
 
-    if wp.abs(local_pending) > mass_tolerance and (
-        int(local_count) == 0
-        or int(local_count) != actual_receiver_count
-    ):
+    material_pending = wp.abs(local_pending) > mass_tolerance
+    linear_index = i * ny * nz + j * nz + k
+    if material_pending and int(local_count) == 0 and actual_receiver_count == 0:
+        wp.atomic_add(metrics, 16, wp.float64(1.0))
+        wp.atomic_min(metrics, 18, wp.float64(linear_index))
+    elif material_pending and int(local_count) != actual_receiver_count:
         wp.atomic_add(metrics, 9, wp.float64(1.0))
+        wp.atomic_add(metrics, 17, wp.float64(1.0))
+        wp.atomic_min(metrics, 19, wp.float64(linear_index))
+
+
+@wp.kernel
+def describe_first_invalid_pending_kernel(
+    pending_excess: wp.array3d(dtype=float),
+    pending_receiver_count: wp.array3d(dtype=wp.uint8),
+    previous_cell_type: wp.array3d(dtype=wp.uint8),
+    proposed_cell_type: wp.array3d(dtype=wp.uint8),
+    final_cell_type: wp.array3d(dtype=wp.uint8),
+    metrics: wp.array(dtype=wp.float64),
+    periodic_x: int,
+    periodic_y: int,
+    periodic_z: int,
+    nx: int,
+    ny: int,
+    nz: int,
+) -> None:
+    """Describe the lowest-index invalid pending route after reduction."""
+
+    if wp.tid() != 0:
+        return
+    linear_index = int(metrics[19])
+    if metrics[16] > wp.float64(0.0):
+        linear_index = int(metrics[18])
+    if linear_index >= nx * ny * nz:
+        return
+
+    i = linear_index // (ny * nz)
+    remainder = linear_index - i * ny * nz
+    j = remainder // nz
+    k = remainder - j * nz
+    actual_receiver_count = int(0)
+    valid_mask = int(0)
+    previous_interface_mask = int(0)
+    previous_liquid_mask = int(0)
+    proposed_interface_mask = int(0)
+    proposed_liquid_mask = int(0)
+    final_interface_mask = int(0)
+    final_liquid_mask = int(0)
+    for q in range(1, 19):
+        ni = i - direction_x(q)
+        nj = j - direction_y(q)
+        nk = k - direction_z(q)
+        outside = bool(False)
+        if ni < 0 or ni >= nx:
+            if periodic_x != 0:
+                ni = _wrap_once(ni, nx)
+            else:
+                outside = True
+        if nj < 0 or nj >= ny:
+            if periodic_y != 0:
+                nj = _wrap_once(nj, ny)
+            else:
+                outside = True
+        if nk < 0 or nk >= nz:
+            if periodic_z != 0:
+                nk = _wrap_once(nk, nz)
+            else:
+                outside = True
+        if not outside:
+            bit = int(1) << (q - 1)
+            valid_mask = valid_mask | bit
+            previous_neighbor = previous_cell_type[ni, nj, nk]
+            proposed_neighbor = proposed_cell_type[ni, nj, nk]
+            final_neighbor = final_cell_type[ni, nj, nk]
+            if previous_neighbor == wp.uint8(1):
+                previous_interface_mask = previous_interface_mask | bit
+            elif previous_neighbor == wp.uint8(2):
+                previous_liquid_mask = previous_liquid_mask | bit
+            if proposed_neighbor == wp.uint8(1):
+                proposed_interface_mask = proposed_interface_mask | bit
+            elif proposed_neighbor == wp.uint8(2):
+                proposed_liquid_mask = proposed_liquid_mask | bit
+            if final_neighbor == wp.uint8(1):
+                actual_receiver_count += 1
+                final_interface_mask = final_interface_mask | bit
+            elif final_neighbor == wp.uint8(2):
+                final_liquid_mask = final_liquid_mask | bit
+
+    metrics[20] = wp.float64(pending_excess[i, j, k])
+    metrics[21] = wp.float64(pending_receiver_count[i, j, k])
+    metrics[22] = wp.float64(actual_receiver_count)
+    metrics[23] = wp.float64(final_cell_type[i, j, k])
+    metrics[24] = wp.float64(previous_cell_type[i, j, k])
+    metrics[25] = wp.float64(proposed_cell_type[i, j, k])
+    metrics[26] = wp.float64(valid_mask)
+    metrics[27] = wp.float64(previous_interface_mask)
+    metrics[28] = wp.float64(previous_liquid_mask)
+    metrics[29] = wp.float64(proposed_interface_mask)
+    metrics[30] = wp.float64(proposed_liquid_mask)
+    metrics[31] = wp.float64(final_interface_mask)
+    metrics[32] = wp.float64(final_liquid_mask)
 
 
 class VofDeviceDiagnostics:
@@ -222,7 +321,7 @@ class VofDeviceDiagnostics:
         self.surface_tension = float(surface_tension)
         self.mass_tolerance = float(mass_tolerance)
         self.phi_tolerance = float(phi_tolerance)
-        self._metrics = wp.zeros(16, dtype=wp.float64, device=device)
+        self._metrics = wp.zeros(33, dtype=wp.float64, device=device)
 
     @property
     def metrics(self) -> wp.array:
@@ -230,8 +329,14 @@ class VofDeviceDiagnostics:
 
         return self._metrics
 
-    def collect(self, state: LbmStateBase) -> VofDiagnostics:
-        """Launch one reduction and copy only its 16 float64 values."""
+    def collect(
+        self,
+        state: LbmStateBase,
+        *,
+        previous_cell_type: wp.array | None = None,
+        proposed_cell_type: wp.array | None = None,
+    ) -> VofDiagnostics:
+        """Launch compact reductions and copy only 33 float64 values."""
 
         if state.vof is None:
             raise ValueError("device VOF diagnostics require state.vof")
@@ -241,6 +346,10 @@ class VofDeviceDiagnostics:
             )
         nx, ny, nz = self.shape
         px, py, pz = self.periodic
+        if previous_cell_type is None:
+            previous_cell_type = state.vof.cell_type
+        if proposed_cell_type is None:
+            proposed_cell_type = state.vof.cell_type
         wp.launch(
             initialize_vof_device_metrics_kernel,
             dim=1,
@@ -248,6 +357,7 @@ class VofDeviceDiagnostics:
                 self._metrics,
                 int(state.vof.epoch),
                 int(state.vof.geometry_epoch),
+                nx * ny * nz,
             ],
             device=self.device,
         )
@@ -281,6 +391,25 @@ class VofDeviceDiagnostics:
             ],
             device=self.device,
         )
+        wp.launch(
+            describe_first_invalid_pending_kernel,
+            dim=1,
+            inputs=[
+                state.vof.pending_excess,
+                state.vof.pending_receiver_count,
+                previous_cell_type,
+                proposed_cell_type,
+                state.vof.cell_type,
+                self._metrics,
+                px,
+                py,
+                pz,
+                nx,
+                ny,
+                nz,
+            ],
+            device=self.device,
+        )
         values = np.asarray(self._metrics.numpy(), dtype=np.float64)
         total_mass = float(values[0])
         reference_mass = float(state.vof.reference_mass)
@@ -288,6 +417,16 @@ class VofDeviceDiagnostics:
             abs(reference_mass),
             1.0e-30,
         )
+        first_linear = int(round(values[19]))
+        if values[16] > 0.0:
+            first_linear = int(round(values[18]))
+        first_cell = None
+        if first_linear < nx * ny * nz:
+            first_cell = (
+                first_linear // (ny * nz),
+                (first_linear % (ny * nz)) // nz,
+                first_linear % nz,
+            )
         return VofDiagnostics(
             total_mass=total_mass,
             initial_mass=reference_mass,
@@ -305,6 +444,22 @@ class VofDeviceDiagnostics:
             pending_excess_total=float(values[13]),
             max_abs_pending_excess=float(values[4]),
             invalid_pending_excess_count=int(round(values[9])),
+            pending_zero_receiver_count=int(round(values[16])),
+            pending_receiver_mismatch_count=int(round(values[17])),
+            first_invalid_pending_cell=first_cell,
+            first_invalid_pending_excess=float(values[20]),
+            first_invalid_pending_stored_receiver_count=int(round(values[21])),
+            first_invalid_pending_actual_receiver_count=int(round(values[22])),
+            first_invalid_pending_cell_type=int(round(values[23])),
+            first_invalid_pending_previous_cell_type=int(round(values[24])),
+            first_invalid_pending_proposed_cell_type=int(round(values[25])),
+            first_invalid_pending_neighbor_valid_mask=int(round(values[26])),
+            first_invalid_pending_previous_interface_mask=int(round(values[27])),
+            first_invalid_pending_previous_liquid_mask=int(round(values[28])),
+            first_invalid_pending_proposed_interface_mask=int(round(values[29])),
+            first_invalid_pending_proposed_liquid_mask=int(round(values[30])),
+            first_invalid_pending_final_interface_mask=int(round(values[31])),
+            first_invalid_pending_final_liquid_mask=int(round(values[32])),
             illegal_cell_type_count=int(round(values[10])),
             out_of_range_phi_count=int(round(values[11])),
             invalid_surface_pressure_count=int(round(values[12])),
@@ -313,6 +468,7 @@ class VofDeviceDiagnostics:
 
 __all__ = [
     "VofDeviceDiagnostics",
+    "describe_first_invalid_pending_kernel",
     "initialize_vof_device_metrics_kernel",
     "reduce_vof_device_diagnostics_kernel",
 ]

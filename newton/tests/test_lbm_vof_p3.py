@@ -233,14 +233,14 @@ class TestVofP3IntegratedStep(unittest.TestCase):
         )
 
     def test_p2_mass_scratch_is_committed_and_buffers_swap(self) -> None:
-        shape = (4, 3, 3)
-        periodic = (True, True, True)
-        phi = np.full(shape, 0.5, dtype=np.float32)
+        shape = (5, 3, 3)
+        periodic = (False, False, False)
+        phi = _layered_phi(shape)
         domain = LbmDomain(_model(shape, periodic=periodic))
         state_in = domain.initialize_vof(phi)
         populations = state_in.f_post.numpy().reshape((19, *shape)).copy()
-        populations[1, 0, 1, 1] += np.float32(0.01)
-        populations[2, 0, 1, 1] -= np.float32(0.01)
+        populations[1, 2, 1, 1] += np.float32(0.01)
+        populations[2, 2, 1, 1] -= np.float32(0.01)
         state_in.f_post.assign(populations.reshape(-1))
         expected_mass = (
             domain.solver.compute_vof_mass_transport(state_in)

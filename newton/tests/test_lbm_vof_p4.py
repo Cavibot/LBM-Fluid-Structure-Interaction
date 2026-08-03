@@ -78,10 +78,21 @@ def _oracle(
     proposed = cell_type.copy()
     interface = cell_type == int(VofCellType.INTERFACE)
     phi_pre = mass_pre / density
-    proposed[interface & (phi_pre >= 1.0 + epsilon)] = int(
-        VofCellType.LIQUID
-    )
-    proposed[interface & (phi_pre <= 0.0 - epsilon)] = int(VofCellType.GAS)
+    for cell in np.ndindex(shape):
+        if not interface[cell]:
+            continue
+        has_liquid = False
+        has_gas = False
+        for q in range(1, 19):
+            neighbor = _neighbor(cell, q, shape, periodic)
+            if neighbor is None:
+                continue
+            has_liquid |= int(cell_type[neighbor]) == int(VofCellType.LIQUID)
+            has_gas |= int(cell_type[neighbor]) == int(VofCellType.GAS)
+        if float(phi_pre[cell]) >= 1.0 + epsilon or not has_gas:
+            proposed[cell] = int(VofCellType.LIQUID)
+        elif float(phi_pre[cell]) <= 0.0 - epsilon or not has_liquid:
+            proposed[cell] = int(VofCellType.GAS)
 
     final_type = proposed.copy()
     for cell in np.ndindex(shape):
@@ -212,17 +223,21 @@ class TestVofP4ConfigurationAndThresholds(unittest.TestCase):
                     _model((3, 3, 3), epsilon=epsilon)
 
     def test_threshold_equalities_and_inner_band(self) -> None:
-        shape = (3, 3, 3)
+        shape = (5, 3, 3)
         density = np.ones(shape, dtype=np.float32)
         cell_type = np.full(
             shape,
             int(VofCellType.INTERFACE),
             dtype=np.uint8,
         )
-        transition = _transition(shape, periodic=(True, True, True))
-        center = (1, 1, 1)
+        center = (2, 1, 1)
+        cell_type[1, 1, 1] = int(VofCellType.LIQUID)
+        cell_type[3, 1, 1] = int(VofCellType.GAS)
+        transition = _transition(shape)
 
         mass = np.full(shape, 0.5, dtype=np.float32)
+        mass[cell_type == int(VofCellType.LIQUID)] = 1.0
+        mass[cell_type == int(VofCellType.GAS)] = 0.0
         mass[center] = np.float32(1.0 + 1.0e-4)
         high = _compute(transition, mass, density, cell_type)
         self.assertEqual(
@@ -340,6 +355,12 @@ class TestVofP4TopologyAndRedistribution(unittest.TestCase):
         mass = np.full(shape, 0.5, dtype=np.float32)
         liquid_candidate = (1, 1, 1)
         gas_candidate = (2, 1, 1)
+        gas_support = (2, 0, 1)
+        liquid_support = (2, 2, 1)
+        cell_type[gas_support] = int(VofCellType.GAS)
+        cell_type[liquid_support] = int(VofCellType.LIQUID)
+        mass[gas_support] = 0.0
+        mass[liquid_support] = 1.0
         mass[liquid_candidate] = 1.2
         mass[gas_candidate] = -0.2
         result = _compute(
@@ -386,7 +407,7 @@ class TestVofP4TopologyAndRedistribution(unittest.TestCase):
         )
         self.assertEqual(int(result.new_interface.numpy()[0, 1, 1]), 1)
 
-    def test_zero_receiver_fails_without_mutating_inputs(self) -> None:
+    def test_zero_receiver_is_retained_without_mutating_inputs(self) -> None:
         shape = (3, 3, 3)
         mass = np.zeros(shape, dtype=np.float32)
         density = np.ones(shape, dtype=np.float32)
@@ -395,8 +416,19 @@ class TestVofP4TopologyAndRedistribution(unittest.TestCase):
         mass[center] = -0.2
         cell_type[center] = int(VofCellType.INTERFACE)
         snapshots = (mass.copy(), density.copy(), cell_type.copy())
-        with self.assertRaisesRegex(ValueError, "no final INTERFACE receiver"):
-            _compute(_transition(shape), mass, density, cell_type)
+        result = _compute(_transition(shape), mass, density, cell_type)
+        self.assertEqual(
+            int(result.final_type.numpy()[center]),
+            int(VofCellType.GAS),
+        )
+        self.assertAlmostEqual(float(result.excess.numpy()[center]), -0.2)
+        self.assertEqual(int(result.receiver_count.numpy()[center]), 0)
+        self.assertAlmostEqual(
+            float(result.unresolved_excess.numpy()[center]),
+            -0.2,
+        )
+        self.assertEqual(float(result.mass_final.numpy()[center]), 0.0)
+        self.assertEqual(float(result.phi_final.numpy()[center]), 0.0)
         np.testing.assert_array_equal(mass, snapshots[0])
         np.testing.assert_array_equal(density, snapshots[1])
         np.testing.assert_array_equal(cell_type, snapshots[2])

@@ -58,8 +58,8 @@ def advect_vof_mass_fullf_fixed_topology_kernel(
     center_type = cell_type_n[i, j, k]
     delayed = float(0.0)
     if pending_receiver_count_n[i, j, k] == wp.uint8(0):
-        # Reference-compatible zero-receiver fallback: retain sub-tolerance
-        # roundoff locally so it is retried rather than silently discarded.
+        # Bounded Home-compatible fallback: retry retained material or
+        # roundoff excess locally without writing it into resident geometry.
         delayed = pending_excess_n[i, j, k]
     delta = float(0.0)
     center_index = i * ny * nz + j * nz + k

@@ -82,8 +82,8 @@ alias。
 | internal `force_model` | `EXISTING` | `LbmModel.__post_init__` | interface + gravity 的执行组合 |
 | `state.vof` | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer | VOF 模式分配的正式状态 |
 | `state.vof.mass` | `FIX_CPU_ACCEPTED` | initializer/P4 | committed resident liquid mass |
-| `state.vof.pending_excess` | `FIX_CPU_ACCEPTED` | P4 clamp | 下一步由 final INTERFACE 邻居消费的 signed 总 excess |
-| `state.vof.pending_receiver_count` | `FIX_CPU_ACCEPTED` | P4 topology | pending sender 的 D3Q19 receiver 数 |
+| `state.vof.pending_excess` | `FIX2_PARTIAL_CPU_ACCEPTED` | P4 clamp | 由 final INTERFACE 消费；零接收者时保留并本地重试的 signed excess |
+| `state.vof.pending_receiver_count` | `FIX2_PARTIAL_CPU_ACCEPTED` | P4 topology | pending sender 的 D3Q19 receiver 数；零表示 retained residual |
 | `state.vof.reference_mass` | `FIX_CPU_ACCEPTED` | initializer | closed-domain 初始化守恒参考 |
 | `state.vof.phi` | `FIX_CPU_ACCEPTED` | bounded mass/density | 始终位于 `[0,1]` 的几何/平流占据率缓存 |
 | `state.vof.cell_type` | `AUTHORITATIVE_CPU_ACCEPTED` | 严格 phi 分类 | GAS/INTERFACE/LIQUID 拓扑 |
@@ -216,12 +216,15 @@ P4 冻结语义：
 
 ```text
 epsilon_phi = 1e-4 with >= / <= comparisons
+old INTERFACE with no GAS proposes LIQUID
+old INTERFACE with no LIQUID proposes GAS
 I-to-L has reference-order priority over adjacent I-to-G
 topology and redistribution are gather-only
 receivers are final D3Q19 INTERFACE neighbors
 positive and negative excess use one signed formula
 committed phi remains bounded; excess is persisted for next-step gather
-zero receiver with material excess fails before commit
+zero receiver with material excess remains explicit pending and retries locally
+stored/actual receiver-count mismatch still fails before commit
 new_interface mask is the P5 kinetic handoff
 ```
 

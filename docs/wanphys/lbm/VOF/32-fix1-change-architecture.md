@@ -233,3 +233,35 @@ CUDA remains conditional and not accepted in the frozen environment
 ```
 
 用户本地对 P8 默认网格/重力的参数实验不是 FIX1 代码语义，未纳入阶段提交。
+
+## 9. Post-freeze diagnostic architecture comparison
+
+Before, the reduction only reported one aggregate invalid-routing count:
+
+```mermaid
+flowchart LR
+    Grid["Committed VOF fields"] --> Reduce["16-scalar reduction"]
+    Reduce --> Host["Generic routing error"]
+```
+
+After, the first reduction selects a deterministic failing sender and a second
+device kernel snapshots only its transition neighborhood:
+
+```mermaid
+flowchart LR
+    Old["old cell types"] --> Detail["first-failure detail kernel"]
+    Proposed["proposed cell types"] --> Detail
+    Final["committed fields and final types"] --> Reduce["invariant reduction"]
+    Reduce --> Index["zero/mismatch counts + first index"]
+    Index --> Detail
+    Detail --> Masks["33-scalar compact buffer\ncenter + six D3Q19 masks"]
+    Masks --> Host["decoded old > proposed > final trace"]
+```
+
+Changed files for this extension:
+
+- `vof/runtime.py`: deterministic first-failure selection and neighborhood
+  bitmasks;
+- `vof/diagnostics.py`: structured fields and decoded exception text;
+- `solver.py`: supplies the previous and proposed topology snapshots;
+- `test_lbm_vof_fix1.py`: compact-size and zero-receiver trace regression.

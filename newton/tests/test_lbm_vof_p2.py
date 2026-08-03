@@ -133,7 +133,7 @@ class TestVofP2Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown VOF mass scheme"):
             _model((3, 2, 2), scheme="paper_center")
 
-    def test_p2_home_extension_preserves_fixed_topology_and_mass(
+    def test_p2_home_extension_hands_off_to_no_gas_topology_closure(
         self,
     ) -> None:
         shape = (3, 2, 2)
@@ -147,7 +147,6 @@ class TestVofP2Contracts(unittest.TestCase):
             state_before.vof.mass.numpy(),
             atol=2.0e-7,
         )
-        type_before = state_before.vof.cell_type.numpy().copy()
         total_before = float(
             np.sum(state_before.vof.mass.numpy(), dtype=np.float64)
         )
@@ -155,10 +154,16 @@ class TestVofP2Contracts(unittest.TestCase):
         assert home.state.vof is not None
         np.testing.assert_array_equal(
             home.state.vof.cell_type.numpy(),
-            type_before,
+            int(VofCellType.LIQUID),
         )
         self.assertAlmostEqual(
-            float(np.sum(home.state.vof.mass.numpy(), dtype=np.float64)),
+            float(
+                np.sum(home.state.vof.mass.numpy(), dtype=np.float64)
+                + np.sum(
+                    home.state.vof.pending_excess.numpy(),
+                    dtype=np.float64,
+                )
+            ),
             total_before,
             places=5,
         )

@@ -793,7 +793,13 @@ class LbmSolver(FluidGridSolverBase):
                     raise RuntimeError(
                         "VOF device runtime diagnostics were not allocated"
                     )
-                diagnostics = self._vof_device_diagnostics.collect(state_out)
+                diagnostics = self._vof_device_diagnostics.collect(
+                    state_out,
+                    previous_cell_type=state_in.vof.cell_type,
+                    proposed_cell_type=(
+                        self._vof_topology_transition.result.proposed_type
+                    ),
+                )
                 validate_vof_diagnostics(
                     diagnostics,
                     max_lattice_speed=float(self.model.max_lattice_speed),

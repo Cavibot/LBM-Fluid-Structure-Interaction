@@ -4,7 +4,8 @@
 P3 自由面边界、P4 类型转换/守恒重分配、P5 新界面 kinetic 初始化和 P6
 normal/PLIC/curvature/Eq.12 表面张力、P7 FullF/HOME 综合验收，以及 P8
 authoritative dam-break 可视化与 headless/CSV 入口。FIX1 进一步冻结 bounded
-pending-excess 重分配及 strict/sampled/device/off runtime profile。两种 persistent encoding
+pending-excess 重分配及 strict/sampled/device/off runtime profile；FIX2 部分修复孤立
+界面闭包和零接收者 residual 生命周期。两种 persistent encoding
 现在都可以提交 closed-domain、常数 gamma 的 moving-interface step；Shan-Chen
 调试观察路径继续与正式 VOF 完全隔离。
 
@@ -172,6 +173,7 @@ off      仅 transaction 与 epoch 门禁
 - P7 FullF/HOME 综合 closed-domain 验收：`CPU_ACCEPTED`；
 - P8 authoritative dam-break visual/headless/CSV：`CPU_ACCEPTED`；
 - FIX1 bounded excess 与 runtime profiles：`CPU_ACCEPTED`；
+- FIX2 孤立界面闭包与 retained residual：`PARTIALLY_RESOLVED`；
 - CUDA：条件测试已建立，当前 Warp 构建不可用，`CUDA_NOT_ACCEPTED`；
 - bubble pressure、moving-solid VOF coupling 和 foam。
 
@@ -212,3 +214,6 @@ off      仅 transaction 与 epoch 门禁
 - [30-fix1-engineering-plan.md](30-fix1-engineering-plan.md)：bounded excess 与 runtime profile 冻结计划；
 - [31-fix1-completion-summary.md](31-fix1-completion-summary.md)：FIX1 完成与验收总结；
 - [32-fix1-change-architecture.md](32-fix1-change-architecture.md)：FIX1 改动文件与关键架构新旧对比。
+- [33-fix2-engineering-plan.md](33-fix2-engineering-plan.md)：FIX2 问题分析、冻结语义与未完成边界；
+- [34-fix2-completion-summary.md](34-fix2-completion-summary.md)：FIX2 部分修复与验收总结；
+- [35-fix2-change-architecture.md](35-fix2-change-architecture.md)：FIX2 改动文件与新旧架构对比。

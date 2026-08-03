@@ -260,11 +260,39 @@ FIX1 只能形成一个提交。提交前必须：
 [x] bounded resident mass/phi 与 pending excess state
 [x] next-step D3Q19 pending gather
 [x] strict/sampled/device/off runtime profile
-[x] single 16-float64 device diagnostics readback
+[x] single compact device diagnostics readback
 [x] P8 interactive auto=device+4 substeps
 [x] P8 headless auto=strict
 [x] 750-step strong-gravity regression
 [x] 140-test P0-P8+FIX1 regression
 [x] Ruff F/I and git diff --check
 [x] Plan/summary/change-architecture in one FIX1 commit
+```
+
+## 11. Post-freeze zero-receiver trace extension
+
+The `64^3` CUDA dam-break reproduced a material zero-receiver route at epoch
+832.  The compact device report must distinguish zero receivers from a stored
+count mismatch and, only for the first failing sender, capture:
+
+```text
+center old -> proposed -> final type
+18-neighbor valid mask
+18-neighbor old/proposed/final INTERFACE and LIQUID masks
+pending excess, stored count and recomputed final count
+```
+
+Each 18-bit mask is exactly representable in the existing float64 compact
+buffer.  The buffer may grow from 16 to 33 scalars, but full fields must never
+be copied to the host.  This extension is diagnostic only: zero-receiver mass
+lifetime and redistribution semantics remain fail-fast and are not changed.
+
+Acceptance target:
+
+```text
+[x] first failing cell is deterministic by sender category and linear index
+[x] device report separates zero receiver and count mismatch
+[x] old/proposed/final D3Q19 neighborhood is decoded in the exception
+[x] normal device reports still agree with the host ledger
+[x] synthetic zero-receiver regression covers the decoded trace
 ```

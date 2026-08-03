@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ..constants import CX, CY, CZ
+
 if TYPE_CHECKING:
     from ..state import LbmStateBase
 
@@ -37,6 +39,58 @@ class VofDiagnostics:
     illegal_cell_type_count: int = 0
     out_of_range_phi_count: int = 0
     invalid_surface_pressure_count: int = 0
+    pending_zero_receiver_count: int = 0
+    pending_receiver_mismatch_count: int = 0
+    first_invalid_pending_cell: tuple[int, int, int] | None = None
+    first_invalid_pending_excess: float = 0.0
+    first_invalid_pending_stored_receiver_count: int = 0
+    first_invalid_pending_actual_receiver_count: int = 0
+    first_invalid_pending_cell_type: int = 0
+    first_invalid_pending_previous_cell_type: int = 0
+    first_invalid_pending_proposed_cell_type: int = 0
+    first_invalid_pending_neighbor_valid_mask: int = 0
+    first_invalid_pending_previous_interface_mask: int = 0
+    first_invalid_pending_previous_liquid_mask: int = 0
+    first_invalid_pending_proposed_interface_mask: int = 0
+    first_invalid_pending_proposed_liquid_mask: int = 0
+    first_invalid_pending_final_interface_mask: int = 0
+    first_invalid_pending_final_liquid_mask: int = 0
+
+
+def _decode_type(interface_mask: int, liquid_mask: int, bit: int) -> str:
+    if interface_mask & bit:
+        return "I"
+    if liquid_mask & bit:
+        return "L"
+    return "G"
+
+
+def _format_pending_neighborhood(diagnostics: VofDiagnostics) -> str:
+    valid_mask = diagnostics.first_invalid_pending_neighbor_valid_mask
+    entries: list[str] = []
+    for q in range(1, 19):
+        bit = 1 << (q - 1)
+        offset = (-CX[q], -CY[q], -CZ[q])
+        if not valid_mask & bit:
+            entries.append(f"q{q}{offset}:OUT")
+            continue
+        previous = _decode_type(
+            diagnostics.first_invalid_pending_previous_interface_mask,
+            diagnostics.first_invalid_pending_previous_liquid_mask,
+            bit,
+        )
+        proposed = _decode_type(
+            diagnostics.first_invalid_pending_proposed_interface_mask,
+            diagnostics.first_invalid_pending_proposed_liquid_mask,
+            bit,
+        )
+        final = _decode_type(
+            diagnostics.first_invalid_pending_final_interface_mask,
+            diagnostics.first_invalid_pending_final_liquid_mask,
+            bit,
+        )
+        entries.append(f"q{q}{offset}:{previous}>{proposed}>{final}")
+    return "neighbors=[" + ", ".join(entries) + "]"
 
 
 def _direction_pairs(
@@ -141,15 +195,42 @@ def collect_vof_diagnostics(
         np.count_nonzero((~np.isfinite(density) | (density <= 0.0)) & active)
     )
     speed = np.sqrt(sum(component * component for component in velocity))
+    material_pending = np.abs(pending_excess) > 2.0e-6
+    zero_receiver_count = 0
+    receiver_mismatch_count = 0
+    first_mismatch: tuple[int, int, int] | None = None
+    first_actual_count = 0
+    shape = tuple(int(value) for value in state.res)
+    for raw_cell in np.argwhere(material_pending):
+        cell = tuple(int(value) for value in raw_cell)
+        actual_count = 0
+        for q in range(1, 19):
+            neighbor = [
+                cell[0] - CX[q],
+                cell[1] - CY[q],
+                cell[2] - CZ[q],
+            ]
+            outside = False
+            for axis in range(3):
+                if 0 <= neighbor[axis] < shape[axis]:
+                    continue
+                if not periodic[axis]:
+                    outside = True
+                    break
+                neighbor[axis] %= shape[axis]
+            if not outside and cell_type[tuple(neighbor)] == 1:
+                actual_count += 1
+        stored_count = int(pending_receiver_count[cell])
+        if stored_count == 0 and actual_count == 0:
+            zero_receiver_count += 1
+        elif actual_count != stored_count:
+            receiver_mismatch_count += 1
+            if first_mismatch is None:
+                first_mismatch = cell
+                first_actual_count = actual_count
     invalid_pending = int(
-        np.count_nonzero(
-            (pending_receiver_count > 18)
-            | (
-                (np.abs(pending_excess) > 2.0e-6)
-                & (pending_receiver_count == 0)
-            )
-        )
-    )
+        np.count_nonzero(pending_receiver_count > 18)
+    ) + receiver_mismatch_count
     legal_type = np.isin(cell_type, np.array([0, 1, 2], dtype=np.uint8))
     illegal_type_count = int(cell_type.size - np.count_nonzero(legal_type))
     out_of_range_phi = int(
@@ -183,6 +264,23 @@ def collect_vof_diagnostics(
         pending_excess_total=pending_total,
         max_abs_pending_excess=float(np.max(np.abs(pending_excess))),
         invalid_pending_excess_count=invalid_pending,
+        pending_zero_receiver_count=zero_receiver_count,
+        pending_receiver_mismatch_count=receiver_mismatch_count,
+        first_invalid_pending_cell=first_mismatch,
+        first_invalid_pending_excess=(
+            0.0
+            if first_mismatch is None
+            else float(pending_excess[first_mismatch])
+        ),
+        first_invalid_pending_stored_receiver_count=(
+            0
+            if first_mismatch is None
+            else int(pending_receiver_count[first_mismatch])
+        ),
+        first_invalid_pending_actual_receiver_count=first_actual_count,
+        first_invalid_pending_cell_type=(
+            0 if first_mismatch is None else int(cell_type[first_mismatch])
+        ),
         illegal_cell_type_count=illegal_type_count,
         out_of_range_phi_count=out_of_range_phi,
         invalid_surface_pressure_count=invalid_surface_pressure,
@@ -213,7 +311,27 @@ def validate_vof_diagnostics(
             f"[{diagnostics.phi_min}, {diagnostics.phi_max}]"
         )
     if diagnostics.invalid_pending_excess_count != 0:
-        raise ValueError("FIX1 pending excess routing is invalid")
+        detail = ""
+        if diagnostics.first_invalid_pending_cell is not None:
+            detail = (
+                f": epoch={diagnostics.epoch}, "
+                f"cell={diagnostics.first_invalid_pending_cell}, "
+                f"pending={diagnostics.first_invalid_pending_excess:.9g}, "
+                "stored_receivers="
+                f"{diagnostics.first_invalid_pending_stored_receiver_count}, "
+                "actual_receivers="
+                f"{diagnostics.first_invalid_pending_actual_receiver_count}, "
+                "center_type="
+                f"{diagnostics.first_invalid_pending_previous_cell_type}>"
+                f"{diagnostics.first_invalid_pending_proposed_cell_type}>"
+                f"{diagnostics.first_invalid_pending_cell_type}, "
+                f"{_format_pending_neighborhood(diagnostics)}"
+            )
+        if diagnostics.pending_receiver_mismatch_count != 0:
+            raise ValueError(
+                "FIX1 pending receiver count does not match topology" + detail
+            )
+        raise ValueError("FIX1 pending excess routing is invalid" + detail)
     if diagnostics.illegal_cell_type_count != 0:
         raise ValueError("FIX1 committed cell_type contains an unknown value")
     if diagnostics.out_of_range_phi_count != 0:

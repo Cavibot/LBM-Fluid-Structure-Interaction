@@ -190,6 +190,7 @@ def format_diagnostics(step: int, diagnostics: VofDiagnostics) -> str:
         f"phi=[{diagnostics.phi_min:.4f},{diagnostics.phi_max:.4f}] "
         f"interface={diagnostics.interface_cell_count} "
         f"pending={diagnostics.pending_excess_total:.3e} "
+        f"zero_rx={diagnostics.pending_zero_receiver_count} "
         f"vmax={diagnostics.max_velocity:.3e} "
         f"epoch={diagnostics.epoch}"
     )
