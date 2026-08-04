@@ -406,6 +406,33 @@ class VofDamBreak:
                     f" boost={int(self._last_height_eq.get('n_boost', 0))}"
                     f" Δm_heq={self._last_height_eq.get('mass_delta', 0):+.2f}"
                 )
+            # airI: IF with no LIQUID within Chebyshev dist 2 (matches solver).
+            # Display vol=Σφρ drifts up under hydrostatic ρ>1; compare Σmass.
+            air_i = 0
+            if_z_max = -1
+            liq_z_max = -1
+            nz = ctype.shape[2]
+            for iz in range(nz):
+                if (ctype[:, :, iz] == 2).any():
+                    liq_z_max = iz
+                if (ctype[:, :, iz] == 1).any():
+                    if_z_max = iz
+            if_idx = np.argwhere(ctype == 1)
+            for ix, iy, iz in if_idx:
+                i0, i1 = max(ix - 2, 0), min(ix + 3, ctype.shape[0])
+                j0, j1 = max(iy - 2, 0), min(iy + 3, ctype.shape[1])
+                k0, k1 = max(iz - 2, 0), min(iz + 3, ctype.shape[2])
+                if not (ctype[i0:i1, j0:j1, k0:k1] == 2).any():
+                    air_i += 1
+            mass_true = mass_sum
+            gpu = getattr(home, "_gpu", None) if home is not None else None
+            if gpu is not None:
+                m_gpu = gpu.mass.numpy()
+                mass_true = float(np.nansum(m_gpu[ctype > 0]))
+            cell_note = (
+                f" airI={air_i} Σm={mass_true:.1f} "
+                f"I_zmax={if_z_max} L_zmax={liq_z_max} cell={DH:g}"
+            )
             print(
                 f"[t={self.sim_time:.1f}s] L={liquid} I={interface} "
                 f"vol={vol:.1f} (Δ={vol-self._vol0:+.1f}) mass={mass_sum:.1f} "
@@ -415,7 +442,7 @@ class VofDamBreak:
                 f"h_rms={rough.height_rms:.3f} h_p2p={rough.height_p2p:.2f} "
                 f"κ_rms={rough.kappa_rms:.3f}{height_note}{heq_note} "
                 f"lvl={fill_flag} sim={self._last_ms:.0f}ms "
-                f"backend={self.model.lbm_backend}",
+                f"backend={self.model.lbm_backend}{cell_note}",
                 file=sys.stderr,
                 flush=True,
             )

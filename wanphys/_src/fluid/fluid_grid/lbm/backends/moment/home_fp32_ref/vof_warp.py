@@ -386,7 +386,7 @@ def home_vof_fused_kernel(
     ayz = float(0.0)
 
     has_gas = int(0)
-    has_fluid = int(0)
+    has_fluid = int(0)  # liquid bulk neighbor (TYPE_NO_F soft empty / airborne IF)
 
     # Rest population from local cell
     f0 = home_reconstruct_f_i(
@@ -653,9 +653,35 @@ def home_vof_fused_kernel(
     #   empty: mass<0  OR  (no fluid neighbor AND nearly empty)
     # Bare TYPE_NO_G / TYPE_NO_F (Home GPU literal) evaporates thin I crests
     # and thrash-fills wall menisci → O(10^4) Σmass loss + oscillatory "shaving".
+    #
+    # Airborne IF debris: no bulk liquid within Chebyshev distance 2.
+    # Do NOT use bare has_fluid==0 — free-surface outer IF often only touches
+    # other IF (+ gas); emptying those shreds the interface and drifts Σmass.
+    # Dist-2 still reaches liquid through a 1–2 cell IF shell; truly stranded
+    # splash IF / IF islands above the pool do not.
     out_type = ctype
     if ctype == CELL_INTERFACE:
-        if home_fill_empty != 0:
+        airborne = int(0)
+        if has_fluid == 0:
+            near_l = int(0)
+            for odi in range(-2, 3):
+                for odj in range(-2, 3):
+                    for odk in range(-2, 3):
+                        if odi == 0 and odj == 0 and odk == 0:
+                            continue
+                        ni = i + odi
+                        nj = j + odj
+                        nk = k + odk
+                        if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+                            continue
+                        nt = int(cell_type[ni, nj, nk])
+                        if nt == CELL_LIQUID or nt == CELL_IF:
+                            near_l = 1
+            if near_l == 0:
+                airborne = 1
+        if airborne != 0:
+            out_type = CELL_IG
+        elif home_fill_empty != 0:
             if massn > rho or (has_gas == 0 and massn > 0.99 * rho):
                 out_type = CELL_IF
             elif massn < 0.0 or (has_fluid == 0 and massn < 0.1 * rho):
@@ -677,7 +703,11 @@ def home_vof_surface1_kernel(
     ny: int,
     nz: int,
 ) -> None:
-    """IF cells: cancel neighbor IG; promote gas neighbors to GI (closed layer)."""
+    """IF cells: cancel neighbor IG; promote gas neighbors to GI (closed layer).
+
+    Do not revive airborne IG (no liquid in its 26-neigh): that reopened
+    stranded INTERFACE voids next to splash CELL_IF.
+    """
     i, j, k = wp.tid()
     if int(cell[i, j, k]) != CELL_IF:
         return
@@ -695,7 +725,30 @@ def home_vof_surface1_kernel(
                     continue
                 nt = int(cell[ni, nj, nk])
                 if nt == CELL_IG:
-                    cell[ni, nj, nk] = CELL_INTERFACE
+                    # Fill/empty conflict only if IG still touches bulk liquid.
+                    has_l = int(0)
+                    for edi in range(-1, 2):
+                        for edj in range(-1, 2):
+                            for edk in range(-1, 2):
+                                if edi == 0 and edj == 0 and edk == 0:
+                                    continue
+                                ei = ni + edi
+                                ej = nj + edj
+                                ek = nk + edk
+                                if (
+                                    ei < 0
+                                    or ei >= nx
+                                    or ej < 0
+                                    or ej >= ny
+                                    or ek < 0
+                                    or ek >= nz
+                                ):
+                                    continue
+                                et = int(cell[ei, ej, ek])
+                                if et == CELL_LIQUID:
+                                    has_l = 1
+                    if has_l != 0:
+                        cell[ni, nj, nk] = CELL_INTERFACE
                 elif nt == CELL_GAS:
                     cell[ni, nj, nk] = CELL_GI
 
@@ -875,26 +928,30 @@ def home_vof_surface3_kernel(
     if counter > 0:
         massex[i, j, k] = massexn / float(counter)
     else:
-        # No interface neighbor to receive excess: keep mass on this cell.
-        massn = massn + massexn
+        # No wet neighbor to receive excess. Do NOT reopen/keep a stranded
+        # INTERFACE in open gas — that is the floating-void failure mode.
         massex[i, j, k] = 0.0
-        if out_t == CELL_GAS and massn > 1.0e-6:
-            out_t = CELL_INTERFACE
-            if rho[i, j, k] < 0.05:
-                rho[i, j, k] = 1.0
-            rhon = rho[i, j, k]
         if out_t == CELL_LIQUID and wp.abs(massexn) > 1.0e-8:
-            # Bulk fill with nowhere to dump excess → stay interface.
-            out_t = CELL_INTERFACE
-        if out_t == CELL_INTERFACE:
-            if rhon > 1.0e-8:
-                phin = massn / rhon
-            else:
-                phin = 0.5
-            if phin < 0.0:
-                phin = 0.0
-            if phin > 1.0:
+            # No wet neighbor for excess. Keep liquid if mass remains — do NOT
+            # reopen as INTERFACE (that seeds single-cell airborne voids).
+            massn = massn + massexn
+            if massn > 1.0e-6:
+                out_t = CELL_LIQUID
+                if rho[i, j, k] < 0.05:
+                    rho[i, j, k] = 1.0
+                rhon = rho[i, j, k]
                 phin = 1.0
+            else:
+                out_t = CELL_GAS
+                massn = 0.0
+                phin = 0.0
+                rho[i, j, k] = 0.0
+        elif out_t == CELL_INTERFACE or out_t == CELL_GAS:
+            # IG→G leftover or isolated IF: evaporate this step (tiny mass).
+            out_t = CELL_GAS
+            massn = 0.0
+            phin = 0.0
+            rho[i, j, k] = 0.0
 
     mass[i, j, k] = massn
     phi[i, j, k] = phin

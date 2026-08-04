@@ -328,6 +328,135 @@ class TestHomeVofPureDamBreakMomentumEnergy(unittest.TestCase):
 class TestHomeVofMassGpu(unittest.TestCase):
     """Production GPU fused path."""
 
+    def test_isolated_airborne_interface_cleared_in_step(self) -> None:
+        """IF with only gas neighbors must not persist as a floating void.
+
+        Cleared inside the fluid step (fill/empty → IG → surface3), not via
+        host orphan CCL after the fact.
+        """
+        device = _require_cuda()
+        n = 16
+        bc = HomeDomainBC.all_walls()
+        buf = alloc_home_vof_gpu((n, n, n), "D3Q27", device, domain_bc=bc)
+        set_face_bc_gpu(buf, bc)
+        # Shallow pool at bottom; plant a stranded IF high above it.
+        seed_home_vof_gpu(buf, dam_x=n - 1, fill_z=3, rho_liquid=1.0)
+        cell = buf.cell_type.numpy()
+        mass = buf.mass.numpy()
+        phi = buf.phi.numpy()
+        rho = buf.rho.numpy()
+        ux = buf.ux.numpy()
+        uy = buf.uy.numpy()
+        uz = buf.uz.numpy()
+        ix, iy, iz = n // 2, n // 2, n - 3
+        self.assertEqual(int(cell[ix, iy, iz]), CELL_GAS)
+        cell[ix, iy, iz] = CELL_INTERFACE
+        rho[ix, iy, iz] = 1.0
+        mass[ix, iy, iz] = 0.4
+        phi[ix, iy, iz] = 0.4
+        ux[ix, iy, iz] = 0.0
+        uy[ix, iy, iz] = 0.0
+        uz[ix, iy, iz] = 0.0
+        buf.cell_type.assign(wp.array(cell, dtype=wp.int32, device=device))
+        buf.mass.assign(wp.array(mass, dtype=float, device=device))
+        buf.phi.assign(wp.array(phi, dtype=float, device=device))
+        buf.rho.assign(wp.array(rho, dtype=float, device=device))
+        buf.ux.assign(wp.array(ux, dtype=float, device=device))
+        buf.uy.assign(wp.array(uy, dtype=float, device=device))
+        buf.uz.assign(wp.array(uz, dtype=float, device=device))
+
+        _step_gpu(buf, steps=1, fz=0.0, tau=0.7)
+        cell1 = buf.cell_type.numpy()
+        mass1 = buf.mass.numpy()
+        phi1 = buf.phi.numpy()
+        self.assertEqual(
+            int(cell1[ix, iy, iz]),
+            CELL_GAS,
+            msg="stranded airborne IF should become GAS in one step",
+        )
+        self.assertLess(float(mass1[ix, iy, iz]), 1.0e-6)
+        self.assertLess(float(phi1[ix, iy, iz]), 1.0e-6)
+
+    def test_airborne_if_island_cleared_in_step(self) -> None:
+        """Two IF cells with only each other (no liquid within dist 2) clear."""
+        device = _require_cuda()
+        n = 16
+        bc = HomeDomainBC.all_walls()
+        buf = alloc_home_vof_gpu((n, n, n), "D3Q27", device, domain_bc=bc)
+        set_face_bc_gpu(buf, bc)
+        seed_home_vof_gpu(buf, dam_x=n - 1, fill_z=3, rho_liquid=1.0)
+        cell = buf.cell_type.numpy()
+        mass = buf.mass.numpy()
+        phi = buf.phi.numpy()
+        rho = buf.rho.numpy()
+        ux = buf.ux.numpy()
+        uy = buf.uy.numpy()
+        uz = buf.uz.numpy()
+        a = (n // 2, n // 2, n - 4)
+        b = (n // 2 + 1, n // 2, n - 4)
+        for p in (a, b):
+            self.assertEqual(int(cell[p]), CELL_GAS)
+            cell[p] = CELL_INTERFACE
+            rho[p] = 1.0
+            mass[p] = 0.35
+            phi[p] = 0.35
+            ux[p] = uy[p] = uz[p] = 0.0
+        buf.cell_type.assign(wp.array(cell, dtype=wp.int32, device=device))
+        buf.mass.assign(wp.array(mass, dtype=float, device=device))
+        buf.phi.assign(wp.array(phi, dtype=float, device=device))
+        buf.rho.assign(wp.array(rho, dtype=float, device=device))
+        buf.ux.assign(wp.array(ux, dtype=float, device=device))
+        buf.uy.assign(wp.array(uy, dtype=float, device=device))
+        buf.uz.assign(wp.array(uz, dtype=float, device=device))
+
+        _step_gpu(buf, steps=1, fz=0.0, tau=0.7)
+        cell1 = buf.cell_type.numpy()
+        for p in (a, b):
+            self.assertEqual(
+                int(cell1[p]),
+                CELL_GAS,
+                msg=f"IF island cell {p} should become GAS in one step",
+            )
+
+    def test_free_surface_outer_if_not_cleared(self) -> None:
+        """Outer IF above liquid (via 1-cell IF shell) must stay INTERFACE."""
+        device = _require_cuda()
+        n = 16
+        bc = HomeDomainBC.all_walls()
+        buf = alloc_home_vof_gpu((n, n, n), "D3Q27", device, domain_bc=bc)
+        set_face_bc_gpu(buf, bc)
+        seed_home_vof_gpu(buf, dam_x=n - 1, fill_z=4, rho_liquid=1.0)
+        cell = buf.cell_type.numpy()
+        mass = buf.mass.numpy()
+        phi = buf.phi.numpy()
+        rho = buf.rho.numpy()
+        # Find a liquid cell and stack IF, IF above it (2-thick shell).
+        liq = np.argwhere(cell == CELL_LIQUID)
+        self.assertGreater(liq.shape[0], 0)
+        ix, iy, iz = (int(x) for x in liq[liq[:, 2].argmax()])
+        # Ensure room above.
+        self.assertLess(iz + 2, n - 1)
+        # Convert iz+1 liquid/if to IF, plant outer IF at iz+2 if gas.
+        for zk, mfrac in ((iz + 1, 0.7), (iz + 2, 0.3)):
+            cell[ix, iy, zk] = CELL_INTERFACE
+            rho[ix, iy, zk] = 1.0
+            mass[ix, iy, zk] = mfrac
+            phi[ix, iy, zk] = mfrac
+        # Clear other liquid from iz+1 plane neighborhood? keep bulk at iz.
+        buf.cell_type.assign(wp.array(cell, dtype=wp.int32, device=device))
+        buf.mass.assign(wp.array(mass, dtype=float, device=device))
+        buf.phi.assign(wp.array(phi, dtype=float, device=device))
+        buf.rho.assign(wp.array(rho, dtype=float, device=device))
+
+        _step_gpu(buf, steps=1, fz=0.0, tau=0.7)
+        cell1 = buf.cell_type.numpy()
+        # Outer cell is within dist 2 of liquid → must not be evaporated to gas.
+        self.assertNotEqual(
+            int(cell1[ix, iy, iz + 2]),
+            CELL_GAS,
+            msg="free-surface outer IF must not be cleared as airborne",
+        )
+
     def test_gpu_seed_inventory_finite(self) -> None:
         buf = _make_gpu_dambreak(16)
         inv = _inventory_gpu(buf)
