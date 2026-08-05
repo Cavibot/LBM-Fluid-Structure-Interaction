@@ -25,14 +25,14 @@ population reconstruction 前，完整 LBM time step 继续 fail-fast；P2 的�
 
 目标论文 Wang et al. 2025 §3.1 Eq. (9)-(10) 写为：
 
-\[
+$$
 \phi(\mathbf{x},t+1)=\phi(\mathbf{x},t)
 +\frac{1}{\rho(\mathbf{x},t)}
 \sum_i\theta(\mathbf{x})
 \left[
 f_{\bar i}(\mathbf{x}+\mathbf{c}_i,t)-f_i(\mathbf{x},t)
 \right],
-\]
+$$
 
 其中印刷版 `theta` 由中心格 `x` 的类型决定。论文还明确：
 
@@ -82,20 +82,20 @@ vof_mass_scheme = "fslbm_neighbor"
 
 对每个中心 active cell `x` 和 pull 方向 `q`，来源格：
 
-\[
+$$
 \mathbf{y}=\mathbf{x}-\mathbf{c}_q.
-\]
+$$
 
 格链裸通量定义为：
 
-\[
+$$
 J_q(\mathbf{x})
 =f_q^n(\mathbf{y})-f_{\bar q}^n(\mathbf{x}).
-\]
+$$
 
 权重：
 
-\[
+$$
 w_q(\mathbf{x},\mathbf{y})=
 \begin{cases}
 1,& x\in L,\,y\in L\cup I,\\
@@ -103,13 +103,13 @@ w_q(\mathbf{x},\mathbf{y})=
 \frac{\phi_x+\phi_y}{2},& x\in I,\,y\in I,\\
 0,& \text{otherwise}.
 \end{cases}
-\]
+$$
 
 质量更新：
 
-\[
+$$
 m^{tmp}(\mathbf{x})=m^n(\mathbf{x})+\sum_{q=1}^{18}w_qJ_q.
-\]
+$$
 
 该权重在每条 active-active 无向格链两端一致，配合对向 population 后，周期/封闭域
 的全局质量交换反对称。

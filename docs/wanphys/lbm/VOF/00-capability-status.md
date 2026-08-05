@@ -75,60 +75,60 @@ alias。
 
 ## 3. 当前字段、容器与接口
 
-| 字段或接口 | 状态 | 写入者 | 当前语义 |
-|---|---|---|---|
-| `interface_model` | `EXISTING` | 配置层 | 选择 `off/shan_chen/vof` |
-| `debug_vof_observation` | `OBSERVE_CPU_ACCEPTED` | 配置层 | 只控制 SC 调试观察 |
-| internal `force_model` | `EXISTING` | `LbmModel.__post_init__` | interface + gravity 的执行组合 |
-| `state.vof` | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer | VOF 模式分配的正式状态 |
-| `state.vof.mass` | `FIX_CPU_ACCEPTED` | initializer/P4 | committed resident liquid mass |
-| `state.vof.pending_excess` | `FIX2_PARTIAL_CPU_ACCEPTED` | P4 clamp | 由 final INTERFACE 消费；零接收者时保留并本地重试的 signed excess |
-| `state.vof.pending_receiver_count` | `FIX2_PARTIAL_CPU_ACCEPTED` | P4 topology | pending sender 的 D3Q19 receiver 数；零表示 retained residual |
-| `state.vof.reference_mass` | `FIX_CPU_ACCEPTED` | initializer | closed-domain 初始化守恒参考 |
-| `state.vof.phi` | `FIX_CPU_ACCEPTED` | bounded mass/density | 始终位于 `[0,1]` 的几何/平流占据率缓存 |
-| `state.vof.cell_type` | `AUTHORITATIVE_CPU_ACCEPTED` | 严格 phi 分类 | GAS/INTERFACE/LIQUID 拓扑 |
-| `vof_mass_scheme` | `TRANSPORT_CPU_ACCEPTED` | 配置层 | 固定为已审计的 `fslbm_neighbor` |
-| `VofMassTransport` | `INTEGRATION_CPU_ACCEPTED` | solver scratch | 共享 logical-population 固定拓扑质量交换 |
-| `mass_tmp/phi_tmp/mass_delta` | `TRANSPORT_CPU_ACCEPTED` | P2 transport | 旧时间层 provisional scratch，不是持久状态 |
-| `compute_vof_mass_transport()` | `INTEGRATION_CPU_ACCEPTED` | solver | FullF/HOME 独立 transport 测试入口 |
-| `vof_atmosphere_pressure` | `SURFACE_CPU_ACCEPTED` | 配置层 | 固定气相压力，默认 `c_s^2` |
-| `vof_surface_tension` | `GEOMETRY_CPU_ACCEPTED` | 配置层 | 非负常数 gamma，Eq.12 唯一消费方 |
-| `VofSurfaceBoundary` | `GEOMETRY_CPU_ACCEPTED` | solver stage | Eq.11 + Eq.12 gas-to-interface population 补全 |
-| `compute_vof_surface_populations()` | `INTEGRATION_CPU_ACCEPTED` | solver | FullF/HOME pull + Eq.11/Eq.12 测试入口 |
-| FullF/HOME `step()` | `INTEGRATION_CPU_ACCEPTED` | solver/domain | closed-domain moving interface 可提交 |
-| `validate_p3_fixed_topology_state()` | `SURFACE_CPU_ACCEPTED` | validator | 越界/非法 topology 在 buffer swap 前失败 |
-| `vof_transition_epsilon` | `TOPOLOGY_CPU_ACCEPTED` | 配置层 | 论文阈值，默认 `1e-4` |
-| `VofTopologyTransition` | `TOPOLOGY_CPU_ACCEPTED` | solver scratch | proposal/topology/clamp/redistribution |
-| `VofTransitionResult` | `TOPOLOGY_CPU_ACCEPTED` | solver scratch | final VOF 与 new/retired/changed masks |
-| P4 pending excess emit | `FIX_CPU_ACCEPTED` | transition kernels | 本步 bounded commit；下一步固定顺序 gather |
-| `VofKineticInitializer` | `INTEGRATION_CPU_ACCEPTED` | solver scratch | donor mean + FullF populations/HOME moments |
-| `VofKineticInitializationResult` | `KINETIC_CPU_ACCEPTED` | solver scratch | donor count 与 rho/u 初始化值 |
-| GAS→INTERFACE handoff | `KINETIC_CPU_ACCEPTED` | P4→P5 | kinetic 成功后才提交 VOF |
-| `state.vof.normal` | `GEOMETRY_CPU_ACCEPTED` | P6 geometry | 液体到气体 Parker–Youngs unit normal |
-| `state.vof.plic_offset` | `GEOMETRY_CPU_ACCEPTED` | P6 geometry | centered unit-cube liquid plane offset |
-| `state.vof.curvature` | `GEOMETRY_CPU_ACCEPTED` | P6 geometry | `-0.5 div(normal)` mean curvature |
-| `state.vof.epoch/geometry_epoch` | `GEOMETRY_CPU_ACCEPTED` | commit/geometry | 过期几何硬门禁 |
-| `VofInterfaceGeometry` | `GEOMETRY_CPU_ACCEPTED` | solver stage | final phi/type normal→PLIC→curvature |
-| shared logical `f_post` provider | `INTEGRATION_CPU_ACCEPTED` | solver scratch | FullF direct、HOME ten-moment decode |
-| `VofDiagnostics` | `INTEGRATION_CPU_ACCEPTED` | read-only host ledger | mass/topology/finite/speed/epoch 门禁 |
-| `VofDeviceDiagnostics` | `FIX_CPU_ACCEPTED` | device reduction | 单一 16-float64 compact readback |
-| `vof_runtime_profile` | `FIX_CPU_ACCEPTED` | solver policy | strict/sampled/device/off |
-| `vof_validation_interval` | `FIX_CPU_ACCEPTED` | sampled policy | `[30,100]`，默认 60 |
-| `LbmDomain.initialize_vof()` | `AUTHORITATIVE_CPU_ACCEPTED` | domain | candidate 双缓冲完整初始化 |
-| `validate_initialized_vof_state()` | `AUTHORITATIVE_CPU_ACCEPTED` | validator | 只读检查实际数组不变量 |
-| `DebugMockScToVofState` | `OBSERVE_CPU_ACCEPTED` | debug observer | 与正式 VOF 分离的调试容器 |
-| `state.debug_mock_sc_to_vof.phi` | `OBSERVE_CPU_ACCEPTED` | density mapping | density 派生的有界显示填充率 |
-| `.cell_type` | `OBSERVE_CPU_ACCEPTED` | debug classifier | 调试 GAS/INTERFACE/LIQUID 标签 |
-| `.normal` | `OBSERVE_CPU_ACCEPTED` | `InterfaceGeometry` | 调试 Parker-Youngs 法向 |
-| `.epoch/.normal_valid_epoch` | `OBSERVE_CPU_ACCEPTED` | observer/geometry | 调试状态有效期 |
-| `update_debug_mock_sc_to_vof()` | `OBSERVE_CPU_ACCEPTED` | solver | density 写出后刷新调试副本 |
-| `DebugVofView` | `VISUAL_CPU_ACCEPTED` | view adapter | SC debug 或 authoritative VOF 的只读渲染输入 |
-| `VofInterfaceVisualizer` | `VISUAL_CPU_ACCEPTED` | visualization | 点云压缩、坐标转换与 normal line |
-| P8 dam-break scene/headless | `FIX_CPU_ACCEPTED` | example | visual auto=device+4 substeps；headless auto=strict |
-| P8 volume/interface render | `VISUAL_CPU_ACCEPTED` | example | 直接读取 `state.vof.phi/cell_type/normal` |
-| observation 物理不变性 | `OBSERVE_CPU_ACCEPTED` | 测试约束 | 开关不改变 populations/宏观量/force |
-| 单次 hydrodynamic closure | `EXISTING` | force pipeline | positivity 两侧均保持第一步 `u=0.5g` |
-| CUDA observation | `CUDA_NOT_ACCEPTED` | — | 当前构建没有 CUDA |
+| 字段或接口                                | 状态                           | 写入者                      | 当前语义                                                    |
+| ------------------------------------ | ---------------------------- | ------------------------ | ------------------------------------------------------- |
+| `interface_model`                    | `EXISTING`                   | 配置层                      | 选择 `off/shan_chen/vof`                                  |
+| `debug_vof_observation`              | `OBSERVE_CPU_ACCEPTED`       | 配置层                      | 只控制 SC 调试观察                                             |
+| internal `force_model`               | `EXISTING`                   | `LbmModel.__post_init__` | interface + gravity 的执行组合                               |
+| `state.vof`                          | `AUTHORITATIVE_CPU_ACCEPTED` | P1 initializer           | VOF 模式分配的正式状态                                           |
+| `state.vof.mass`                     | `FIX_CPU_ACCEPTED`           | initializer/P4           | committed resident liquid mass                          |
+| `state.vof.pending_excess`           | `FIX2_PARTIAL_CPU_ACCEPTED`  | P4 clamp                 | 由 final INTERFACE 消费；零接收者时保留并本地重试的 signed excess        |
+| `state.vof.pending_receiver_count`   | `FIX2_PARTIAL_CPU_ACCEPTED`  | P4 topology              | pending sender 的 D3Q19 receiver 数；零表示 retained residual |
+| `state.vof.reference_mass`           | `FIX_CPU_ACCEPTED`           | initializer              | closed-domain 初始化守恒参考                                   |
+| `state.vof.phi`                      | `FIX_CPU_ACCEPTED`           | bounded mass/density     | 始终位于 `[0,1]` 的几何/平流占据率缓存                                |
+| `state.vof.cell_type`                | `AUTHORITATIVE_CPU_ACCEPTED` | 严格 phi 分类                | GAS/INTERFACE/LIQUID 拓扑                                 |
+| `vof_mass_scheme`                    | `TRANSPORT_CPU_ACCEPTED`     | 配置层                      | 固定为已审计的 `fslbm_neighbor`                                |
+| `VofMassTransport`                   | `INTEGRATION_CPU_ACCEPTED`   | solver scratch           | 共享 logical-population 固定拓扑质量交换                          |
+| `mass_tmp/phi_tmp/mass_delta`        | `TRANSPORT_CPU_ACCEPTED`     | P2 transport             | 旧时间层 provisional scratch，不是持久状态                         |
+| `compute_vof_mass_transport()`       | `INTEGRATION_CPU_ACCEPTED`   | solver                   | FullF/HOME 独立 transport 测试入口                            |
+| `vof_atmosphere_pressure`            | `SURFACE_CPU_ACCEPTED`       | 配置层                      | 固定气相压力，默认 `c_s^2`                                       |
+| `vof_surface_tension`                | `GEOMETRY_CPU_ACCEPTED`      | 配置层                      | 非负常数 gamma，Eq.12 唯一消费方                                  |
+| `VofSurfaceBoundary`                 | `GEOMETRY_CPU_ACCEPTED`      | solver stage             | Eq.11 + Eq.12 gas-to-interface population 补全            |
+| `compute_vof_surface_populations()`  | `INTEGRATION_CPU_ACCEPTED`   | solver                   | FullF/HOME pull + Eq.11/Eq.12 测试入口                      |
+| FullF/HOME `step()`                  | `INTEGRATION_CPU_ACCEPTED`   | solver/domain            | closed-domain moving interface 可提交                      |
+| `validate_p3_fixed_topology_state()` | `SURFACE_CPU_ACCEPTED`       | validator                | 越界/非法 topology 在 buffer swap 前失败                        |
+| `vof_transition_epsilon`             | `TOPOLOGY_CPU_ACCEPTED`      | 配置层                      | 论文阈值，默认 `1e-4`                                          |
+| `VofTopologyTransition`              | `TOPOLOGY_CPU_ACCEPTED`      | solver scratch           | proposal/topology/clamp/redistribution                  |
+| `VofTransitionResult`                | `TOPOLOGY_CPU_ACCEPTED`      | solver scratch           | final VOF 与 new/retired/changed masks                   |
+| P4 pending excess emit               | `FIX_CPU_ACCEPTED`           | transition kernels       | 本步 bounded commit；下一步固定顺序 gather                        |
+| `VofKineticInitializer`              | `INTEGRATION_CPU_ACCEPTED`   | solver scratch           | donor mean + FullF populations/HOME moments             |
+| `VofKineticInitializationResult`     | `KINETIC_CPU_ACCEPTED`       | solver scratch           | donor count 与 rho/u 初始化值                                |
+| GAS→INTERFACE handoff                | `KINETIC_CPU_ACCEPTED`       | P4→P5                    | kinetic 成功后才提交 VOF                                      |
+| `state.vof.normal`                   | `GEOMETRY_CPU_ACCEPTED`      | P6 geometry              | 液体到气体 Parker–Youngs unit normal                         |
+| `state.vof.plic_offset`              | `GEOMETRY_CPU_ACCEPTED`      | P6 geometry              | centered unit-cube liquid plane offset                  |
+| `state.vof.curvature`                | `GEOMETRY_CPU_ACCEPTED`      | P6 geometry              | `-0.5 div(normal)` mean curvature                       |
+| `state.vof.epoch/geometry_epoch`     | `GEOMETRY_CPU_ACCEPTED`      | commit/geometry          | 过期几何硬门禁                                                 |
+| `VofInterfaceGeometry`               | `GEOMETRY_CPU_ACCEPTED`      | solver stage             | final phi/type normal→PLIC→curvature                    |
+| shared logical `f_post` provider     | `INTEGRATION_CPU_ACCEPTED`   | solver scratch           | FullF direct、HOME ten-moment decode                     |
+| `VofDiagnostics`                     | `INTEGRATION_CPU_ACCEPTED`   | read-only host ledger    | mass/topology/finite/speed/epoch 门禁                     |
+| `VofDeviceDiagnostics`               | `FIX_CPU_ACCEPTED`           | device reduction         | 单一 16-float64 compact readback                          |
+| `vof_runtime_profile`                | `FIX_CPU_ACCEPTED`           | solver policy            | strict/sampled/device/off                               |
+| `vof_validation_interval`            | `FIX_CPU_ACCEPTED`           | sampled policy           | `[30,100]`，默认 60                                        |
+| `LbmDomain.initialize_vof()`         | `AUTHORITATIVE_CPU_ACCEPTED` | domain                   | candidate 双缓冲完整初始化                                      |
+| `validate_initialized_vof_state()`   | `AUTHORITATIVE_CPU_ACCEPTED` | validator                | 只读检查实际数组不变量                                             |
+| `DebugMockScToVofState`              | `OBSERVE_CPU_ACCEPTED`       | debug observer           | 与正式 VOF 分离的调试容器                                         |
+| `state.debug_mock_sc_to_vof.phi`     | `OBSERVE_CPU_ACCEPTED`       | density mapping          | density 派生的有界显示填充率                                      |
+| `.cell_type`                         | `OBSERVE_CPU_ACCEPTED`       | debug classifier         | 调试 GAS/INTERFACE/LIQUID 标签                              |
+| `.normal`                            | `OBSERVE_CPU_ACCEPTED`       | `InterfaceGeometry`      | 调试 Parker-Youngs 法向                                     |
+| `.epoch/.normal_valid_epoch`         | `OBSERVE_CPU_ACCEPTED`       | observer/geometry        | 调试状态有效期                                                 |
+| `update_debug_mock_sc_to_vof()`      | `OBSERVE_CPU_ACCEPTED`       | solver                   | density 写出后刷新调试副本                                       |
+| `DebugVofView`                       | `VISUAL_CPU_ACCEPTED`        | view adapter             | SC debug 或 authoritative VOF 的只读渲染输入                    |
+| `VofInterfaceVisualizer`             | `VISUAL_CPU_ACCEPTED`        | visualization            | 点云压缩、坐标转换与 normal line                                  |
+| P8 dam-break scene/headless          | `FIX_CPU_ACCEPTED`           | example                  | visual auto=device+4 substeps；headless auto=strict      |
+| P8 volume/interface render           | `VISUAL_CPU_ACCEPTED`        | example                  | 直接读取 `state.vof.phi/cell_type/normal`                   |
+| observation 物理不变性                    | `OBSERVE_CPU_ACCEPTED`       | 测试约束                     | 开关不改变 populations/宏观量/force                             |
+| 单次 hydrodynamic closure              | `EXISTING`                   | force pipeline           | positivity 两侧均保持第一步 `u=0.5g`                            |
+| CUDA observation                     | `CUDA_NOT_ACCEPTED`          | —                        | 当前构建没有 CUDA                                             |
 
 ## 4. 写入权限
 
