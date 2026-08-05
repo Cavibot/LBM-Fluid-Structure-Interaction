@@ -7,21 +7,10 @@ from __future__ import annotations
 
 import warp as wp
 
-from .geometry import InterfaceGeometry
-from .kernels import classify_bounded_fill_fraction_kernel
-from .state import DebugMockScToVofState
-
-
-@wp.kernel
-def density_to_debug_fill_fraction_kernel(
-    density: wp.array3d(dtype=float),
-    phi: wp.array3d(dtype=float),
-    rho_gas: float,
-    inverse_density_span: float,
-) -> None:
-    i, j, k = wp.tid()
-    value = (density[i, j, k] - rho_gas) * inverse_density_span
-    phi[i, j, k] = wp.clamp(value, 0.0, 1.0)
+from .kernels.debug import density_to_debug_fill_fraction_kernel
+from ..solver.geometry import InterfaceGeometry
+from .kernels.classification import classify_bounded_fill_fraction_kernel
+from ..state import DebugMockScToVofState
 
 
 class DebugMockScToVofObserver:

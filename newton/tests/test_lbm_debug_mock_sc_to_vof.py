@@ -12,12 +12,14 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import (
-    DebugVofView,
     HomeLbmState,
     InterfaceModel,
     LbmDomain,
     LbmModel,
-    VofCellType,
+)
+from wanphys._src.fluid.fluid_grid.lbm.vof import VofCellType
+from wanphys._src.fluid.fluid_grid.lbm.vof.diagnostics.visualization import (
+    DebugVofView,
     VofInterfaceVisualizer,
 )
 from wanphys.examples.lbm import fluid_grid_lbm_dambreak_trt as dambreak_example

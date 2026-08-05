@@ -15,11 +15,11 @@ from wanphys._src.fluid.fluid_grid.lbm import (
     FullFLbmState,
     LbmDomain,
     LbmModel,
-    VofCellType,
-    VofKineticInitializer,
-    VofTransitionResult,
 )
 from wanphys._src.fluid.fluid_grid.lbm.constants import CX, CY, CZ, W
+from wanphys._src.fluid.fluid_grid.lbm.vof import VofCellType
+from wanphys._src.fluid.fluid_grid.lbm.vof.solver.kinetic_init import VofKineticInitializer
+from wanphys._src.fluid.fluid_grid.lbm.vof.solver.transition import VofTransitionResult
 
 
 def _model(

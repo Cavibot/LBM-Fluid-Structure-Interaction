@@ -14,10 +14,9 @@ from wanphys._src.fluid.fluid_grid.lbm import (
     HomeLbmState,
     LbmDomain,
     LbmModel,
-    VofCellType,
-    VofGridState,
 )
-from wanphys._src.fluid.fluid_grid.lbm.vof.initialization import (
+from wanphys._src.fluid.fluid_grid.lbm.vof import VofCellType, VofGridState
+from wanphys._src.fluid.fluid_grid.lbm.vof.initial_conditions import (
     prepare_initial_vof,
     validate_initial_topology,
 )

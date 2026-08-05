@@ -10,10 +10,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ..constants import CX, CY, CZ
+from ...constants import CX, CY, CZ
 
 if TYPE_CHECKING:
-    from ..state import LbmStateBase
+    from ...state import LbmStateBase
 
 
 @dataclass(frozen=True)

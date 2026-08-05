@@ -9,7 +9,7 @@ import warp as wp
 
 from scripts.diag.lbm_dambreak_stability import LEGAL_PATHS, run_case
 from wanphys._src.fluid.fluid_grid.lbm.constants import CX, CY, CZ
-from wanphys._src.fluid.fluid_grid.lbm.encoding import enforce_population_admissibility_kernel
+from wanphys._src.fluid.fluid_grid.lbm.solver.encoding import enforce_population_admissibility_kernel
 
 
 class TestLbmPopulationAdmissibility(unittest.TestCase):

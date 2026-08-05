@@ -6,7 +6,7 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import HomeLbmState, LbmModel
-from wanphys._src.fluid.fluid_grid.lbm import collisions, encoding
+from wanphys._src.fluid.fluid_grid.lbm.solver import collisions, encoding
 from wanphys._src.fluid.fluid_grid.lbm.constants import CX, CY, CZ, W
 
 

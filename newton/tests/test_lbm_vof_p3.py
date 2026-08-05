@@ -12,9 +12,9 @@ import numpy as np
 from wanphys._src.fluid.fluid_grid.lbm import (
     LbmDomain,
     LbmModel,
-    VofCellType,
 )
 from wanphys._src.fluid.fluid_grid.lbm.constants import CX, CY, CZ, OPPOSITE, W
+from wanphys._src.fluid.fluid_grid.lbm.vof import VofCellType
 
 
 def _model(

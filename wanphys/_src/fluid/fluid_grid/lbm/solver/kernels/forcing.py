@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import warp as wp
 
-from .contracts import ForceModel
+from ...contracts import ForceModel
 
 
 @dataclass(frozen=True)

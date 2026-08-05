@@ -11,19 +11,19 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
-from ..constants import CX, CY, CZ
-from .advection_kernels import (
+from ...constants import CX, CY, CZ
+from .kernels.advection import (
     advect_vof_mass_fullf_fixed_topology_kernel,
     finalize_fixed_topology_vof_kernel,
 )
-from .initialization import (
+from ..initial_conditions import (
     validate_initial_topology,
     validate_initialized_density,
     validate_no_solid_cells,
 )
 
 if TYPE_CHECKING:
-    from ..state import FullFLbmState, LbmStateBase
+    from ...state import FullFLbmState, LbmStateBase
 
 
 @dataclass(frozen=True)
@@ -51,7 +51,7 @@ def validate_p2_transport_input(
     validate_initialized_density(state.density)
 
     if logical_populations is None:
-        from ..state import FullFLbmState
+        from ...state import FullFLbmState
 
         if not isinstance(state, FullFLbmState):
             raise ValueError(
@@ -160,7 +160,7 @@ class VofMassTransport:
     ) -> VofMassTransportResult:
         """Return provisional mass/phi at fixed topology using ``density^n``."""
 
-        from ..state import FullFLbmState
+        from ...state import FullFLbmState
 
         if not isinstance(state, FullFLbmState):
             raise TypeError("compute_fullf requires FullFLbmState")

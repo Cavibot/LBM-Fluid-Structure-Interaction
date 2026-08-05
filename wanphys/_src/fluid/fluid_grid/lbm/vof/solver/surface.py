@@ -11,7 +11,7 @@ import numpy as np
 import warp as wp
 
 from .geometry import validate_authoritative_geometry
-from .surface_kernels import (
+from .kernels.surface import (
     complete_gas_to_interface_fullf_kernel,
     restore_gas_fullf_state_kernel,
     restore_gas_home_kinetic_kernel,
@@ -19,7 +19,7 @@ from .surface_kernels import (
 )
 
 if TYPE_CHECKING:
-    from ..state import FullFLbmState, LbmStateBase
+    from ...state import FullFLbmState, LbmStateBase
 
 
 class VofSurfaceBoundary:
@@ -123,7 +123,7 @@ class VofSurfaceBoundary:
 
         if state_in.vof is None:
             raise ValueError("P3 GAS restoration requires state.vof storage")
-        from ..state import FullFLbmState, HomeLbmState
+        from ...state import FullFLbmState, HomeLbmState
 
         if isinstance(state_in, FullFLbmState) and isinstance(
             state_out, FullFLbmState

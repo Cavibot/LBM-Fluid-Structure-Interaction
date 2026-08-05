@@ -13,10 +13,10 @@ import warp as wp
 from wanphys._src.fluid.fluid_grid.lbm import (
     LbmDomain,
     LbmModel,
-    VofCellType,
-    VofTopologyTransition,
-    validate_vof_diagnostics,
 )
+from wanphys._src.fluid.fluid_grid.lbm.vof import VofCellType
+from wanphys._src.fluid.fluid_grid.lbm.vof.diagnostics.host import validate_vof_diagnostics
+from wanphys._src.fluid.fluid_grid.lbm.vof.solver.transition import VofTopologyTransition
 
 
 class TestVofFix2TopologyClosure(unittest.TestCase):

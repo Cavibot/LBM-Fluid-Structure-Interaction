@@ -28,13 +28,15 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import (
-    DebugVofView,
     FullFLbmState,
     HomeLbmState,
     LbmDomain,
     LbmModel,
     LbmStateBase,
-    VofCellType,
+)
+from wanphys._src.fluid.fluid_grid.lbm.vof import VofCellType
+from wanphys._src.fluid.fluid_grid.lbm.vof.diagnostics.visualization import (
+    DebugVofView,
     VofInterfaceVisualizer,
 )
 from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRenderer

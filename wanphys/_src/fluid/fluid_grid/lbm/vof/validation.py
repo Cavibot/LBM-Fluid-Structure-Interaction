@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .contracts import VofCellType
-from .initialization import (
+from .initial_conditions import (
     validate_initial_topology,
     validate_initialized_density,
     validate_no_solid_cells,
@@ -134,7 +134,7 @@ def validate_initialized_vof_state(
         raise ValueError("initialized VOF reference mass does not match mass")
 
     validate_initial_topology(cell_type, periodic=periodic)
-    from .geometry import validate_authoritative_geometry
+    from .solver.geometry import validate_authoritative_geometry
 
     validate_authoritative_geometry(state.vof)
 

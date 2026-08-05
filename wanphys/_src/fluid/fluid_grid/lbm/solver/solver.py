@@ -11,31 +11,31 @@ from typing import Any
 import numpy as np
 import warp as wp
 
-from ..base import FluidGridSolverBase
+from ...base import FluidGridSolverBase
 from . import collisions, encoding, forcing, kernels, moments, streaming
-from .boundaries import normalize_boundary_type, resolve_boundary_faces
-from .constants import BC_OUTFLOW
-from .contracts import CollisionContext, CollisionSpace, ForceModel, collision_contract
-from .model import LbmModel
-from .state import FullFLbmState, HomeLbmState, LbmStateBase
-from .vof.advection import VofMassTransport, VofMassTransportResult
-from .vof.contracts import VofRuntimeProfile
-from .vof.debug import DebugMockScToVofObserver
-from .vof.diagnostics import (
+from ..boundaries import normalize_boundary_type, resolve_boundary_faces
+from ..constants import BC_OUTFLOW
+from ..contracts import CollisionContext, CollisionSpace, ForceModel, collision_contract
+from ..model import LbmModel
+from ..state import FullFLbmState, HomeLbmState, LbmStateBase
+from ..vof.solver.advection import VofMassTransport, VofMassTransportResult
+from ..vof.contracts import VofRuntimeProfile
+from ..vof.diagnostics.debug import DebugMockScToVofObserver
+from ..vof.diagnostics.host import (
     VofDiagnostics,
     collect_vof_diagnostics,
     validate_vof_diagnostics,
 )
-from .vof.geometry import VofInterfaceGeometry
-from .vof.initialization import (
+from ..vof.solver.geometry import VofInterfaceGeometry
+from ..vof.initial_conditions import (
     initialize_vof_fields,
     prepare_initial_vof,
     validate_no_solid_cells,
 )
-from .vof.kinetic_init import VofKineticInitializer
-from .vof.runtime import VofDeviceDiagnostics
-from .vof.surface import VofSurfaceBoundary
-from .vof.transition import VofTopologyTransition
+from ..vof.solver.kinetic_init import VofKineticInitializer
+from ..vof.diagnostics.device import VofDeviceDiagnostics
+from ..vof.solver.surface import VofSurfaceBoundary
+from ..vof.solver.transition import VofTopologyTransition
 
 
 class LbmSolver(FluidGridSolverBase):

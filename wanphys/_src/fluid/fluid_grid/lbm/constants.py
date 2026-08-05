@@ -33,6 +33,9 @@ CX: list[int] = [0, 1, -1, 0, 0, 0, 0, 1, -1, 1, -1, 1, -1, 1, -1, 0, 0, 0, 0]
 CY: list[int] = [0, 0, 0, 1, -1, 0, 0, 1, 1, -1, -1, 0, 0, 0, 0, 1, -1, 1, -1]
 CZ: list[int] = [0, 0, 0, 0, 0, 1, -1, 0, 0, 0, 0, 1, 1, -1, -1, 1, 1, -1, -1]
 
+D3Q19_DIRECTIONS: tuple[tuple[int, int, int], ...] = tuple(zip(CX, CY, CZ))
+D3Q19_MOVING_DIRECTIONS: tuple[tuple[int, int, int], ...] = D3Q19_DIRECTIONS[1:]
+
 # Lattice weights
 W_REST: float = 1.0 / 3.0   # rest particle
 W_FACE: float = 1.0 / 18.0  # face-centred (6 directions)

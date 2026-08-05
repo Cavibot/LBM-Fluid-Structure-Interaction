@@ -13,9 +13,9 @@ from wanphys._src.fluid.fluid_grid.lbm import (
     HomeLbmState,
     LbmDomain,
     LbmModel,
-    streaming,
 )
 from wanphys._src.fluid.fluid_grid.lbm.constants import CX, CY, CZ, OPPOSITE, W
+from wanphys._src.fluid.fluid_grid.lbm.solver import streaming
 
 
 def _idx(i: int, j: int, k: int, ny: int, nz: int) -> int:

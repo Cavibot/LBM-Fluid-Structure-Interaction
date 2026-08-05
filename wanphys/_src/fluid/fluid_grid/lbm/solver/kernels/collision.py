@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import warp as wp
 
-from .contracts import CollisionSpace
+from ...contracts import CollisionSpace
 from .encoding import equilibrium_population, opposite_direction
-from .model import LbmModel
+from ...model import LbmModel
 from .moments import guo_population_source
 
 

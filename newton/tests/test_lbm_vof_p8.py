@@ -14,8 +14,9 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from wanphys._src.fluid.fluid_grid.lbm import DebugVofView, VofCellType
-from wanphys._src.fluid.fluid_grid.lbm.vof.initialization import (
+from wanphys._src.fluid.fluid_grid.lbm.vof import VofCellType
+from wanphys._src.fluid.fluid_grid.lbm.vof.diagnostics.visualization import DebugVofView
+from wanphys._src.fluid.fluid_grid.lbm.vof.initial_conditions import (
     prepare_initial_vof,
 )
 from wanphys.examples.lbm import fluid_grid_lbm_vof_dambreak as dambreak

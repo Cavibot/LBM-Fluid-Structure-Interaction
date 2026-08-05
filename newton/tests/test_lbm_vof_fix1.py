@@ -14,7 +14,9 @@ import warp as wp
 from wanphys._src.fluid.fluid_grid.lbm import (
     LbmDomain,
     LbmModel,
-    VofRuntimeProfile,
+)
+from wanphys._src.fluid.fluid_grid.lbm.vof.contracts import VofRuntimeProfile
+from wanphys._src.fluid.fluid_grid.lbm.vof.diagnostics.host import (
     collect_vof_diagnostics,
     validate_vof_diagnostics,
 )
@@ -106,7 +108,7 @@ class TestVofFix1RuntimeContracts(unittest.TestCase):
     ) -> None:
         domain = _domain("device")
         validator = (
-            "wanphys._src.fluid.fluid_grid.lbm.vof.advection."
+            "wanphys._src.fluid.fluid_grid.lbm.vof.solver.advection."
             "validate_p2_transport_input"
         )
         with patch(validator, side_effect=AssertionError("host validator used")):
@@ -214,7 +216,7 @@ class TestVofFix1RuntimeContracts(unittest.TestCase):
     def test_off_keeps_transaction_and_epoch_gates(self) -> None:
         domain = _domain("off")
         validator = (
-            "wanphys._src.fluid.fluid_grid.lbm.vof.advection."
+            "wanphys._src.fluid.fluid_grid.lbm.vof.solver.advection."
             "validate_p2_transport_input"
         )
         with patch(validator, side_effect=AssertionError("host validator used")):

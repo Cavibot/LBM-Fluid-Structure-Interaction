@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
-from ..constants import CX, CY, CZ
-from .contracts import VofCellType
-from .initialization import validate_initial_topology
-from .transition_kernels import (
+from ...constants import CX, CY, CZ
+from ..contracts import VofCellType
+from ..initial_conditions import validate_initial_topology
+from .kernels.transition import (
     finalize_bounded_vof_kernel,
     prepare_vof_redistribution_kernel,
     propose_vof_type_kernel,

@@ -12,7 +12,7 @@ from wanphys._src.core.domain import Domain
 from .model import LbmModel
 from .solver import LbmSolver
 from .state import LbmStateBase
-from .vof.initialization import prepare_initial_vof, validate_no_solid_cells
+from .vof.initial_conditions import prepare_initial_vof, validate_no_solid_cells
 from .vof.validation import (
     validate_initialized_vof_state,
     validate_vof_buffer_pair,

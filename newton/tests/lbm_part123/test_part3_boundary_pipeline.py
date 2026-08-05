@@ -9,7 +9,7 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import FullFLbmState, LbmDomain, LbmModel
-from wanphys._src.fluid.fluid_grid.lbm import kernels, streaming
+from wanphys._src.fluid.fluid_grid.lbm.solver import kernels, streaming
 from wanphys._src.fluid.fluid_grid.lbm.constants import (
     BC_BOUNCE_BACK,
     BC_OUTFLOW,

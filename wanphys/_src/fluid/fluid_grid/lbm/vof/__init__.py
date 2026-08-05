@@ -1,55 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Volume-of-fluid state, geometry, and visualization building blocks."""
+"""Leaf-level VOF public API.
 
-from .advection import VofMassTransport, VofMassTransportResult
-from .contracts import VofCellType, VofMassScheme, VofRuntimeProfile
-from .diagnostics import (
-    VofDiagnostics,
-    collect_vof_diagnostics,
-    validate_vof_diagnostics,
-)
-from .geometry import (
-    InterfaceGeometry,
-    VofInterfaceGeometry,
-    plic_cube_volume,
-    plic_plane_offset,
-    validate_authoritative_geometry,
-)
-from .kinetic_init import (
-    VofKineticInitializationResult,
-    VofKineticInitializer,
-)
-from .runtime import VofDeviceDiagnostics
-from .state import DebugMockScToVofState, VofGridState
-from .surface import VofSurfaceBoundary
-from .transition import VofTopologyTransition, VofTransitionResult
-from .visualization import DebugVofView, InterfaceVisualData, VofInterfaceVisualizer
+Stage implementations are intentionally not imported here.  Import the
+solver and diagnostics APIs from their dedicated subpackages.
+"""
 
-__all__ = [
-    "DebugMockScToVofState",
-    "DebugVofView",
-    "InterfaceGeometry",
-    "InterfaceVisualData",
-    "VofCellType",
-    "VofDiagnostics",
-    "VofDeviceDiagnostics",
-    "VofGridState",
-    "VofInterfaceVisualizer",
-    "VofInterfaceGeometry",
-    "VofKineticInitializationResult",
-    "VofKineticInitializer",
-    "VofMassScheme",
-    "VofRuntimeProfile",
-    "VofMassTransport",
-    "VofMassTransportResult",
-    "VofSurfaceBoundary",
-    "VofTopologyTransition",
-    "VofTransitionResult",
-    "plic_cube_volume",
-    "plic_plane_offset",
-    "validate_authoritative_geometry",
-    "collect_vof_diagnostics",
-    "validate_vof_diagnostics",
-]
+from .contracts import VofCellType, VofMassScheme
+from .model import VofModel
+from .state import VofGridState
+
+__all__ = ["VofCellType", "VofGridState", "VofMassScheme", "VofModel"]

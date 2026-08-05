@@ -11,15 +11,15 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
-from ..constants import CX, CY, CZ, W
-from .kinetic_init_kernels import (
+from ...constants import CX, CY, CZ, W
+from .kernels.kinetic_init import (
     initialize_new_interface_fullf_kernel,
     initialize_new_interface_home_kernel,
     prepare_new_interface_donors_kernel,
 )
 
 if TYPE_CHECKING:
-    from ..state import FullFLbmState, HomeLbmState, LbmStateBase
+    from ...state import FullFLbmState, HomeLbmState, LbmStateBase
     from .transition import VofTransitionResult
 
 
@@ -125,10 +125,11 @@ def validate_p5_initialized_state(
 ) -> None:
     """Validate new FullF moments, macros, force, and mass/phi closure."""
 
+    from ...state import FullFLbmState, HomeLbmState
+
     mask = np.asarray(transition.new_interface.numpy(), dtype=bool)
     if not np.any(mask):
         return
-    from ..state import FullFLbmState, HomeLbmState
 
     shape = tuple(int(value) for value in state.res)
     rho = np.asarray(state.density.numpy())

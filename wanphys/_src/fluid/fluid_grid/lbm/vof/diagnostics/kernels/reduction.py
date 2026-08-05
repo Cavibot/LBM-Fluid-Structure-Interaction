@@ -10,16 +10,16 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
-from ..encoding import (
+from ....solver.kernels.encoding import (
     direction_x,
     direction_y,
     direction_z,
     opposite_direction,
 )
-from .diagnostics import VofDiagnostics
+from ..host import VofDiagnostics
 
 if TYPE_CHECKING:
-    from ..state import LbmStateBase
+    from ....state import LbmStateBase
 
 
 @wp.func

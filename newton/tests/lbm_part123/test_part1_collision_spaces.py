@@ -10,7 +10,7 @@ import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import HomeLbmState, LbmDomain, LbmModel
 from wanphys._src.fluid.fluid_grid.lbm.constants import CX, CY, CZ, W
-from wanphys._src.fluid.fluid_grid.lbm.moments import (
+from wanphys._src.fluid.fluid_grid.lbm.solver.moments import (
     MOMENT_EXPONENTS,
     central_to_raw_moments_kernel,
     guo_source_to_raw_moments_kernel,

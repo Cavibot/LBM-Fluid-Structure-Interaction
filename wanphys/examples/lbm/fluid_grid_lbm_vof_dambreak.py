@@ -26,38 +26,21 @@ import warp as wp
 
 import newton.examples
 from wanphys._src.fluid.fluid_grid.lbm import (
-    DebugVofView,
     LbmDomain,
     LbmModel,
+)
+from wanphys._src.fluid.fluid_grid.lbm.constants import D3Q19_MOVING_DIRECTIONS
+from wanphys._src.fluid.fluid_grid.lbm.vof.diagnostics.host import (
     VofDiagnostics,
-    VofInterfaceVisualizer,
     collect_vof_diagnostics,
     validate_vof_diagnostics,
 )
+from wanphys._src.fluid.fluid_grid.lbm.vof.diagnostics.visualization import (
+    DebugVofView,
+    VofInterfaceVisualizer,
+)
 from wanphys._src.fluid.fluid_viewer import ScreenSpaceFluidRenderer
 from wanphys._src.fluid.fluid_viewer import init as init_fluid_viewer
-
-D3Q19_MOVING_DIRECTIONS: tuple[tuple[int, int, int], ...] = (
-    (1, 0, 0),
-    (-1, 0, 0),
-    (0, 1, 0),
-    (0, -1, 0),
-    (0, 0, 1),
-    (0, 0, -1),
-    (1, 1, 0),
-    (1, -1, 0),
-    (-1, 1, 0),
-    (-1, -1, 0),
-    (1, 0, 1),
-    (1, 0, -1),
-    (-1, 0, 1),
-    (-1, 0, -1),
-    (0, 1, 1),
-    (0, 1, -1),
-    (0, -1, 1),
-    (0, -1, -1),
-)
-
 
 @dataclass(frozen=True)
 class AuthoritativeVofDamBreakConfig:

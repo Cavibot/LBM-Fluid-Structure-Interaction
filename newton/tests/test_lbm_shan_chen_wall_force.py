@@ -10,7 +10,8 @@ import unittest
 import numpy as np
 import warp as wp
 
-from wanphys._src.fluid.fluid_grid.lbm import LbmModel, LbmSolver, LbmState, kernels
+from wanphys._src.fluid.fluid_grid.lbm import LbmModel, LbmSolver, LbmState
+from wanphys._src.fluid.fluid_grid.lbm.solver import kernels
 
 
 class TestLbmShanChenWallForce(unittest.TestCase):

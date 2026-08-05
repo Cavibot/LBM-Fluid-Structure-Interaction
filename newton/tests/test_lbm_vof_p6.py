@@ -13,17 +13,16 @@ import warp as wp
 from wanphys._src.fluid.fluid_grid.lbm import (
     LbmDomain,
     LbmModel,
-    VofCellType,
-    VofGridState,
+)
+from wanphys._src.fluid.fluid_grid.lbm.constants import CX, CY, CZ, OPPOSITE, W
+from wanphys._src.fluid.fluid_grid.lbm.vof import VofCellType, VofGridState
+from wanphys._src.fluid.fluid_grid.lbm.vof.solver.geometry import (
     VofInterfaceGeometry,
     plic_cube_volume,
     plic_plane_offset,
-)
-from wanphys._src.fluid.fluid_grid.lbm.constants import CX, CY, CZ, OPPOSITE, W
-from wanphys._src.fluid.fluid_grid.lbm.vof.geometry import (
     validate_authoritative_geometry,
 )
-from wanphys._src.fluid.fluid_grid.lbm.vof.geometry_kernels import (
+from wanphys._src.fluid.fluid_grid.lbm.vof.solver.kernels.geometry import (
     plic_cube_offset,
 )
 

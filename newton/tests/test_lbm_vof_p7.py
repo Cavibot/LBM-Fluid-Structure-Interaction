@@ -14,7 +14,9 @@ from wanphys._src.fluid.fluid_grid.lbm import (
     HomeLbmState,
     LbmDomain,
     LbmModel,
-    VofCellType,
+)
+from wanphys._src.fluid.fluid_grid.lbm.vof import VofCellType
+from wanphys._src.fluid.fluid_grid.lbm.vof.diagnostics.host import (
     VofDiagnostics,
     collect_vof_diagnostics,
     validate_vof_diagnostics,

@@ -15,7 +15,7 @@ from functools import lru_cache
 import numpy as np
 import warp as wp
 
-from .constants import CX, CY, CZ
+from ...constants import CX, CY, CZ
 from .encoding import (
     direction_weight,
     direction_x,
