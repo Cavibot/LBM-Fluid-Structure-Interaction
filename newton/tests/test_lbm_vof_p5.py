@@ -467,7 +467,7 @@ class TestVofP5Integration(unittest.TestCase):
         assert domain._state_out is not None
         assert domain._state_out.vof is not None
         domain._state_out.vof.reference_mass = reference_mass
-        domain.solver._vof_interface_geometry.compute(state.vof)
+        domain.solver._vof_solver.interface_geometry.compute(state.vof)
         return domain, state, center, reference_mass
 
     def test_positive_front_commits_and_new_interface_runs_next_step(
@@ -516,7 +516,7 @@ class TestVofP5Integration(unittest.TestCase):
         state_out = domain._state_out
         assert state_in.vof is not None and state_out is not None
         mass_before = state_in.vof.mass.numpy().copy()
-        initializer = domain.solver._vof_kinetic_initializer
+        initializer = domain.solver._vof_solver.kinetic_initializer
         assert initializer is not None
         with patch.object(
             initializer,
@@ -551,7 +551,7 @@ class TestVofP5Integration(unittest.TestCase):
         assert domain._state_out is not None
         assert domain._state_out.vof is not None
         domain._state_out.vof.reference_mass = total_before + delta
-        domain.solver._vof_interface_geometry.compute(state.vof)
+        domain.solver._vof_solver.interface_geometry.compute(state.vof)
 
         domain.step(1.0)
 

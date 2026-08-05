@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import warp as wp
 
-from .encoding import (
+from .common import (
     direction_x,
     direction_y,
     direction_z,
     opposite_direction,
+)
+from .encoding import (
     reconstruct_home_population,
 )
 

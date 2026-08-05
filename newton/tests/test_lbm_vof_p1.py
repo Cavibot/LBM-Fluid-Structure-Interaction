@@ -86,9 +86,9 @@ class TestVofP1ConfigurationAndState(unittest.TestCase):
                 interface_model="vof",
                 G=-0.1,
             )
-        with self.assertRaisesRegex(NotImplementedError, "moving-wall"):
+        with self.assertRaisesRegex(ValueError, "geometry/link"):
             _vof_model_with_boundaries("moving_wall")
-        with self.assertRaisesRegex(NotImplementedError, "cut-link"):
+        with self.assertRaisesRegex(ValueError, "geometry/link"):
             _vof_model_with_boundaries("cut_link")
 
         domain = LbmDomain(_vof_model())

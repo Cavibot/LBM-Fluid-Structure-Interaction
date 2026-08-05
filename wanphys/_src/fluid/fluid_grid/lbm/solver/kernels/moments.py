@@ -16,7 +16,7 @@ import numpy as np
 import warp as wp
 
 from ...constants import CX, CY, CZ
-from .encoding import (
+from .common import (
     direction_weight,
     direction_x,
     direction_y,

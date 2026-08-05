@@ -118,7 +118,7 @@ class TestVofFix1RuntimeContracts(unittest.TestCase):
         self.assertIsNotNone(report)
         assert report is not None
         self.assertEqual(report.epoch, 1)
-        runtime = domain.solver._vof_device_diagnostics
+        runtime = domain.solver._vof_solver.device_diagnostics
         self.assertIsNotNone(runtime)
         assert runtime is not None
         self.assertEqual(tuple(runtime.metrics.shape), (33,))
@@ -149,7 +149,7 @@ class TestVofFix1RuntimeContracts(unittest.TestCase):
         previous[3, 1, 2] = 1
         proposed[3, 1, 2] = 2
 
-        runtime = domain.solver._vof_device_diagnostics
+        runtime = domain.solver._vof_solver.device_diagnostics
         assert runtime is not None
         report = runtime.collect(
             state,
@@ -201,7 +201,7 @@ class TestVofFix1RuntimeContracts(unittest.TestCase):
         state.vof.pending_excess.assign(pending)
         state.vof.reference_mass += 0.125
 
-        runtime = domain.solver._vof_device_diagnostics
+        runtime = domain.solver._vof_solver.device_diagnostics
         assert runtime is not None
         report = runtime.collect(state)
         self.assertEqual(report.pending_zero_receiver_count, 0)

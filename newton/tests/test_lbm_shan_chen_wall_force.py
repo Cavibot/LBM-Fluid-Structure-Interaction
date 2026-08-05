@@ -11,7 +11,7 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import LbmModel, LbmSolver, LbmState
-from wanphys._src.fluid.fluid_grid.lbm.solver import kernels
+from wanphys._src.fluid.fluid_grid.lbm.solver.kernels import shan_chen
 
 
 class TestLbmShanChenWallForce(unittest.TestCase):
@@ -41,7 +41,7 @@ class TestLbmShanChenWallForce(unittest.TestCase):
         fz: wp.array = wp.zeros((nx, ny, nz), dtype=float, device=device)
 
         wp.launch(
-            kernels.compute_shan_chen_force_kernel,
+            shan_chen.compute_shan_chen_force_kernel,
             dim=(nx, ny, nz),
             inputs=[
                 rho, solid_phi, fx, fy, fz,
@@ -79,7 +79,7 @@ class TestLbmShanChenWallForce(unittest.TestCase):
         fz: wp.array = wp.zeros((nx, ny, nz), dtype=float, device=device)
 
         wp.launch(
-            kernels.compute_shan_chen_force_kernel,
+            shan_chen.compute_shan_chen_force_kernel,
             dim=(nx, ny, nz),
             inputs=[
                 rho, solid_phi, fx, fy, fz,

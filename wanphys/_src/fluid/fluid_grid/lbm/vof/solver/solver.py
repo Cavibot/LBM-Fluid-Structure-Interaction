@@ -108,14 +108,6 @@ class VofSolver:
 
         return self._last_diagnostics
 
-    @property
-    def prepared_proposed_type(self) -> wp.array | None:
-        """Expose transition scratch only to the internal diagnostics path."""
-
-        if self.topology_transition.result is None:
-            return None
-        return self.topology_transition.result.proposed_type
-
     def initialize(self, state: LbmStateBase, phi0: np.ndarray) -> None:
         """Initialize one authoritative VOF state and clear transaction state."""
 
@@ -127,13 +119,14 @@ class VofSolver:
             shape=self.shape,
             periodic=tuple(bool(value) for value in self.periodic),
         )
-        self.initialize_prepared(state, prepared_phi, cell_type)
+        self._initialize_prepared(state, prepared_phi, cell_type)
         self._prepared_source = None
         self._prepared_target = None
         self._prepared_epoch = None
+        self._prepared_validation = False
         self._last_diagnostics = None
 
-    def initialize_prepared(
+    def _initialize_prepared(
         self,
         state: LbmStateBase,
         prepared_phi: np.ndarray,
@@ -252,6 +245,7 @@ class VofSolver:
         self._prepared_source = None
         self._prepared_target = None
         self._prepared_epoch = None
+        self._prepared_validation = False
 
     def _full_validation_required(self, state_in: LbmStateBase) -> bool:
         if self.runtime_profile is VofRuntimeProfile.STRICT:
@@ -272,10 +266,7 @@ class VofSolver:
             raise RuntimeError("VOF transaction requires distinct state buffers")
         if self._prepared_source is not None:
             raise RuntimeError("previous VOF step was not finished")
-        if type(state_in) is not type(state_out):
-            raise RuntimeError("VOF transaction requires matching state types")
-        if state_in.vof is None or state_out.vof is None:
-            raise RuntimeError("VOF transaction requires authoritative VOF storage")
+        assert state_in.vof is not None and state_out.vof is not None
         if state_in.vof.epoch < 0:
             raise RuntimeError("VOF transaction source must be initialized")
 
@@ -288,7 +279,8 @@ class VofSolver:
             raise RuntimeError("finish_step source does not match prepared source")
         if self._prepared_target is not state_out:
             raise RuntimeError("finish_step target does not match prepared target")
-        if state_in.vof is None or self._prepared_epoch != state_in.vof.epoch:
+        assert state_in.vof is not None
+        if self._prepared_epoch != state_in.vof.epoch:
             raise RuntimeError("finish_step epoch does not match prepared epoch")
 
     @staticmethod

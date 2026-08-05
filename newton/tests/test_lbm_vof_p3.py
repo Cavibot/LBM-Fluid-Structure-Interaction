@@ -67,7 +67,7 @@ class TestVofP3Configuration(unittest.TestCase):
         model = _model((3, 2, 2))
         domain = LbmDomain(model)
         self.assertAlmostEqual(
-            domain.solver._vof_surface_boundary.rho_g,
+            domain.solver._vof_solver.surface_boundary.rho_g,
             1.0,
             places=7,
         )

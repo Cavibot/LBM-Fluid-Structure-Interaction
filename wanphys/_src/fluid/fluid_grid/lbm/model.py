@@ -10,7 +10,13 @@ import warnings
 from dataclasses import dataclass, field
 
 from ..base import FluidGridModelBase
-from .boundaries import normalize_boundary_type
+from .constants import (
+    BC_BOUNCE_BACK,
+    BC_OUTFLOW,
+    BC_PERIODIC,
+    BC_PRESSURE,
+    BC_VELOCITY_INLET,
+)
 from .contracts import (
     BoundaryModel,
     ForceModel,
@@ -25,6 +31,50 @@ from .vof.contracts import (
     normalize_vof_mass_scheme,
     normalize_vof_runtime_profile,
 )
+
+
+_BOUNDARY_MODEL_TO_TYPE = {
+    BoundaryModel.BOUNCE_BACK: BC_BOUNCE_BACK,
+    BoundaryModel.ZOU_HE: BC_VELOCITY_INLET,
+    BoundaryModel.PRESSURE: BC_PRESSURE,
+    BoundaryModel.CONVECTIVE: BC_OUTFLOW,
+    BoundaryModel.PERIODIC: BC_PERIODIC,
+}
+_BOUNDARY_TYPE_TO_MODEL = {
+    BC_BOUNCE_BACK: BoundaryModel.BOUNCE_BACK,
+    BC_VELOCITY_INLET: BoundaryModel.ZOU_HE,
+    BC_OUTFLOW: BoundaryModel.CONVECTIVE,
+    BC_PERIODIC: BoundaryModel.PERIODIC,
+    BC_PRESSURE: BoundaryModel.PRESSURE,
+}
+
+
+def normalize_boundary_type(value: int | str | BoundaryModel) -> tuple[int, BoundaryModel]:
+    """Normalize boundary configuration into integer kernel metadata."""
+
+    if isinstance(value, int):
+        try:
+            return value, _BOUNDARY_TYPE_TO_MODEL[value]
+        except KeyError as exc:
+            raise ValueError(f"Unknown LBM boundary type {value}") from exc
+    try:
+        model = BoundaryModel(str(value).lower())
+    except ValueError as exc:
+        expected = ", ".join(item.value for item in BoundaryModel)
+        raise ValueError(
+            f"Unknown LBM boundary model {value!r}; expected one of: {expected}"
+        ) from exc
+    if model is BoundaryModel.SURFACE:
+        raise ValueError(
+            "SURFACE is not a six-face LBM boundary; configure the interface "
+            "model instead"
+        )
+    if model in (BoundaryModel.MOVING_WALL, BoundaryModel.CUT_LINK):
+        raise ValueError(
+            f"{model.value} is a geometry/link capability, not a six-face "
+            "boundary; use the dedicated model flag"
+        )
+    return _BOUNDARY_MODEL_TO_TYPE[model], model
 
 
 @dataclass
@@ -373,9 +423,6 @@ class LbmModel(FluidGridModelBase):
     use_cut_link: bool = False
     """Use interpolated cut-link bounce-back at signed-distance solid links."""
 
-    surface_completion: bool = False
-    """Reserved selector.  Surface population completion is not implemented."""
-
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.boundary_models is not None and self.bc_types != (0, 0, 0, 0, 0, 0):
@@ -387,10 +434,6 @@ class LbmModel(FluidGridModelBase):
             normalized, boundary_model = normalize_boundary_type(value)
             normalized_bc_types.append(normalized)
             normalized_boundary_models.append(boundary_model.value)
-            if boundary_model is BoundaryModel.MOVING_WALL:
-                self.has_moving_walls = True
-            elif boundary_model is BoundaryModel.CUT_LINK:
-                self.use_cut_link = True
         self.bc_types = tuple(normalized_bc_types)  # type: ignore[assignment]
         self.boundary_models = tuple(normalized_boundary_models)  # type: ignore[assignment]
         self.encoding = normalize_encoding(self.encoding).value
@@ -471,10 +514,6 @@ class LbmModel(FluidGridModelBase):
         )
         self.force_model = resolved_force.value
         validate_capability(self.encoding, self.resolved_collision, resolved_force)
-        if self.surface_completion:
-            raise NotImplementedError(
-                "SurfaceCompletion is interface-only and has no implementation"
-            )
         if self.use_regularization and self.resolved_collision != "trt":
             raise ValueError("LBM regularization is supported only by TRT collision")
         if self.tau <= 0.5:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from ....solver.kernels.encoding import direction_x, direction_y, direction_z
+from ....solver.kernels.common import direction_x, direction_y, direction_z
 
 
 @wp.func

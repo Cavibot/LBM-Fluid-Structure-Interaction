@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from wanphys._src.fluid.fluid_grid.lbm.boundaries import (
-    UnavailableSurfaceCompletion,
-    normalize_boundary_type,
-    resolve_boundary_faces,
-)
+from wanphys._src.fluid.fluid_grid.lbm.boundaries import resolve_boundary_faces
 from wanphys._src.fluid.fluid_grid.lbm.constants import (
     BC_BOUNCE_BACK,
     BC_OUTFLOW,
@@ -29,7 +25,7 @@ from wanphys._src.fluid.fluid_grid.lbm.contracts import (
     normalize_interface_model,
     resolve_force_model,
 )
-from wanphys._src.fluid.fluid_grid.lbm.model import LbmModel
+from wanphys._src.fluid.fluid_grid.lbm.model import LbmModel, normalize_boundary_type
 
 
 class TestPart0Contracts(unittest.TestCase):
@@ -92,7 +88,7 @@ class TestPart0Contracts(unittest.TestCase):
     def test_string_boundary_axis_normalizes_without_leaking_into_collision(self) -> None:
         self.assertEqual(normalize_boundary_type("zou_he")[0], BC_VELOCITY_INLET)
         self.assertEqual(normalize_boundary_type("convective")[0], BC_OUTFLOW)
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(ValueError):
             normalize_boundary_type("surface")
         model = LbmModel(
             fluid_grid_res=(4, 4, 4),
@@ -102,14 +98,12 @@ class TestPart0Contracts(unittest.TestCase):
         self.assertEqual(model.bc_types[:2], (BC_VELOCITY_INLET, BC_OUTFLOW))
         self.assertEqual(model.boundary_models[:2], ("zou_he", "convective"))
 
-    def test_surface_completion_is_interface_only_and_fails_fast(self) -> None:
+    def test_surface_is_not_a_six_face_boundary(self) -> None:
         self.assertIs(
             boundary_capability_status(BoundaryModel.SURFACE),
             CapabilityStatus.PLANNED,
         )
-        with self.assertRaises(NotImplementedError):
-            UnavailableSurfaceCompletion().complete()
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(ValueError):
             LbmModel(
                 fluid_grid_res=(4, 4, 4),
                 device="cpu",

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from .constants import (
@@ -15,7 +14,6 @@ from .constants import (
     BC_PRESSURE,
     BC_VELOCITY_INLET,
 )
-from .contracts import BoundaryModel
 
 
 FACE_NAMES = ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax")
@@ -23,45 +21,6 @@ OPEN_BOUNDARY_TYPES = frozenset((BC_VELOCITY_INLET, BC_OUTFLOW, BC_PRESSURE))
 VALID_BOUNDARY_TYPES = frozenset(
     (BC_BOUNCE_BACK, BC_VELOCITY_INLET, BC_OUTFLOW, BC_PERIODIC, BC_PRESSURE)
 )
-
-BOUNDARY_MODEL_TO_TYPE = {
-    BoundaryModel.BOUNCE_BACK: BC_BOUNCE_BACK,
-    BoundaryModel.ZOU_HE: BC_VELOCITY_INLET,
-    BoundaryModel.PRESSURE: BC_PRESSURE,
-    BoundaryModel.CONVECTIVE: BC_OUTFLOW,
-    BoundaryModel.PERIODIC: BC_PERIODIC,
-    BoundaryModel.MOVING_WALL: BC_BOUNCE_BACK,
-    BoundaryModel.CUT_LINK: BC_BOUNCE_BACK,
-}
-BOUNDARY_TYPE_TO_MODEL = {
-    BC_BOUNCE_BACK: BoundaryModel.BOUNCE_BACK,
-    BC_VELOCITY_INLET: BoundaryModel.ZOU_HE,
-    BC_OUTFLOW: BoundaryModel.CONVECTIVE,
-    BC_PERIODIC: BoundaryModel.PERIODIC,
-    BC_PRESSURE: BoundaryModel.PRESSURE,
-}
-
-
-def normalize_boundary_type(value: int | str | BoundaryModel) -> tuple[int, BoundaryModel]:
-    """Normalize the string public API while retaining integer kernel metadata."""
-
-    if isinstance(value, int):
-        try:
-            return value, BOUNDARY_TYPE_TO_MODEL[value]
-        except KeyError as exc:
-            raise ValueError(f"Unknown LBM boundary type {value}") from exc
-    try:
-        model = BoundaryModel(str(value).lower())
-    except ValueError as exc:
-        expected = ", ".join(item.value for item in BoundaryModel)
-        raise ValueError(
-            f"Unknown LBM boundary model {value!r}; expected one of: {expected}"
-        ) from exc
-    if model is BoundaryModel.SURFACE:
-        raise NotImplementedError(
-            "SurfaceCompletion is interface-only and has no implementation"
-        )
-    return BOUNDARY_MODEL_TO_TYPE[model], model
 
 
 @dataclass(frozen=True)
@@ -180,22 +139,3 @@ def resolve_boundary_faces(
         open_faces=tuple(FACE_NAMES[index] for index in open_faces),
     )
     return BoundaryResolution(tuple(face_types), open_faces, summary)
-
-
-class SurfaceCompletion(ABC):
-    """Reserved interface for future fluid/gas surface population closure."""
-
-    @abstractmethod
-    def complete(self, *args: object, **kwargs: object) -> None:
-        raise NotImplementedError
-
-
-class UnavailableSurfaceCompletion(SurfaceCompletion):
-    """Explicit fail-fast implementation used until surface closure exists."""
-
-    def complete(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
-        raise NotImplementedError(
-            "SurfaceCompletion is interface-only; free-surface population "
-            "completion is not implemented"
-        )

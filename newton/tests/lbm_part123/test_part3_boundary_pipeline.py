@@ -9,7 +9,8 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.lbm import FullFLbmState, LbmDomain, LbmModel
-from wanphys._src.fluid.fluid_grid.lbm.solver import kernels, streaming
+from wanphys._src.fluid.fluid_grid.lbm.solver import streaming
+from wanphys._src.fluid.fluid_grid.lbm.solver.kernels import moving_wall
 from wanphys._src.fluid.fluid_grid.lbm.constants import (
     BC_BOUNCE_BACK,
     BC_OUTFLOW,
@@ -215,7 +216,7 @@ class TestPart3BoundaryPipeline(unittest.TestCase):
         baseline = float(f_star.numpy().reshape(19, 3, 3, 3)[1, 0, 1, 1])
         bc_types = wp.zeros(6, dtype=wp.int32, device="cpu")
         wp.launch(
-            kernels.apply_moving_wall_transport_kernel,
+            moving_wall.apply_moving_wall_transport_kernel,
             dim=(3, 3, 3),
             inputs=[
                 f_star,
@@ -260,7 +261,7 @@ class TestPart3BoundaryPipeline(unittest.TestCase):
             device="cpu",
         )
         wp.launch(
-            kernels.apply_moving_wall_transport_kernel,
+            moving_wall.apply_moving_wall_transport_kernel,
             dim=(3, 3, 3),
             inputs=[
                 f_star,

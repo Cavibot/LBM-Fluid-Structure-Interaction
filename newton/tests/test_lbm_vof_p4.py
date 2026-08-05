@@ -532,7 +532,7 @@ class TestVofP4OracleAndIntegration(unittest.TestCase):
         assert domain._state_out is not None
         assert domain._state_out.vof is not None
         domain._state_out.vof.reference_mass = initial_total
-        domain.solver._vof_interface_geometry.compute(state_in.vof)
+        domain.solver._vof_solver.interface_geometry.compute(state_in.vof)
 
         domain.step(1.0)
 
@@ -572,7 +572,7 @@ class TestVofP4OracleAndIntegration(unittest.TestCase):
         assert domain._state_out is not None
         assert domain._state_out.vof is not None
         domain._state_out.vof.reference_mass = total_before
-        domain.solver._vof_interface_geometry.compute(state_in.vof)
+        domain.solver._vof_solver.interface_geometry.compute(state_in.vof)
 
         domain.step(1.0)
 

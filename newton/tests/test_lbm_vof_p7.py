@@ -264,7 +264,7 @@ class TestVofP7LogicalPopulationAndHome(unittest.TestCase):
             assert domain._state_out is not None
             assert domain._state_out.vof is not None
             domain._state_out.vof.reference_mass = reference_mass
-            domain.solver._vof_interface_geometry.compute(state.vof)
+            domain.solver._vof_solver.interface_geometry.compute(state.vof)
             domain.step(1.0)
 
         state = home.state
