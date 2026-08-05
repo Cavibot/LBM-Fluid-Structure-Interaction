@@ -213,7 +213,7 @@ class TestVofFix1RuntimeContracts(unittest.TestCase):
         ):
             validate_vof_diagnostics(report)
 
-    def test_off_keeps_transaction_and_epoch_gates(self) -> None:
+    def test_off_keeps_low_cost_transaction_gates(self) -> None:
         domain = _domain("off")
         validator = (
             "wanphys._src.fluid.fluid_grid.lbm.vof.solver.advection."
@@ -225,8 +225,14 @@ class TestVofFix1RuntimeContracts(unittest.TestCase):
 
         assert domain.state.vof is not None
         domain.state.vof.geometry_epoch -= 1
-        with self.assertRaisesRegex(ValueError, "geometry is stale"):
-            domain.step(1.0)
+        # Geometry/storage integrity is established at initialization.  The
+        # per-step OFF path protects only the low-cost buffer transaction;
+        # finish_step republishes a synchronized target geometry.
+        domain.step(1.0)
+        self.assertEqual(
+            domain.state.vof.geometry_epoch,
+            domain.state.vof.epoch,
+        )
 
 
 class TestVofFix1LongRunningRegression(unittest.TestCase):
