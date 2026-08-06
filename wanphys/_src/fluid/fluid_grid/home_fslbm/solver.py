@@ -13,8 +13,9 @@ Phase 2 (mrSolver3DGpu) — fluid + free-surface subsystem (this stage).
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
+import numpy as np
 import warp as wp
 
 from ..base import FluidGridSolverBase
@@ -60,7 +61,6 @@ class HomeFslbmSolver(FluidGridSolverBase):
         self._split_flag_gpu = wp.zeros(1, dtype=wp.int32, device=self.device)
 
         # Direction arrays for kernel (warp-compatible, avoid Python list subscript)
-        import numpy as np
         self._cx = wp.array(np.array(C.CX, dtype=np.int32), dtype=wp.int32, device=self.device)
         self._cy = wp.array(np.array(C.CY, dtype=np.int32), dtype=wp.int32, device=self.device)
         self._cz = wp.array(np.array(C.CZ, dtype=np.int32), dtype=wp.int32, device=self.device)
@@ -163,21 +163,21 @@ class HomeFslbmSolver(FluidGridSolverBase):
         wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
         wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
 
-        # ---- Inject gravity into body-force arrays ----
+        # ---- Assign gravity into body-force arrays (no accumulation) ----
         gx: float = float(self.model.gravity_x)
         gy: float = float(self.model.gravity_y)
         gz: float = float(self.model.gravity_z)
-        if gx != 0.0 or gy != 0.0 or gz != 0.0:
-            wp.launch(
-                kernels_fluid.add_gravity_kernel,
-                dim=(self.nx, self.ny, self.nz),
-                inputs=[
-                    state_out.force_x,
-                    state_out.force_y,
-                    state_out.force_z,
-                    gx, gy, gz,
-                ],
-            )
+        # Always assign so a mid-run gravity→0 clears stale forces.
+        wp.launch(
+            kernels_fluid.add_gravity_kernel,
+            dim=(self.nx, self.ny, self.nz),
+            inputs=[
+                state_out.force_x,
+                state_out.force_y,
+                state_out.force_z,
+                gx, gy, gz,
+            ],
+        )
 
         # ---- Launch stream_collide_bvh (THE single kernel, Audit item B4) ----
         wp.launch(
@@ -335,18 +335,7 @@ class HomeFslbmSolver(FluidGridSolverBase):
         u0:
             Uniform initial velocity ``(ux, uy, uz)``.
         """
-        import numpy as np
-
         ux, uy, uz = u0
-
-        # Build equilibrium stress tensor for uniform density/velocity
-        # Π_xx^eq = c_s² + u_x², Π_xy^eq = u_x·u_y, …
-        pi_xx_eq = C.CS2 + ux * ux
-        pi_yy_eq = C.CS2 + uy * uy
-        pi_zz_eq = C.CS2 + uz * uz
-        pi_xy_eq = ux * uy
-        pi_xz_eq = ux * uz
-        pi_yz_eq = uy * uz
 
         N = self._stride
 

@@ -1,7 +1,7 @@
 # Home-FSLBM 迁移至 WanPhys 框架计划（修订版）
 
 > **目标目录**: `wanphys/_src/fluid/fluid_grid/home_fslbm/`
-> **参考代码**: `docs/papers/锐界面动力学自由表面流与泡沫/Home-FSLBM/`
+> **参考代码**: `docs/Home-FSLBM/`
 > **参考文献**: 见下方 [论文编号对照表](#论文编号对照表)
 > **引擎**: Newton（通过 WanPhys 核心层）
 > **GPU 后端**: NVIDIA Warp（替代 CUDA）

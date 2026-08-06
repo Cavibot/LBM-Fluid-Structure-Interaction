@@ -1157,8 +1157,29 @@ def stream_collide_bvh_kernel(
             massn += massex[ni2, nj2, nk2]
 
     if flagsn_su == C.TYPE_F:
+        # Mass exchange with fluid/interface neighbours only.
+        # Use Thürey link flux fhn[di]-fon[opp] (same as TYPE_I) so
+        # F↔I / F↔F pairs cancel. The CUDA line at cu:824 adds
+        # fhn[i]-fon[i] for every direction; that Δρ form only pairs
+        # with TYPE_I when fon[di]≈fon[opp] (quiescent). Under gravity
+        # it drains O(1) mass per step. Skip solid/gas links (comment
+        # at cu:824: "neighbor is fluid or interface cell").
+        flux_f = float(0.0)
         for di in range(1, 27):
-            massn += f_streamed[di] - fon[di]
+            nsi = i - int(cx[di])
+            nsj = j - int(cy[di])
+            nsk = k - int(cz[di])
+            if nsi < 0 or nsi >= nx or nsj < 0 or nsj >= ny or nsk < 0 or nsk >= nz:
+                continue
+            nsu = int(flag[nsi, nsj, nsk]) & C.TYPE_SU_MASK
+            nbo = int(flag[nsi, nsj, nsk]) & C.TYPE_BO_MASK
+            if nbo == C.TYPE_S:
+                continue
+            if (nsu & (C.TYPE_F | C.TYPE_I)) == 0:
+                continue
+            opp_di = int(opposite[di])
+            flux_f += f_streamed[di] - fon[opp_di]
+        massn += flux_f
 
     mass[i, j, k] = massn
 
@@ -1227,19 +1248,23 @@ def stream_collide_bvh_kernel(
             # bubble_rho is double; cast to float for arithmetic
             rho_k = float(bubble_rho[tag - 1])
 
-        # ---- Surface tension modulation (ref lines 880-888) ----
+        # ---- Surface tension modulation (ref lines 879-888) ----
+        # Reference indexes bubble arrays at (tag-1) even when tag<=0.
+        # Zero-initialized buffers make that read behave like volume==0,
+        # which trips the small-bubble branch (sigma -> 2e-4) for ambient
+        # free-surface cells.  Replicate that for golden parity.
         sigma_k = surface_tension
+        init_bv = float(0.0)
+        bv = float(0.0)
         if tag > 0:
-            # For large bubbles (air layer): use init_volume (ref line 880)
             init_bv = float(bubble_init_volume[tag - 1])
-            if init_bv > 5000000.0:
-                sigma_k = 1.0e-6
-            # For small bubbles: additional preconditions (ref lines 885-888)
             bv = float(bubble_volume[tag - 1])
-            if disjoin_force[i, j, k] <= 0.0:
-                if sigma_k > 1.0e-3:
-                    if bv < 64.0:
-                        sigma_k = 2.0e-4
+        if init_bv > 5000000.0:
+            sigma_k = 1.0e-6
+        if disjoin_force[i, j, k] <= 0.0:
+            if sigma_k > 1.0e-3:
+                if bv < 64.0:
+                    sigma_k = 2.0e-4
 
         # ---- PLIC curvature ----
         # Centre phi is mass-corrected (ref line 867); neighbours read from grid.
@@ -1282,8 +1307,9 @@ def stream_collide_bvh_kernel(
             # Avoids reading phi grid which may have been overwritten by
             # parallel TYPE_I threads already past their Phase D write.
             nphi = phij[di]
-            if nphi <= 0.0:
-                continue
+            # NOTE: do NOT gate on nphi<=0 — reference (mrLbmSolverGpu3D.cu:928)
+            # selects neighbours by flag only. Skipping empty TYPE_I breaks
+            # pairwise flux symmetry with TYPE_F streaming (mass leak).
 
             # Flag check still reads from grid — flags are written only in
             # Phase E (after this code), so no data-race here.
@@ -1302,13 +1328,17 @@ def stream_collide_bvh_kernel(
             if mni < 0 or mni >= nx or mnj < 0 or mnj >= ny or mnk < 0 or mnk >= nz:
                 continue
 
+            # Ref (mrLbmSolverGpu3D.cu:928):
+            #   flagsj_su & (TYPE_F|TYPE_I) ? (flagsj_su == TYPE_F ? full : half) : 0
+            # TYPE_F|TYPE_I == 0x18, so TYPE_IF / TYPE_IG / TYPE_GI also match
+            # and take the half-weight branch.
             mnflag_su = int(flag[mni, mnj, mnk]) & C.TYPE_SU_MASK
-            if mnflag_su == C.TYPE_F or mnflag_su == C.TYPE_I:
+            if (mnflag_su & (C.TYPE_F | C.TYPE_I)) != 0:
                 opp_di = int(opposite[di])
                 dflux = f_streamed[di] - fon[opp_di]
                 if mnflag_su == C.TYPE_F:
                     mass_exchange += dflux
-                else:  # TYPE_I
+                else:
                     mass_exchange += 0.5 * (nphi + phi_self) * dflux
 
         # mass = original + sum(massex) + mass_exchange
@@ -1718,11 +1748,16 @@ def add_gravity_kernel(
     gy: float,
     gz: float,
 ):
-    """Add constant gravity to per-cell body-force arrays."""
+    """Assign constant gravity into per-cell body-force arrays.
+
+    Body force must be set each step (not accumulated). The reference
+    stores a constant ``forcez = g``; migration docs require forces are
+    written each timestep without accumulation.
+    """
     i, j, k = wp.tid()
-    force_x[i, j, k] = force_x[i, j, k] + gx
-    force_y[i, j, k] = force_y[i, j, k] + gy
-    force_z[i, j, k] = force_z[i, j, k] + gz
+    force_x[i, j, k] = gx
+    force_y[i, j, k] = gy
+    force_z[i, j, k] = gz
 
 
 # ============================================================================

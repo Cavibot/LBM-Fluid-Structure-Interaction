@@ -1,7 +1,7 @@
 # Home-FSLBM 迁移计划二次审核意见书
 
 > **审核对象**: `docs/wanphys/home_fslbm/migration_plan_zh.md` (修订版) 及其附属 `migration_execution_zh.md`
-> **参考代码**: `docs/papers/锐界面动力学自由表面流与泡沫/Home-FSLBM/inc/3D/`
+> **参考代码**: `docs/Home-FSLBM/inc/3D/`
 > **审核日期**: 2026-07-15
 > **审核人**: 基于论文四源码 + 论文五源码的交叉验证
 > **审核范围**: 伪代码逻辑正确性、架构流程一致性、出处引用准确性、降级方案零容忍
