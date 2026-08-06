@@ -1186,6 +1186,40 @@ def stream_collide_bvh_kernel(
         #  corrected by excess mass"
         phi_self = calculate_phi(rho_old, massn, C.CellFlag.TYPE_I)
 
+        # ---- Cache neighbour phi values (ref lines 829-861) ----
+        # Reference code snapshots the 27-point phi neighbourhood BEFORE
+        # any thread writes updated phi in Phase D.  Without this cache,
+        # parallel TYPE_I threads racing through Phase D would pollute
+        # other threads' mass-exchange reads, producing non-deterministic
+        # per-step drift vs the reference.
+        phij = wp.zeros(27, dtype=float)
+        for di in range(1, 27):
+            ni = i - int(cx[di])
+            nj = j - int(cy[di])
+            nk = k - int(cz[di])
+            if px == 1:
+                if ni < 0: ni += nx
+                elif ni >= nx: ni -= nx
+            if py == 1:
+                if nj < 0: nj += ny
+                elif nj >= ny: nj -= ny
+            if pz == 1:
+                if nk < 0: nk += nz
+                elif nk >= nz: nk -= nz
+            if ni >= 0 and ni < nx and nj >= 0 and nj < ny and nk >= 0 and nk < nz:
+                phij[di] = phi[ni, nj, nk]
+                # Solid-neighbour fallback (ref lines 843-860)
+                if (int(flag[ni, nj, nk]) & C.TYPE_BO_MASK) == C.TYPE_S:
+                    for fd in range(1, 7):
+                        fi = ni - int(cx[fd]); fj = nj - int(cy[fd]); fk = nk - int(cz[fd])
+                        if fi >= 0 and fi < nx and fj >= 0 and fj < ny and fk >= 0 and fk < nz:
+                            if (int(flag[fi, fj, fk]) & C.TYPE_BO_MASK) != C.TYPE_S:
+                                phij[di] = phi[fi, fj, fk]
+                                break
+            else:
+                phij[di] = float(0.0)
+        phij[0] = phi_self
+
         # ---- Gas pressure ρ_k from bubble ----
         tag = tag_matrix[i, j, k]
         rho_k = 1.0  # default gas density
@@ -1242,14 +1276,20 @@ def stream_collide_bvh_kernel(
         # ---- Mass exchange: compute Δmass (Phase D, ref lines 926-929) ----
         # MUST run BEFORE the gas BC, because it uses the ORIGINAL
         # f_streamed values to compute mass flux (ref lines 926-929 vs 930-934).
-        # phi_self was already recalculated at the top of Phase C (ref line 867).
         mass_exchange = float(0.0)
         for di in range(1, 27):
-            mni = i - cx[di]
-            mnj = j - cy[di]
-            mnk = k - cz[di]
+            # Use cached phij from Phase C snapshot (ref lines 829-861).
+            # Avoids reading phi grid which may have been overwritten by
+            # parallel TYPE_I threads already past their Phase D write.
+            nphi = phij[di]
+            if nphi <= 0.0:
+                continue
 
-            # Periodic wrap
+            # Flag check still reads from grid — flags are written only in
+            # Phase E (after this code), so no data-race here.
+            mni = i - int(cx[di])
+            mnj = j - int(cy[di])
+            mnk = k - int(cz[di])
             if px == 1:
                 if mni < 0: mni += nx
                 elif mni >= nx: mni -= nx
@@ -1259,13 +1299,11 @@ def stream_collide_bvh_kernel(
             if pz == 1:
                 if mnk < 0: mnk += nz
                 elif mnk >= nz: mnk -= nz
-
             if mni < 0 or mni >= nx or mnj < 0 or mnj >= ny or mnk < 0 or mnk >= nz:
                 continue
 
             mnflag_su = int(flag[mni, mnj, mnk]) & C.TYPE_SU_MASK
             if mnflag_su == C.TYPE_F or mnflag_su == C.TYPE_I:
-                nphi = phi[mni, mnj, mnk]
                 opp_di = int(opposite[di])
                 dflux = f_streamed[di] - fon[opp_di]
                 if mnflag_su == C.TYPE_F:
@@ -1338,26 +1376,38 @@ def stream_collide_bvh_kernel(
 
 
     # ---- Compute density from pop (ref line 948) ----
-    rho_new = float(0.0)
-    for di in range(27):
-        rho_new += pop[di]
+    # Explicit unrolled sum — summation order must match CUDA reference
+    # (mrLbmSolverGpu3D.cu:948) for bit-identical gas-BC rounding.
+    rho_new = (pop[0] + pop[1] + pop[2] + pop[3] + pop[4] + pop[5] + pop[6]
+             + pop[7] + pop[8] + pop[9] + pop[10] + pop[11] + pop[12]
+             + pop[13] + pop[14] + pop[15] + pop[16] + pop[17] + pop[18]
+             + pop[19] + pop[20] + pop[21] + pop[22] + pop[23] + pop[24]
+             + pop[25] + pop[26])
     inv_rho = 1.0 / rho_new
     FX_scaled = fx * rho_new
     FY_scaled = fy * rho_new
     FZ_scaled = fz * rho_new
 
     # ---- Compute velocity with half-force correction (ref lines 956-958) ----
-    ux_new = float(0.0)
-    uy_new = float(0.0)
-    uz_new = float(0.0)
-    for di in range(27):
-        pi = pop[di]
-        ux_new += pi * float(cx[di])
-        uy_new += pi * float(cy[di])
-        uz_new += pi * float(cz[di])
-    ux_new = (ux_new + 0.5 * FX_scaled) * inv_rho
-    uy_new = (uy_new + 0.5 * FY_scaled) * inv_rho
-    uz_new = (uz_new + 0.5 * FZ_scaled) * inv_rho
+    # Explicit grouped sums — summation order must match CUDA reference
+    # (mrLbmSolverGpu3D.cu:956-958) for bit-identical gas-BC rounding.
+    # D3Q27 direction groups: +x = {1,7,9,13,15,19,21,23,26},
+    # -x = {2,8,10,14,16,20,22,24,25}, etc.
+    ux_new = (((pop[1] + pop[7] + pop[9] + pop[13] + pop[15]
+              + pop[19] + pop[21] + pop[23] + pop[26])
+             - (pop[2] + pop[8] + pop[10] + pop[14] + pop[16]
+              + pop[20] + pop[22] + pop[24] + pop[25])
+             + 0.5 * FX_scaled) * inv_rho)
+    uy_new = (((pop[3] + pop[7] + pop[11] + pop[14] + pop[17]
+              + pop[19] + pop[21] + pop[24] + pop[25])
+             - (pop[4] + pop[8] + pop[12] + pop[13] + pop[18]
+              + pop[20] + pop[22] + pop[23] + pop[26])
+             + 0.5 * FY_scaled) * inv_rho)
+    uz_new = (((pop[5] + pop[9] + pop[11] + pop[16] + pop[18]
+              + pop[19] + pop[22] + pop[23] + pop[25])
+             - (pop[6] + pop[10] + pop[12] + pop[15] + pop[17]
+              + pop[20] + pop[21] + pop[24] + pop[26])
+             + 0.5 * FZ_scaled) * inv_rho)
 
     # ---- Clamp velocity magnitude to 0.4 (ref lines 960-964) ----
     vel_sq = ux_new * ux_new + uy_new * uy_new + uz_new * uz_new
@@ -1368,25 +1418,30 @@ def stream_collide_bvh_kernel(
         uz_new = uz_new * scale_v
 
     # ---- Compute stress components from pop (ref lines 966-971) ----
-    # pixx_t45 = Σ f_i * c_ix²  (sum over all directions; c_ix² = 1 for directions
-    # that have ±1 in x, 0 otherwise)
-    pixx_pop = float(0.0)
-    pixy_pop = float(0.0)
-    pixz_pop = float(0.0)
-    piyy_pop = float(0.0)
-    piyz_pop = float(0.0)
-    pizz_pop = float(0.0)
-    for di in range(27):
-        pi = pop[di]
-        cx_i = float(cx[di])
-        cy_i = float(cy[di])
-        cz_i = float(cz[di])
-        pixx_pop += pi * cx_i * cx_i
-        pixy_pop += pi * cx_i * cy_i
-        pixz_pop += pi * cx_i * cz_i
-        piyy_pop += pi * cy_i * cy_i
-        piyz_pop += pi * cy_i * cz_i
-        pizz_pop += pi * cz_i * cz_i
+    # Explicit grouped sums — summation order must match CUDA reference
+    # (mrLbmSolverGpu3D.cu:966-971) for bit-identical gas-BC rounding.
+    #
+    # pixx_t45 = Σ f_i * c_ix²  (directions where cx[i] = ±1)
+    pixx_pop = (pop[1] + pop[2] + pop[7] + pop[8] + pop[9] + pop[10]
+              + pop[13] + pop[14] + pop[15] + pop[16] + pop[19] + pop[20]
+              + pop[21] + pop[22] + pop[23] + pop[24] + pop[25] + pop[26])
+    # pixy_t90 = Σ f_i * c_ix * c_iy  (+cx·+cy or -cx·-cy → positive)
+    pixy_pop = ((pop[7] + pop[8] + pop[19] + pop[20] + pop[21] + pop[22])
+              - (pop[13] + pop[14] + pop[23] + pop[24] + pop[25] + pop[26]))
+    # pixz_t90 = Σ f_i * c_ix * c_iz
+    pixz_pop = ((pop[9] + pop[10] + pop[19] + pop[20] + pop[23] + pop[24])
+              - (pop[15] + pop[16] + pop[21] + pop[22] + pop[25] + pop[26]))
+    # piyy_t45 = Σ f_i * c_iy²
+    piyy_pop = (pop[3] + pop[4] + pop[7] + pop[8] + pop[11] + pop[12]
+              + pop[13] + pop[14] + pop[17] + pop[18] + pop[19] + pop[20]
+              + pop[21] + pop[22] + pop[23] + pop[24] + pop[25] + pop[26])
+    # piyz_t90 = Σ f_i * c_iy * c_iz
+    piyz_pop = ((pop[11] + pop[12] + pop[19] + pop[20] + pop[25] + pop[26])
+              - (pop[17] + pop[18] + pop[21] + pop[22] + pop[23] + pop[24]))
+    # pizz_t45 = Σ f_i * c_iz²
+    pizz_pop = (pop[5] + pop[6] + pop[9] + pop[10] + pop[11] + pop[12]
+              + pop[15] + pop[16] + pop[17] + pop[18] + pop[19] + pop[20]
+              + pop[21] + pop[22] + pop[23] + pop[24] + pop[25] + pop[26])
 
     # =====================================================================
     # TYPE_NO_F / TYPE_NO_G flag transitions (ref lines 974-998)
