@@ -65,5 +65,6 @@ results.csv
 # Makoto-LeMain's ignore
 .deepseek/
 .codewhale/
+*.vs/
 docs/papers/
 wanphys/_src/fluid/fluid_grid/home_fslbm/tests/logs/
