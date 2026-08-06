@@ -15,6 +15,7 @@ from .state import HomeFslbmState
 
 # Surface module is loaded lazily by the solver to avoid circular imports
 # during Warp kernel compilation.  Import it here solely for API discoverability.
+from . import kernels_bubble  # noqa: F401
 from . import kernels_surface  # noqa: F401
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "HomeFslbmModel",
     "HomeFslbmSolver",
     "HomeFslbmState",
+    "kernels_bubble",
     "kernels_surface",
 ]

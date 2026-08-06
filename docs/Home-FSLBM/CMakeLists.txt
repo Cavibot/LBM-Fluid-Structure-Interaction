@@ -123,8 +123,9 @@ add_library(${PROJECT_NAME}-cuda STATIC
  
 # set_property(TARGET ${PROJECT_NAME}-cuda PROPERTY CUDA_ARCHITECTURES ${FLR_CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME}-cuda PROPERTY POSITION_INDEPENDENT_CODE ON)
-set_property(TARGET ${PROJECT_NAME}-cuda PROPERTY CXX_STANDARD 14)
-set_property(TARGET ${PROJECT_NAME}-cuda PROPERTY CUDA_STANDARD 14)
+# CUDA 12.x Thrust/CUB require C++17 (C++14 is deprecated and can trip cicc)
+set_property(TARGET ${PROJECT_NAME}-cuda PROPERTY CXX_STANDARD 17)
+set_property(TARGET ${PROJECT_NAME}-cuda PROPERTY CUDA_STANDARD 17)
 
 target_include_directories(${PROJECT_NAME}-cuda
     PRIVATE 
@@ -162,6 +163,29 @@ target_include_directories(export_solver_golden
     ${INC_DIR}/inc/3D/gpu
 )
 target_link_libraries(export_solver_golden
+    PRIVATE
+        ${PROJECT_NAME}-cuda
+        ${PROJECT_NAME}-cpu
+        ${OpenCV_LIBS}
+        CUDA::cudart
+)
+
+# ---- export_bubble_golden — Phase 3 CCL / bubble golden data ----
+add_executable(export_bubble_golden
+    ${INC_DIR}/export_bubble_golden.cpp
+)
+set_property(TARGET export_bubble_golden PROPERTY POSITION_INDEPENDENT_CODE ON)
+set_property(TARGET export_bubble_golden PROPERTY CXX_STANDARD 17)
+target_include_directories(export_bubble_golden
+    PRIVATE
+    ./3rdParty/
+    ${INC_DIR}/common
+    ${INC_DIR}/inc/2D/cpu
+    ${INC_DIR}/inc/2D/gpu
+    ${INC_DIR}/inc/3D/cpu
+    ${INC_DIR}/inc/3D/gpu
+)
+target_link_libraries(export_bubble_golden
     PRIVATE
         ${PROJECT_NAME}-cuda
         ${PROJECT_NAME}-cpu

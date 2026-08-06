@@ -11,5 +11,7 @@ extern "C"
 	void mrInit3DGpu(mrFlow3D* mlflow, MLFluidParam3D* param);
 	void coupling(mrFlow3D* mlflow, MLFluidParam3D* param, float N, float l0p, float roup, float labma,
 		float u0p, int time_step);
+	/** GPU InitBubble pipeline (convert → CCL → parse → create → tag). */
+	void InitBubble(mrFlow3D* mlflow, MLFluidParam3D* param);
 }
 #endif // !_MRLBMSOLVERGPU3DH_

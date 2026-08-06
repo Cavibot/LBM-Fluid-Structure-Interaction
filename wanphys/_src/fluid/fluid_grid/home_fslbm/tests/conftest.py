@@ -51,6 +51,95 @@ def load_surface_golden(scene_name: str) -> dict[str, np.ndarray]:
         "tag_matrix": np.loadtxt(scene_dir / "tag_matrix.txt", dtype=np.int32),
     }
 
+
+# Optional per-scene bubble golden fields (one value per line, ref x-fastest flat).
+_BUBBLE_OPTIONAL_FIELDS: dict[str, type] = {
+    "input_matrix": np.int32,
+    "label_matrix": np.int32,
+    "flag": np.int32,
+    "phi": np.float32,
+    "delta_phi": np.float32,
+    "tag_matrix": np.int32,
+    "previous_tag": np.int32,
+    "previous_merge_tag": np.int32,
+    "merge_detector": np.int32,
+    "bubble_volume": np.float64,
+    "bubble_init_volume": np.float64,
+    "bubble_rho": np.float64,
+}
+
+
+def bubble_golden_dir(scene_name: str) -> Path:
+    """Return ``golden_data/<scene_name>/`` path."""
+    return GOLDEN_DIR / scene_name
+
+
+def bubble_golden_available(scene_name: str, required: list[str] | None = None) -> bool:
+    """True if the scene directory exists and contains the required ``.txt`` files."""
+    scene_dir = bubble_golden_dir(scene_name)
+    if not scene_dir.is_dir():
+        return False
+    req = required or ["label_matrix"]
+    return all((scene_dir / f"{name}.txt").is_file() for name in req)
+
+
+def load_bubble_golden(scene_name: str) -> dict[str, np.ndarray | int | float]:
+    """Load Phase 3 bubble golden data (multi-file-per-directory .txt).
+
+    Reference dumps use x-fastest flat layout
+    ``idx = x + nx*(y + ny*z)``.  Callers should reorder with
+    :func:`reorder_ref_scalar_to_warp` before comparing to Warp ``array3d``.
+
+    Scalar bookkeeping files (single value):
+    ``bubble_count.txt``, ``label_num.txt``, ``merge_flag.txt``,
+    ``split_flag.txt``, ``steps.txt``, ``nx.txt``, ``ny.txt``, ``nz.txt``.
+    """
+    scene_dir = bubble_golden_dir(scene_name)
+    if not scene_dir.is_dir():
+        raise FileNotFoundError(f"Bubble golden scene not found: {scene_dir}")
+
+    out: dict[str, np.ndarray | int | float] = {}
+    for name, dtype in _BUBBLE_OPTIONAL_FIELDS.items():
+        path = scene_dir / f"{name}.txt"
+        if path.is_file():
+            out[name] = np.loadtxt(path, dtype=dtype)
+
+    for scalar in (
+        "bubble_count",
+        "label_num",
+        "merge_flag",
+        "split_flag",
+        "steps",
+        "nx",
+        "ny",
+        "nz",
+    ):
+        path = scene_dir / f"{scalar}.txt"
+        if path.is_file():
+            val = np.loadtxt(path)
+            out[scalar] = int(np.asarray(val).reshape(-1)[0])
+
+    return out
+
+
+def reorder_ref_scalar_to_warp(
+    golden_flat: np.ndarray, nx: int, ny: int, nz: int
+) -> np.ndarray:
+    """Convert ref x-fastest flat field → Warp ``array3d`` layout ``[x,y,z]``.
+
+    Reference: ``flat[x + nx*(y + ny*z)]``.
+    Warp ``.numpy()`` on ``array3d(nx,ny,nz)`` is C-order with shape ``(nx,ny,nz)``.
+    """
+    g = np.asarray(golden_flat).reshape(-1)
+    expected = nx * ny * nz
+    if g.size != expected:
+        raise ValueError(
+            f"flat size {g.size} != nx*ny*nz={expected} ({nx}x{ny}x{nz})"
+        )
+    # C-reshape of x-fastest → (nz, ny, nx) then transpose to (nx, ny, nz)
+    g3d = g.reshape((nz, ny, nx))
+    return np.transpose(g3d, (2, 1, 0))
+
 # ---------------------------------------------------------------------------
 # Deferred imports — warp must be imported after pytest collection
 # to avoid triggering kernel compilation during test discovery.

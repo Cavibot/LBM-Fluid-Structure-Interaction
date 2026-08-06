@@ -7,8 +7,8 @@ Implements :class:`HomeFslbmSolver`, the two-phase solver that mirrors the
 reference implementation's ``coupling()`` → ``mrSolver3DGpu()`` call
 structure (``mrSolver3D.h:121-127``).
 
-Phase 1 (coupling) — bubble CCL + gas subsystem (deferred to stages 3-4).
-Phase 2 (mrSolver3DGpu) — fluid + free-surface subsystem (this stage).
+Phase 1 (coupling) — bubble CCL + tagging (gas subsystem deferred to stage 4).
+Phase 2 (mrSolver3DGpu) — fluid + free-surface subsystem.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import warp as wp
 
 from ..base import FluidGridSolverBase
 from . import constants as C
+from . import kernels_bubble
 from . import kernels_fluid
 from . import kernels_surface
 from .model import HomeFslbmModel
@@ -49,16 +50,18 @@ class HomeFslbmSolver(FluidGridSolverBase):
         self._step_count: int = 0
 
         # Solver-owned temporary arrays
-        # (moment swap and other merge-requiring ops benefit from
-        # solver-owned scratch space rather than per-kernel allocations)
         self._div_array: wp.array3d = wp.zeros(
             (self.nx, self.ny, self.nz), dtype=float, device=self.device
         )
 
-        # GPU-side split_flag for report_split (ref: mrLbmSolverGpu3D.cu:53-61)
-        # surface_3_kernel atomically sets this when TYPE_IF cells transition to
-        # TYPE_F with a valid previous bubble tag.
+        # GPU-side merge/split flags (ref: mrFlow3D merge_flag / split_flag)
+        self._merge_flag_gpu = wp.zeros(1, dtype=wp.int32, device=self.device)
         self._split_flag_gpu = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._label_num_gpu = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._bubble_count_gpu = wp.zeros(1, dtype=wp.int32, device=self.device)
+        # Scratch for MergeSplitDetector host readback
+        self._det_merge = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._det_split = wp.zeros(1, dtype=wp.int32, device=self.device)
 
         # Direction arrays for kernel (warp-compatible, avoid Python list subscript)
         self._cx = wp.array(np.array(C.CX, dtype=np.int32), dtype=wp.int32, device=self.device)
@@ -66,6 +69,20 @@ class HomeFslbmSolver(FluidGridSolverBase):
         self._cz = wp.array(np.array(C.CZ, dtype=np.int32), dtype=wp.int32, device=self.device)
         self._w3d = wp.array(np.array(C.W, dtype=np.float32), dtype=float, device=self.device)
         self._opposite = wp.array(np.array(C.OPPOSITE, dtype=np.int32), dtype=wp.int32, device=self.device)
+
+    # ------------------------------------------------------------------
+    # Bubble initialisation
+    # ------------------------------------------------------------------
+
+    def init_bubbles(self, state: HomeFslbmState) -> None:
+        """Run reference ``InitBubble`` on ``state`` (CCL + create labels)."""
+        kernels_bubble.init_bubbles(
+            state,
+            self._label_num_gpu,
+            self._bubble_count_gpu,
+            self._merge_flag_gpu,
+            self._split_flag_gpu,
+        )
 
     # ------------------------------------------------------------------
     # Main step — two-phase pipeline
@@ -84,7 +101,7 @@ class HomeFslbmSolver(FluidGridSolverBase):
         Follows the two-phase structure from ``mrSolver3D::mlIterateCouplingGpu``
         (``mrSolver3D.h:121-127``):
 
-        1. Phase 1 — coupling(): bubble CCL + gas subsystem
+        1. Phase 1 — coupling(): bubble tagging + volume/rho + conditional CCL
         2. Phase 2 — mrSolver3DGpu(): fluid + free-surface subsystem
         """
         del contacts, control, dt  # LBM dt = 1 lattice unit
@@ -92,22 +109,22 @@ class HomeFslbmSolver(FluidGridSolverBase):
         self._step_count += 1
 
         # ------------------------------------------------------------------
-        # Phase 1: coupling() — bubbles + gas (deferred to stages 3-4)
+        # Phase 1: coupling() — bubbles (gas deferred to stage 4)
         # ------------------------------------------------------------------
-        # In the reference code, coupling() handles:
-        #   get_tag_kernel → assign_tag_kernel → recheck_merge_kernel
-        #   → bubble_volume_update → bubble_rho_update
-        #   → g_reconstruction → g_stream_collide → bubble_volume_g_update
-        #   → mrSolver3D_g_step2Kernel → bubble_rho_update
-        #
-        # Phase 1 NO-OP: copy gas moments from state_in to state_out.
+        # Seed GPU flags from previous step (surface_3 may have set split_flag)
+        self._merge_flag_gpu.fill_(int(state_in.merge_flag))
+        self._split_flag_gpu.fill_(int(state_in.split_flag))
+        self._bubble_count_gpu.fill_(int(state_in.bubble_count))
+        self._label_num_gpu.fill_(int(max(state_in.label_num, 0)))
+
+        # Copy bubble / gas persistent fields into state_out first so all
+        # Phase-1 kernels mutate the outgoing buffer.
         wp.copy(state_out.g_mom, state_in.g_mom)
         wp.copy(state_out.g_mom_post, state_in.g_mom_post)
         wp.copy(state_out.c_value, state_in.c_value)
         wp.copy(state_out.src, state_in.src)
         wp.copy(state_out.delta_g, state_in.delta_g)
 
-        # ---- Bubble fields: copy persistent data ----
         wp.copy(state_out.tag_matrix, state_in.tag_matrix)
         wp.copy(state_out.previous_tag, state_in.previous_tag)
         wp.copy(state_out.previous_merge_tag, state_in.previous_merge_tag)
@@ -126,34 +143,112 @@ class HomeFslbmSolver(FluidGridSolverBase):
         state_out.label_num = state_in.label_num
         state_out.bubble_count = state_in.bubble_count
 
+        # Also need flag/phi/delta_phi early for bubble volume update
+        wp.copy(state_out.flag, state_in.flag)
+        wp.copy(state_out.phi, state_in.phi)
+        wp.copy(state_out.delta_phi, state_in.delta_phi)
+        wp.copy(state_out.mass, state_in.mass)
+        wp.copy(state_out.massex, state_in.massex)
+
+        dim = (self.nx, self.ny, self.nz)
+
+        # get_tag → assign_tag → recheck_merge
+        wp.launch(
+            kernels_bubble.get_tag_kernel,
+            dim=dim,
+            inputs=[
+                state_out.tag_matrix,
+                state_out.previous_merge_tag,
+                state_out.merge_detector,
+                self._cx, self._cy, self._cz,
+                self.nx, self.ny, self.nz,
+            ],
+        )
+        wp.launch(
+            kernels_bubble.assign_tag_kernel,
+            dim=dim,
+            inputs=[
+                state_out.tag_matrix,
+                state_out.previous_merge_tag,
+                state_out.merge_detector,
+                self.nx, self.ny, self.nz,
+            ],
+        )
+        wp.launch(
+            kernels_bubble.recheck_merge_kernel,
+            dim=dim,
+            inputs=[
+                state_out.tag_matrix,
+                state_out.merge_detector,
+                self._merge_flag_gpu,
+                self._cx, self._cy, self._cz,
+                self.nx, self.ny, self.nz,
+            ],
+        )
+
+        # update_bubble: volume → rho → merge/split detect
+        wp.launch(
+            kernels_bubble.bubble_volume_update_kernel,
+            dim=dim,
+            inputs=[
+                state_out.delta_phi,
+                state_out.tag_matrix,
+                state_out.previous_tag,
+                state_out.bubble_volume,
+                self.nx, self.ny, self.nz,
+            ],
+        )
+        bc = int(state_out.bubble_count)
+        if bc > 0:
+            wp.launch(
+                kernels_bubble.bubble_rho_update_kernel,
+                dim=bc,
+                inputs=[
+                    state_out.bubble_volume,
+                    state_out.bubble_init_volume,
+                    state_out.bubble_rho,
+                    bc,
+                ],
+            )
+
+        wp.launch(
+            kernels_bubble.merge_split_detector_kernel,
+            dim=1,
+            inputs=[
+                self._merge_flag_gpu,
+                self._split_flag_gpu,
+                self._det_merge,
+                self._det_split,
+            ],
+        )
+        merge_flag = int(self._det_merge.numpy()[0])
+        split_flag = int(self._det_split.numpy()[0])
+        state_out.merge_flag = merge_flag
+        state_out.split_flag = split_flag
+
+        if merge_flag > 0 or split_flag > 0:
+            self._handle_merge_split(state_out)
+            wp.launch(
+                kernels_bubble.clear_detector_kernel,
+                dim=dim,
+                inputs=[
+                    state_out.merge_detector,
+                    self._merge_flag_gpu,
+                    self._split_flag_gpu,
+                    self.nx, self.ny, self.nz,
+                ],
+            )
+            state_out.merge_flag = 0
+            state_out.split_flag = 0
+
+        # Gas subsystem (g_handle) deferred to stage 4 — fields already copied.
+
         # ------------------------------------------------------------------
         # Phase 2: mrSolver3DGpu() — fluid + free-surface
         # ------------------------------------------------------------------
-        # In the reference code, mrSolver3DGpu() handles:
-        #   calculate_disjoint
-        #   [conditional] clear_inlet
-        #   atmosphere_rho_update_kernel
-        #   atmosphere_volme_update_kernel
-        #   stream_collide_bvh ★ (single kernel, inline turbulence + free-surface)
-        #   ResetDisjoinForce
-        #   surface_1 → surface_2 → surface_3 (marker propagation + mass redist)
-        #   mrSolver3D_step2Kernel (fMom swap)
-        #
-        # For Phase 1 (this stage), we implement:
-        #   - Copy force / solid / mass arrays from state_in
-        #   - stream_collide_bvh_kernel (single monolithic kernel)
-        #   - Swap f_mom_post → f_mom (Phase 2 post-step)
-        #   - surface kernels and other post-processing deferred to stage 2
-
-        # ---- Copy persistent fields from state_in ----
-        wp.copy(state_out.flag, state_in.flag)
-        wp.copy(state_out.mass, state_in.mass)
-        wp.copy(state_out.massex, state_in.massex)
-        wp.copy(state_out.phi, state_in.phi)
         wp.copy(state_out.force_x, state_in.force_x)
         wp.copy(state_out.force_y, state_in.force_y)
         wp.copy(state_out.force_z, state_in.force_z)
-        wp.copy(state_out.delta_phi, state_in.delta_phi)
         wp.copy(state_out.f_mom_post, state_in.f_mom_post)
 
         # ---- Copy solid coupling fields ----
@@ -163,11 +258,27 @@ class HomeFslbmSolver(FluidGridSolverBase):
         wp.copy(state_out.vel_solid_v, state_in.vel_solid_v)
         wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
 
+        # Optional clear_inlet (disabled by default)
+        if self.model.clear_inlet_enabled:
+            wp.launch(
+                kernels_bubble.clear_inlet_kernel,
+                dim=dim,
+                inputs=[
+                    state_out.islet,
+                    state_out.flag,
+                    state_out.phi,
+                    state_out.mass,
+                    state_out.massex,
+                    state_in.f_mom,  # stream_collide reads state_in.f_mom
+                    self.nx, self.ny, self.nz,
+                    self._stride,
+                ],
+            )
+
         # ---- Assign gravity into body-force arrays (no accumulation) ----
         gx: float = float(self.model.gravity_x)
         gy: float = float(self.model.gravity_y)
         gz: float = float(self.model.gravity_z)
-        # Always assign so a mid-run gravity→0 clears stale forces.
         wp.launch(
             kernels_fluid.add_gravity_kernel,
             dim=(self.nx, self.ny, self.nz),
@@ -184,27 +295,20 @@ class HomeFslbmSolver(FluidGridSolverBase):
             kernels_fluid.stream_collide_bvh_kernel,
             dim=(self.nx, self.ny, self.nz),
             inputs=[
-                # Read: current moments
                 state_in.f_mom,
-                state_out.flag,          # read/write (islet→TYPE_F)
-                state_out.phi,           # read/write (interface placeholder)
-                state_out.tag_matrix,    # read (bubble tag for gas pressure)
-                state_out.disjoin_force, # read
-                state_out.islet,         # read (may be set by Phase 1)
-
-                # Read: bubble properties
+                state_out.flag,
+                state_out.phi,
+                state_out.tag_matrix,
+                state_out.disjoin_force,
+                state_out.islet,
                 state_out.bubble_volume,
                 state_out.bubble_init_volume,
                 state_out.bubble_rho,
-
-                # Read: solid coupling
                 state_out.solid_phi,
                 state_out.solid_body_id,
                 state_out.vel_solid_u,
                 state_out.vel_solid_v,
                 state_out.vel_solid_w,
-
-                # Read+write: accumulators
                 state_out.mass,
                 state_out.massex,
                 state_out.delta_g,
@@ -214,11 +318,7 @@ class HomeFslbmSolver(FluidGridSolverBase):
                 state_out.force_z,
                 state_out.c_value,
                 state_out.src,
-
-                # Write: post-collision moments
                 state_out.f_mom_post,
-
-                # Parameters
                 self.nx,
                 self.ny,
                 self.nz,
@@ -242,8 +342,6 @@ class HomeFslbmSolver(FluidGridSolverBase):
         )
 
         # ---- Surface marker propagation (Phase 2) ----
-        # Reference: surface_1 → surface_2 → surface_3 pipeline
-        # (``mrLbmSolverGpu3D.cu:444-701``)
         wp.launch(
             kernels_surface.surface_1_kernel,
             dim=(self.nx, self.ny, self.nz),
@@ -268,8 +366,10 @@ class HomeFslbmSolver(FluidGridSolverBase):
                 self._stride,
             ],
         )
-        # Zero split_flag before surface_3 (ref: clear_detector curind==1
-        # resets split_flag/merge_flag, mrLbmSolverGpu3D.cu:78-82)
+        # Do NOT zero split_flag here — surface_3 accumulates split signals
+        # for the *next* coupling step. Clear happens in clear_detector after
+        # a merge/split CCL pass (and at InitBubble).
+        # Preserve any unresolved merge_flag on GPU; surface_3 only touches split.
         self._split_flag_gpu.zero_()
 
         wp.launch(
@@ -294,13 +394,11 @@ class HomeFslbmSolver(FluidGridSolverBase):
             ],
         )
 
-        # Pull split_flag back to host (ref: MergeSplitDetectorKernel
-        # reads mlflow.split_flag, mrLbmSolverGpu3D.cu:1360-1370)
+        # Pull split_flag for next-step coupling (merge_flag already on host)
         state_out.split_flag = int(self._split_flag_gpu.numpy()[0])
+        state_out.merge_flag = int(self._merge_flag_gpu.numpy()[0])
 
         # ---- Post-step swap: f_mom_post → f_mom ----
-        # Reference: ``mrSolver3D_step2Kernel`` — copy post-collision moments
-        # into the current-moment arrays for the next step.
         wp.launch(
             kernels_fluid.swap_moments_kernel,
             dim=self._stride,
@@ -310,8 +408,16 @@ class HomeFslbmSolver(FluidGridSolverBase):
                 state_out.g_mom,
                 state_out.g_mom_post,
                 self._stride,
-                self._stride,  # gas_stride (same for 3D grid)
+                self._stride,
             ],
+        )
+
+    def _handle_merge_split(self, state: HomeFslbmState) -> None:
+        """Conditional CCL rebuild after merge/split detection."""
+        kernels_bubble.handle_merge_split(
+            state,
+            self._label_num_gpu,
+            self._bubble_count_gpu,
         )
 
     # ------------------------------------------------------------------
@@ -339,10 +445,6 @@ class HomeFslbmSolver(FluidGridSolverBase):
 
         N = self._stride
 
-        # Host-side arrays for init.
-        # Reference fMom storage convention: velocity + half-force correction
-        # for [1..3]; traceless stress S_ab = Pi_ab/rho - cs²*delta_ab for [4..9].
-        # Equilibrium: S_xx_eq = ux², S_xy_eq = ux*uy, etc.
         f_mom_data = np.zeros((C.NUM_MOMENTS, N), dtype=np.float32)
         f_mom_data[C.M_RHO, :] = rho0
         f_mom_data[C.M_UX, :] = ux

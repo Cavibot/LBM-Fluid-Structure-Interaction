@@ -108,6 +108,10 @@ class HomeFslbmModel(FluidGridModelBase):
     atmosphere_open: bool = False
     """Enable open-atmosphere top boundary."""
 
+    # ---- Inlet islet clearing (Phase 3) ------------------------------------
+    clear_inlet_enabled: bool = False
+    """If True, launch ``clear_inlet`` each step (default off; tests may enable)."""
+
     # ---- Boundary conditions -----------------------------------------------
     bc_types: tuple[int, ...] = (0, 0, 0, 0, 0, 0)
     """Per-face BC types: 0=bounce-back, 1=Zou-He inlet, 2=outflow, 3=periodic."""
