@@ -4,8 +4,8 @@
 """Rigid↔LBM fluid coupling (SDF walls + fluid→rigid feedback).
 
 Core path each substep: raster SDF + MAC wall velocity → HOME sync + moving
-walls (default Eq.24) → solid mask → fluid→rigid force via reconstructed-link
-momentum exchange (``LbmFeedbackMode.MOMENTUM_EXCHANGE``) → optional rigid step.
+walls (default Eq.24) → solid mask → reconstructed-link ME as **force** into
+``body_f`` → default ``J=F·dt`` impulse apply to ``body_qd`` → optional rigid step.
 
 Empirical buoyancy / push / drag plugins live in examples only and must not be
 wired into this coupling object.
@@ -46,29 +46,68 @@ class LbmFeedbackMode(str, Enum):
     """Core path: distribution ME when ``f`` exists; ``home_fp32`` reconstructed-link ME."""
 
 
+def open_me_force_conversion(
+    dh: float,
+    dt: float,
+    *,
+    rho_fluid: float = 1.0,
+) -> float:
+    """OpenHOMELBM lattice→world force factor: ``ρ · dh⁴ / dt²``.
+
+    Link kernels accumulate dimensionless HOME/Ladd boundary force ``F_lbm``,
+    then ``F_world = F_lbm · conversion``. Same definition as OpenHOMELBM
+    ``force_conversion`` (``envs/lbm3d/lbm_fluid_env_3d.py``).
+    """
+    dh_f = max(float(dh), 1.0e-12)
+    dt_f = max(float(dt), 1.0e-12)
+    return float(rho_fluid) * (dh_f**4) / (dt_f**2)
+
+
+def lattice_gravity_to_world(g_lbm: float, dh: float, dt: float) -> float:
+    """Map lattice body-force gravity to world acceleration: ``g·dh/dt²``."""
+    dh_f = max(float(dh), 1.0e-12)
+    dt_f = max(float(dt), 1.0e-12)
+    return float(g_lbm) * dh_f / (dt_f * dt_f)
+
+
+def world_gravity_to_lattice(g_world: float, dh: float, dt: float) -> float:
+    """Inverse of :func:`lattice_gravity_to_world`."""
+    dh_f = max(float(dh), 1.0e-12)
+    dt_f = max(float(dt), 1.0e-12)
+    return float(g_world) * (dt_f * dt_f) / dh_f
+
+
 def recommended_me_force_scale(
     dh: float,
     dt: float,
     *,
     rigid_g_abs: float = 1.0,
     lbm_g_abs: float = 0.002,
+    rho_fluid: float = 1.0,
+    match_rigid_g: bool = True,
 ) -> float:
-    """Lattice→rigid force scale for link ME (post-step or in-fused).
+    """ME conversion for link kernels (= OpenHOMELBM ``ρ·dh⁴/dt²`` by default).
 
-    Kernels already multiply by cell volume ``dh³``. With a shared gravity scale,
-    Open-style conversion leaves ``(dh/dt)²``. WanPhys dam-break FSI intentionally
-    uses ``|g_rigid| ≫ |g_lbm|``, so the raw factor over-drives spheres (bounce).
+    Open::
 
-    Attenuate by ``(|g_lbm|/|g_rigid|)^{1/4}`` and clamp to ``[20, 40]`` (raw ~207,
-    floor-slide ~6). Pair sphere demos with strong vertical / weak horizontal
-    ME-path drag so light floats on first surge without perpetual bobbing.
+        F_world = F_lbm · ρ · dh⁴ / dt²
+
+    Pair with ``g_rigid = lattice_gravity_to_world(g_lbm, dh, dt)`` so weight and
+    hydrostatic ME share one ``g`` (Archimedes).
+
+    If the rigid solver cannot take matched ``|g|`` (set ``match_rigid_g=False``
+    and pass ``rigid_g_abs`` / ``lbm_g_abs``), multiply by
+    ``|g_rigid|/|g_matched|`` so buoyancy still balances the chosen rigid weight.
+    No opaque ``[20,40]`` clamp.
     """
-    dh_f = max(float(dh), 1.0e-12)
-    dt_f = max(float(dt), 1.0e-12)
-    dimensional = (dh_f / dt_f) ** 2
-    split = max(float(lbm_g_abs), 1.0e-12) / max(float(rigid_g_abs), 1.0e-12)
-    attenuated = dimensional * (split**0.25)
-    return float(min(40.0, max(20.0, attenuated)))
+    open_conv = open_me_force_conversion(dh, dt, rho_fluid=rho_fluid)
+    if match_rigid_g:
+        return float(open_conv)
+    g_matched = abs(lattice_gravity_to_world(-abs(float(lbm_g_abs)), dh, dt))
+    g_rigid = max(abs(float(rigid_g_abs)), 1.0e-12)
+    if g_matched <= 1.0e-18:
+        return float(open_conv)
+    return float(open_conv * (g_rigid / g_matched))
 
 
 _SHAPE_MAP = {
@@ -88,7 +127,10 @@ class GridLbmRigidCoupling(CompositeSimulation):
     to LBM lattice wall velocities before being embedded into
     ``vel_solid_u/v/w``.  The LBM solver then applies moving-wall BCs.
     When two-way feedback is enabled, the default policy accumulates
-    reconstructed-link (or distribution) momentum exchange into ``body_f``.
+    reconstructed-link (or distribution) momentum exchange into ``body_f``
+    as a **force** wrench. With ``me_integration_mode="impulse"`` (default),
+    that force is converted to a substep impulse ``J = F·dt`` and applied
+    once to ``body_qd`` so XPBD does not multiply ME by ``dt`` again.
 
     Parameters
     ----------
@@ -117,11 +159,23 @@ class GridLbmRigidCoupling(CompositeSimulation):
         self._two_way_feedback_enabled: bool = False
         self._feedback_force_scale: float = 1.0
         self._feedback_mode: str = LbmFeedbackMode.MOMENTUM_EXCHANGE.value
+        # "impulse": J=F·dt → body_qd, clear body_f (ME not double-integrated).
+        # "force": leave F in body_f for XPBD Δv=(F/m)·dt (legacy).
+        self._me_integration_mode: str = "impulse"
         self._wall_velocity_warning_threshold: float = 0.125
         self._wall_velocity_warning_emitted: bool = False
         self._wall_velocity_warning_check_interval: int = 30
         self._wall_velocity_warning_step_count: int = 0
+        # Clamp prescribed wall |u|_latt and body_qd so ME/contact runaway
+        # cannot blow the LBM (Ma≪1). Not in HOME-FREE paper; 0 disables.
+        self._max_lattice_wall_speed: float = 0.1
+        self._last_velocity_scale: float = 1.0
         self._last_lbm_feedback_wrench: np.ndarray | None = None
+        # Diagnostics (host): last ME force / impulse / apply residual.
+        self._last_me_force: np.ndarray | None = None
+        self._last_me_impulse: np.ndarray | None = None
+        self._last_me_apply_residual: np.ndarray | None = None
+        self._last_me_apply_rel: float = 0.0
 
         self._bodies: list[dict] = []
         self._body_params_dirty = True
@@ -223,17 +277,58 @@ class GridLbmRigidCoupling(CompositeSimulation):
         self._wall_velocity_warning_threshold: float = float(threshold)
         self._wall_velocity_warning_emitted: bool = False
 
-    def set_two_way_feedback_enabled(self, enabled: bool, force_scale: float = 1.0) -> None:
-        """Enable fluid→rigid force accumulation into ``rigid_state.body_f``.
+    def set_max_lattice_wall_speed(self, max_speed: float) -> None:
+        """Clamp embedded wall velocity and body_qd to this lattice |u| (0=off)."""
+        self._max_lattice_wall_speed = float(max_speed)
 
-        Raster / wall BCs always run. When enabled, a post-step scan accumulates
-        forces according to :attr:`feedback_mode` (default
-        :attr:`LbmFeedbackMode.MOMENTUM_EXCHANGE`) before the optional rigid step.
+    @property
+    def max_lattice_wall_speed(self) -> float:
+        return float(self._max_lattice_wall_speed)
+
+    def set_two_way_feedback_enabled(self, enabled: bool, force_scale: float = 1.0) -> None:
+        """Enable fluid→rigid ME accumulation (force wrench into ``body_f``).
+
+        Raster / wall BCs always run. When enabled, link ME writes a **force**
+        according to :attr:`feedback_mode` (default
+        :attr:`LbmFeedbackMode.MOMENTUM_EXCHANGE`). See
+        :meth:`set_me_integration_mode` for force vs impulse apply.
 
         Prefer :func:`recommended_me_force_scale` for ``force_scale`` on the ME path.
         """
         self._two_way_feedback_enabled: bool = bool(enabled)
         self._feedback_force_scale: float = float(force_scale)
+
+    def set_me_integration_mode(self, mode: str) -> None:
+        """How ME wrench is handed to the rigid body.
+
+        - ``"impulse"`` (default): treat accumulated ``body_f`` as force ``F``,
+          apply ``J = F·dt`` to ``body_qd`` once, then clear ``body_f``.
+          Residual ``|mΔv − J|`` is stored on :attr:`last_me_apply_rel`.
+        - ``"force"``: leave ``F`` in ``body_f`` for XPBD ``Δv = (F/m)·dt``.
+        """
+        key = str(mode).strip().lower()
+        if key not in ("impulse", "force"):
+            raise ValueError("me_integration_mode must be 'impulse' or 'force'")
+        self._me_integration_mode = key
+
+    @property
+    def me_integration_mode(self) -> str:
+        return self._me_integration_mode
+
+    @property
+    def last_me_force(self) -> np.ndarray | None:
+        """Last ME force wrench ``(nbody, 6)`` = ``[fx,fy,fz,tx,ty,tz]``."""
+        return self._last_me_force
+
+    @property
+    def last_me_impulse(self) -> np.ndarray | None:
+        """Last ME impulse ``J = F·dt`` (same layout as :attr:`last_me_force`)."""
+        return self._last_me_impulse
+
+    @property
+    def last_me_apply_rel(self) -> float:
+        """Relative residual ``|mΔv−J| / max(|J|,ε)`` after impulse apply (0 if force mode)."""
+        return float(self._last_me_apply_rel)
 
     def set_feedback_mode(self, mode: str | LbmFeedbackMode) -> None:
         """Set fluid→rigid force policy (:class:`LbmFeedbackMode`).
@@ -360,11 +455,34 @@ class GridLbmRigidCoupling(CompositeSimulation):
             f"Estimated LBM wall velocity {estimated_lbm_wall_speed:.6g} exceeds "
             f"{self._wall_velocity_warning_threshold:.6g} lattice units; "
             "reduce rigid world speed, reduce dt, or increase dh. "
-            "This warning does not clamp the prescribed rigid motion.",
+            f"Embedded wall speed is clamped to {self._max_lattice_wall_speed:.6g} "
+            "when max_lattice_wall_speed > 0.",
             RuntimeWarning,
             stacklevel=2,
         )
         self._wall_velocity_warning_emitted: bool = True
+
+    def _clamp_body_qd_lattice(self, body_qd: wp.array, velocity_scale: float) -> None:
+        """Scale coupling bodies so estimated wall |u|_latt stays in Ma-safe range."""
+        max_u = float(self._max_lattice_wall_speed)
+        if (
+            max_u <= 0.0
+            or len(self._bodies) == 0
+            or self._coupling_to_newton is None
+            or self._body_radius_bound is None
+        ):
+            return
+        wp.launch(
+            ck.clamp_body_qd_to_lbm_wall_speed,
+            dim=len(self._bodies),
+            inputs=[
+                body_qd,
+                self._coupling_to_newton,
+                self._body_radius_bound,
+                float(velocity_scale),
+                max_u,
+            ],
+        )
 
     # ------------------------------------------------------------------
     # Body-parameter upload (mirrors GridLiquidRigidCoupling)
@@ -459,6 +577,7 @@ class GridLbmRigidCoupling(CompositeSimulation):
         velocity_scale: float = float(dt) / dh_float
         if not math.isfinite(velocity_scale):
             raise ValueError(f"Invalid LBM rigid velocity scale: dt={dt}, dh={dh}")
+        self._last_velocity_scale = velocity_scale
         nx: int = int(model.nx)
         ny: int = int(model.ny)
         nz: int = int(model.nz)
@@ -557,7 +676,9 @@ class GridLbmRigidCoupling(CompositeSimulation):
             # 3. Convert world surface velocity to LBM wall velocity in vel_solid_u/v/w
             rigid_backend: object = self._rigid_domain.model._newton_backend
             body_qd: wp.array = rigid_state.body_qd
+            self._clamp_body_qd_lattice(body_qd, velocity_scale)
             self._warn_if_lbm_wall_velocity_is_large(body_qd, velocity_scale)
+            max_u = float(self._max_lattice_wall_speed)
             velocity_launches: list[tuple[object, tuple[int, int, int], object, int]] = [
                 (ck.embed_all_solid_velocity_u, (nx + 1, ny, nz), fluid_state.vel_solid_u, nx),
                 (ck.embed_all_solid_velocity_v, (nx, ny + 1, nz), fluid_state.vel_solid_v, ny),
@@ -577,6 +698,7 @@ class GridLbmRigidCoupling(CompositeSimulation):
                         body_qd,
                         rigid_backend.body_com,
                         velocity_scale,
+                        max_u,
                     ],
                 )
 
@@ -720,8 +842,79 @@ class GridLbmRigidCoupling(CompositeSimulation):
         elif self._last_lbm_feedback_wrench is not None:
             self._last_lbm_feedback_wrench.fill(0.0)
 
+        # 5b. ME force → impulse apply (default) or leave force for XPBD.
+        if (
+            self._two_way_feedback_enabled
+            and self._feedback_mode == LbmFeedbackMode.MOMENTUM_EXCHANGE.value
+            and self._body_shape_type is not None
+            and len(self._bodies) > 0
+            and rigid_state.body_f is not None
+        ):
+            self._finalize_me_wrench(float(dt))
+            self._clamp_body_qd_lattice(rigid_state.body_qd, velocity_scale)
+
         # 6. Optionally advance rigid
         if self._advance_rigid:
             self._rigid_domain.step(dt)
+            self._clamp_body_qd_lattice(rigid_state.body_qd, velocity_scale)
 
         self._time += dt
+
+    def _finalize_me_wrench(self, dt: float) -> None:
+        """Snapshot ME force; optionally apply ``J=F·dt`` once to ``body_qd``."""
+        rigid_state = self._rigid_domain._state_in
+        body_f = rigid_state.body_f
+        if body_f is None:
+            return
+        force = np.asarray(body_f.numpy(), dtype=np.float64)
+        self._last_me_force = force.copy()
+        dt_f = max(float(dt), 1.0e-12)
+        impulse = force * dt_f
+        self._last_me_impulse = impulse
+        if self._last_lbm_feedback_wrench is None:
+            pass
+        else:
+            self._last_lbm_feedback_wrench = force.copy()
+
+        if self._me_integration_mode != "impulse":
+            self._last_me_apply_residual = None
+            self._last_me_apply_rel = 0.0
+            return
+
+        rmodel = self._rigid_domain.model
+        qd0 = np.asarray(rigid_state.body_qd.numpy(), dtype=np.float64).copy()
+        nbody = int(body_f.shape[0])
+        wp.launch(
+            ck.apply_body_impulse_from_force_wrench,
+            dim=nbody,
+            inputs=[
+                body_f,
+                rigid_state.body_qd,
+                rigid_state.body_q,
+                rmodel.body_inv_mass,
+                rmodel.body_inv_inertia,
+                dt_f,
+                1,  # clear body_f so XPBD does not integrate ME again
+            ],
+        )
+        qd1 = np.asarray(rigid_state.body_qd.numpy(), dtype=np.float64)
+        inv_m = np.asarray(rmodel.body_inv_mass.numpy(), dtype=np.float64)
+        # Linear residual: m·Δv − J  (angular omitted from scalar rel metric).
+        residual = np.zeros_like(impulse)
+        j_norm = 0.0
+        r_norm = 0.0
+        for bid in range(min(nbody, impulse.shape[0])):
+            im = float(inv_m[bid]) if bid < inv_m.shape[0] else 0.0
+            if im <= 0.0:
+                continue
+            mass = 1.0 / im
+            dv = qd1[bid, 0:3] - qd0[bid, 0:3]
+            j = impulse[bid, 0:3]
+            res = mass * dv - j
+            residual[bid, 0:3] = res
+            j_norm += float(np.dot(j, j))
+            r_norm += float(np.dot(res, res))
+        self._last_me_apply_residual = residual
+        self._last_me_apply_rel = float(
+            math.sqrt(r_norm) / max(math.sqrt(j_norm), 1.0e-12)
+        )

@@ -49,6 +49,7 @@ class EmpiricalSphereFsiConfig:
     push_rate: float = 8.0
     drag_xy: float = 4.0
     drag_z: float = 12.0
+    drag_ang: float = 0.0
     late_pool_push_scale: float = 0.12
     ema_alpha: float = 0.05
     dsub_cap: float = 0.015
@@ -60,20 +61,22 @@ class EmpiricalSphereFsiConfig:
 
 def me_path_linear_drag_config(
     *,
-    drag_xy: float = 0.75,
-    drag_z: float = 10.0,
+    drag_xy: float = 1.5,
+    drag_z: float = 4.0,
+    drag_ang: float = 2.0,
     ema_alpha: float = 0.05,
     dsub_cap: float = 0.015,
 ) -> EmpiricalSphereFsiConfig:
-    """Opt-in dissipation stabilizer for demos (no buoyancy / push).
+    """Opt-in non-paper dissipation (no buoyancy / push).
 
-    Not part of the pure-ME research default. Enable via ``--me-drag``.
+    Paper Sec.4.3 default leaves this off. Enable via ``--me-drag``.
     """
     return EmpiricalSphereFsiConfig(
         buoyancy_scale=0.0,
         push_rate=0.0,
         drag_xy=float(drag_xy),
         drag_z=float(drag_z),
+        drag_ang=float(drag_ang),
         late_pool_push_scale=0.0,
         ema_alpha=float(ema_alpha),
         dsub_cap=float(dsub_cap),
@@ -152,6 +155,7 @@ class EmpiricalSphereFsiPlugin:
             push_rate=push,
             drag_xy=float(self.config.drag_xy),
             drag_z=float(self.config.drag_z),
+            drag_ang=float(self.config.drag_ang),
             vel_scale=float(vel_scale),
             phi_wet=float(self.config.phi_wet),
             ema_alpha=float(self.config.ema_alpha),

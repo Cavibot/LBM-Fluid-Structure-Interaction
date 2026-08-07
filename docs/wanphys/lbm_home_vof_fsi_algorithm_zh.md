@@ -80,13 +80,14 @@ self._apply_empirical_buoyancy_and_drag() # ② 浮力/推/拖（可选）
 self.rigid_domain.step(self.sim_dt)       # ③ 碰撞 + XPBD
 ```
 
-配置要点（双球**默认**严谨路径）：
+配置要点（双球**默认**论文路径）：
 
 - `set_rigid_dynamics_enabled(False)` — **不在** coupling 内推进刚体  
 - `set_two_way_feedback_enabled(True, force_scale=recommended_me_force_scale(dh, dt))`  
 - `set_feedback_mode("momentum_exchange")` — `home_fp32` 用矩重构链路 ME  
 - `vof_home_wall_eq=False` — HOME Eq.24（showcase 可开 eq-wall）  
-- 经验插件默认 **关**；`--showcase-fsi` 打开
+- 经验插件 / `--me-drag` 默认 **关**；`--showcase-fsi` 或 `--me-drag` 才打开  
+- 耦合侧可有 `|u|_latt` 钳制（WanPhys Ma 安全，**非**论文条款）
 
 重力斜坡：`GRAVITY_RAMP_STEPS=40` 内同步抬高 LBM \(g_z\) 与刚体 \(g_z\)，避免冷启动冲击。
 
@@ -180,11 +181,40 @@ S^p_{\alpha\beta} = u^p_\alpha u^p_\beta + \bigl(S^x_{\alpha\beta}-u^x_\alpha u^
 
 ### 6.1 动量交换（核心，`feedback_mode="momentum_exchange"`）
 
-- **分布路径**（`lbm_backend=dist`）：`accumulate_lbm_momentum_exchange_all_bodies` 用 live \(f\)。  
-- **`home_fp32`**：无整场 `f`；走 `link_me_warp`——用与 fused 固壁相同的矩重构 \(f_{\mathrm{wall}}\)、\(f_{\mathrm{opp}}\)，再按 Ladd 链力累加到 `body_f`。  
-- `force_scale` 起点：`recommended_me_force_scale(dh, dt) = (dh/\mathrm{dt})^2`（核内已乘 \(dh^3\)）。
+对照 **HOME-FREE 论文** §4.3（锐界面自由面 + 切割单元；开源 Home-FSLBM **未**带此 FSI）：
 
-本轮**不**把 ME 原子累加并进 `home_vof_fused_kernel`；post-step reconstructed ME 即为耦合核心。
+固壁分布（默认 Eq.24）：\(\rho=\rho_x\)，\(u=u^s\)，
+\(S_{\alpha\beta}=u^s_\alpha u^s_\beta+(S^x_{\alpha\beta}-u^x_\alpha u^x_\beta)\)。
+
+链路力（式 32，仅 **液体 / 界面** 切割格，气体跳过；\(\varphi_{\mathrm{L}}=1\)，\(\varphi_{\mathrm{I}}=\varphi\)）：
+
+\[
+\Delta\hat{\mathbf{j}}
+=
+\varphi\,(f^*_{\bar{i}}+f_i-2w_i)\,\mathbf{c}_{\bar{i}}
+-
+\varphi\,(f^*_{\bar{i}}-f_i)\,\mathbf{u}^s.
+\]
+
+论文写 \(\mathbf{F}_B=\sum\Delta\hat{\mathbf{j}}\)。本仓库 pull 索引下对固体取
+
+\[
+\mathbf{F}_{\mathrm{solid}}=-\sum\Delta\hat{\mathbf{j}},\qquad
+\mathbf{F}_{\mathrm{world}}=\mathbf{F}_{\mathrm{solid}}\,\rho\,dh^{4}/\mathrm{dt}^{2}
+\]
+
+（与 Ladd 作用反作用一致；\(+\Delta\hat{\mathbf{j}}\) 会把轻球往下按）。
+
+**浮力前提：** 均匀 \(\rho\equiv1\) + Guo \(g\) 时 \(f^*+f-2w\approx0\)，链路 ME 几乎无阿基米德力。
+`seed_dam_break(..., hydrostatic=True)` 默认静水 \(\rho(z)\)。球放在水库内；坝前干地只会贴地滚。
+力矩用链中点近似论文交点 \(x_s\)（体素 SDF，无三角网格射线）。
+
+- 默认 `me_integration_mode="impulse"`：\(\mathbf{J}=\mathbf{F}\,\Delta t\) 一次写入 `body_qd`。  
+- 刚体重力：`g_{\mathrm{rigid}}=g_{\mathrm{lbm}}\,dh/\mathrm{dt}^{2}`（阿基米德对账）。  
+- 死亡格：`solid_phi<0` → 气体（论文 death→G）。新鲜格缓入尚未完全按 \(\theta(|u|)\) 实现。  
+- 诊断：`last_me_impulse` / `last_me_apply_rel`。
+
+> OpenHOMELBM 的 \((c-u)\) 浸没 ME 是单相参考；自由面应对齐本节式 (32)，而非仅抄 Open。
 
 ### 6.2 宏观相对法向通量（legacy / 诊断，`feedback_mode="approx"`）
 

@@ -3,38 +3,20 @@
 
 """HOME-FREE VOF dam-break with two dynamic rigid spheres (FSI).
 
-Default core path: ``make_home_vof_model`` → SDF raster → Eq.24 walls →
-stream-time / reconstructed-link ME → rigid XPBD. Default ``force_scale`` uses
-``recommended_me_force_scale`` with split-g attenuation (not raw ``(dh/dt)²``).
-No empirical buoyancy / push / drag on the research default. Prefer ``--n 64``
-when possible (``R/dh`` larger → less voxel bounce).
+Default path:
+  SDF raster → Eq.24 walls → link ME (Eq.32, wave push / torque) →
+  φ-volume Archimedes (vertical; ME under Guo+ρ≈1 does not lift) →
+  ``J=F·dt`` / XPBD.
 
-``--me-drag`` opts into mild submerged linear drag (stabilizer only; not pure ME).
-``--showcase-fsi`` restores the old look-and-feel plugin (empirical buoyancy /
-push / drag + eq-wall).
+Spheres start **dry ahead of the dam**; after the bore hits, the light sphere
+should bob on the residual pool while the heavy stays low.
 
-Optional late-pool ``--height-eq`` (same IF ``φ→φ*`` regularizer as the
-single-phase dam-break example). Arms after ``t=8``; body-adjacent IF keeps a
-soft floor weight so sphere menisci slowly heal instead of freezing as pits.
+``--no-archimedes`` disables the φ-volume lift (pure ME vertical — usually no float).
+``--showcase-fsi`` / ``--me-drag`` are separate non-default plugins.
 
 Run:
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
         --viewer gl --n 64
-
-    uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
-        --viewer gl --n 64 --showcase-fsi
-
-    uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
-        --viewer gl --n 64 --me-drag
-
-    uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
-        --viewer gl --n 64 --no-me-in-fused
-
-Sphere trajectories append to ``sphere_traj.csv`` (override with
-``--sphere-log PATH``, disable with ``--sphere-log ""``). Buffered writes;
-use ``--sphere-log-every N`` to thin rows (default 10).
-
-Controls: [Space] pause/resume  [R] reset  [mouse] orbit  [scroll] zoom
 """
 
 from __future__ import annotations
@@ -53,11 +35,17 @@ import warp as wp
 
 from wanphys._src.fluid.fluid_grid.coupling import (
     GridLbmRigidCoupling,
+    lattice_gravity_to_world,
     recommended_me_force_scale,
 )
 from wanphys._src.fluid.fluid_grid.lbm import LbmDomain, LbmState
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.generic import (
     make_home_vof_model,
+)
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.phi_volume_buoyancy_warp import (
+    apply_phi_volume_buoyancy_gpu,
+    ensure_phi_volume_scratch,
+    fibonacci_shell_offsets,
 )
 from wanphys.examples.lbm._home_vof_empirical_sphere_fsi import (
     EmpiricalSphereFsiConfig,
@@ -84,36 +72,43 @@ VOF_RHO_GAS: float = 1.0
 VOF_EPSILON: float = 1.0e-3
 RHO_LIQUID: float = 1.0
 
+# Same dam fill as the other HOME-VOF dam-break examples.
 DAM_X_FRAC: float = 0.25
 FILL_Z_FRAC: float = 0.5
 
-RIGID_GRAVITY_Z: float = -1.0
+RIGID_GRAVITY_Z: float = -1.0  # placeholder; overwritten from matched lattice g
 SPHERE_RADIUS: float = 0.08
-HEAVY_SPHERE_DENSITY: float = 1.35
-LIGHT_SPHERE_DENSITY: float = 0.45
+# Strong density contrast → clear sink vs float after the bore.
+HEAVY_SPHERE_DENSITY: float = 1.8
+LIGHT_SPHERE_DENSITY: float = 0.30
 
 TEXTURED_SPHERE_VISUALS_ENABLED: bool = True
 SPHERE_VISUAL_TEXTURE_SIZE: int = 256
 SPHERE_VISUAL_MESH_LATITUDES: int = 32
 SPHERE_VISUAL_MESH_LONGITUDES: int = 48
 
-# Legacy constant kept for docs / manual overrides (default uses recommended_me_force_scale).
+# Legacy constant kept for docs / manual overrides.
 SHOWCASE_LEGACY_FORCE_SCALE: float = 6.0
 # Empirical FSI (showcase plugin — not part of generic VOF / coupling core).
 BUOYANCY_FORCE_SCALE: float = 1.0
+# φ-volume Archimedes (default on): Fz = scale * s * ρ * V * |g|.
+# Scale >1 makes post-wash bobbing obvious while ME still does horizontal FSI.
+ARCHIMEDES_SCALE: float = 1.6
 WATER_HORIZONTAL_DRAG_RATE: float = 4.0
 WATER_VERTICAL_DRAG_RATE: float = 12.0
 FLUID_PUSH_RATE: float = 8.0
 LATE_POOL_PUSH_SCALE: float = 0.12
-# ME-path dissipation only (default on). Strong z, weak xy: kill bobbing
-# without pinning heavy spheres against the dam-break surge.
-ME_PATH_DRAG_XY: float = 0.75
-ME_PATH_DRAG_Z: float = 10.0
-# Sphere–sphere / sphere–wall Coulomb friction (default ShapeConfig mu=0.5
-# made the light sphere perch on the heavy one for many seconds).
-SPHERE_FRICTION_MU: float = 0.18
-SUB_EMA_ALPHA: float = 0.05
-SUB_DSUB_CAP: float = 0.015
+# Optional non-paper ME-path drag (off by default; enable with --me-drag).
+ME_PATH_DRAG_XY: float = 1.5
+ME_PATH_DRAG_Z: float = 4.0
+ME_PATH_DRAG_ANG: float = 2.0
+SPHERE_FRICTION_MU: float = 0.35
+# Soft contact under matched |g|~O(15) so light can leave the floor when buoyant.
+SPHERE_CONTACT_KE: float = 120.0
+SPHERE_CONTACT_KD: float = 2800.0
+SPHERE_CONTACT_RESTITUTION: float = 0.0
+SUB_EMA_ALPHA: float = 0.08
+SUB_DSUB_CAP: float = 0.04
 WALL_THICKNESS_CELLS: float = 2.0
 
 DEFAULT_SPHERE_LOG: str = "sphere_traj.csv"
@@ -258,6 +253,9 @@ class HomeVofDamBreakTwoSpheres:
         me_drag: bool = False,
         me_drag_xy: float = ME_PATH_DRAG_XY,
         me_drag_z: float = ME_PATH_DRAG_Z,
+        me_drag_ang: float = ME_PATH_DRAG_ANG,
+        archimedes: bool = True,
+        archimedes_scale: float = ARCHIMEDES_SCALE,
     ) -> None:
         self.viewer: Any = viewer
         if isinstance(self.viewer, FluidViewerGL):
@@ -268,6 +266,12 @@ class HomeVofDamBreakTwoSpheres:
         self._me_drag = bool(me_drag) and not self._showcase_fsi
         self._me_drag_xy = float(me_drag_xy)
         self._me_drag_z = float(me_drag_z)
+        self._me_drag_ang = float(me_drag_ang)
+        # φ-volume Archimedes when not using showcase (showcase has its own buoyancy).
+        self._archimedes = bool(archimedes) and not self._showcase_fsi
+        self._archimedes_scale = float(archimedes_scale)
+        self._phi_buoy_scratch: dict | None = None
+        self._phi_buoy_offsets = fibonacci_shell_offsets(48, radii=(1.08, 1.18))
         self._enable_height_eq = bool(enable_height_eq)
         self._enable_moment_quant = bool(enable_moment_quant)
         self._height_eq_armed = False
@@ -276,6 +280,11 @@ class HomeVofDamBreakTwoSpheres:
         n_ref = 48
         gravity = -0.0020 * (float(n_ref) / float(self._n))
         self._substeps = max(SIM_SUBSTEPS, 12)
+        self.sim_dt = FRAME_DT / float(self._substeps)
+        # Open units: same physical g for lattice hydrostatics and rigid weight.
+        self._lbm_gravity_z = float(gravity)
+        self._rigid_gravity_z = lattice_gravity_to_world(gravity, DH, self.sim_dt)
+        self._g_matched = self._rigid_gravity_z
         self._sphere_log_every = max(1, int(sphere_log_every))
         self._sphere_log_fp: TextIO | None = None
         self._sphere_log_path: Path | None = None
@@ -340,6 +349,7 @@ class HomeVofDamBreakTwoSpheres:
             self._empirical_cfg = me_path_linear_drag_config(
                 drag_xy=self._me_drag_xy,
                 drag_z=self._me_drag_z,
+                drag_ang=self._me_drag_ang,
                 ema_alpha=SUB_EMA_ALPHA,
                 dsub_cap=SUB_DSUB_CAP,
             )
@@ -355,8 +365,8 @@ class HomeVofDamBreakTwoSpheres:
             feedback_scale = recommended_me_force_scale(
                 DH,
                 self.sim_dt,
-                rigid_g_abs=abs(RIGID_GRAVITY_Z),
-                lbm_g_abs=abs(gravity),
+                rho_fluid=RHO_LIQUID,
+                match_rigid_g=True,
             )
         else:
             feedback_scale = float(feedback_force_scale)
@@ -387,10 +397,13 @@ class HomeVofDamBreakTwoSpheres:
 
         print(
             f"HOME-VOF dam-break two spheres: {self._n}^3, tau={TAU}, "
-            f"gz={gravity:.5f}, gamma={VOF_GAMMA}, substeps={self._substeps}, "
-            f"feedback=ME, force_scale={self._feedback_force_scale:.4g}, "
+            f"gz_lbm={gravity:.5f}, gz_rigid={self._rigid_gravity_z:.4g}, "
+            f"gamma={VOF_GAMMA}, substeps={self._substeps}, "
+            f"feedback=ME, me_conv={self._feedback_force_scale:.4g} (Eq.32 F=-dj Ladd, rho*dh^4/dt^2), "
             f"me_in_fused={'on' if self.model.vof_home_me_in_fused else 'off'}, "
             f"me_drag={'on' if self._me_drag else 'off'}, "
+            f"archimedes={'on' if self._archimedes else 'off'}"
+            f"(x{self._archimedes_scale:g}), "
             f"showcase_fsi={'on' if self._showcase_fsi else 'off'}, "
             f"wall_eq={use_wall_eq}, "
             f"height_eq={self._enable_height_eq} "
@@ -431,12 +444,16 @@ class HomeVofDamBreakTwoSpheres:
         radius = SPHERE_RADIUS
         z_floor = radius + 1.5 * DH
 
-        builder = RigidModelBuilder(gravity=RIGID_GRAVITY_Z)
+        builder = RigidModelBuilder(gravity=self._rigid_gravity_z)
         wall_cfg = ShapeConfig(
             density=0.0,
             is_visible=False,
             is_solid=True,
             has_shape_collision=True,
+            mu=SPHERE_FRICTION_MU,
+            ke=SPHERE_CONTACT_KE,
+            kd=SPHERE_CONTACT_KD,
+            restitution=SPHERE_CONTACT_RESTITUTION,
         )
 
         def add_wall(
@@ -489,16 +506,23 @@ class HomeVofDamBreakTwoSpheres:
             is_visible=not TEXTURED_SPHERE_VISUALS_ENABLED,
             is_solid=True,
             mu=SPHERE_FRICTION_MU,
+            ke=SPHERE_CONTACT_KE,
+            kd=SPHERE_CONTACT_KD,
+            restitution=SPHERE_CONTACT_RESTITUTION,
         )
         light_cfg = ShapeConfig(
             density=LIGHT_SPHERE_DENSITY,
             is_visible=not TEXTURED_SPHERE_VISUALS_ENABLED,
             is_solid=True,
             mu=SPHERE_FRICTION_MU,
+            ke=SPHERE_CONTACT_KE,
+            kd=SPHERE_CONTACT_KD,
+            restitution=SPHERE_CONTACT_RESTITUTION,
         )
-        # Place just ahead of the dam front so the bore hits quickly.
-        heavy_center = (world_x * 0.32, world_y * 0.38, z_floor)
-        light_center = (world_x * 0.32, world_y * 0.62, z_floor)
+        # Dry start just ahead of the dam front — bore hits, then light should bob.
+        dam_x_world = float(int(n * DAM_X_FRAC)) * DH
+        heavy_center = (dam_x_world + 2.5 * radius, world_y * 0.38, z_floor)
+        light_center = (dam_x_world + 2.5 * radius, world_y * 0.62, z_floor)
 
         self.heavy_body_id = builder.add_body(position=heavy_center, label="heavy_sphere")
         builder.add_shape_sphere(self.heavy_body_id, radius=radius, cfg=heavy_cfg)
@@ -524,14 +548,21 @@ class HomeVofDamBreakTwoSpheres:
         self.coupling.set_rigid_dynamics_enabled(False)
         self.coupling.set_two_way_feedback_enabled(True, force_scale=feedback_force_scale)
         self.coupling.set_feedback_mode("momentum_exchange")
+        # ME writes force F; apply J=F·dt once (no second XPBD dt on ME).
+        self.coupling.set_me_integration_mode("impulse")
 
         print(
             f"  spheres: r={radius}, heavy_ρ={HEAVY_SPHERE_DENSITY}, "
             f"light_ρ={LIGHT_SPHERE_DENSITY}, feedback={feedback_force_scale:.4g}, "
-            f"mode={self.coupling.feedback_mode}"
+            f"mode={self.coupling.feedback_mode}, "
+            f"me_apply={self.coupling.me_integration_mode}"
         )
         print(f"  showcase_fsi={'on' if self._showcase_fsi else 'off'}")
         print(f"  me_drag={'on' if self._me_drag else 'off'}")
+        print(
+            f"  archimedes={'on' if self._archimedes else 'off'} "
+            f"scale={self._archimedes_scale:g} (phi-volume Fz; ME keeps horizontal)"
+        )
         if self._showcase_fsi:
             print(
                 f"  empirical_fsi buoyancy={self._empirical_cfg.buoyancy_scale}, "
@@ -541,7 +572,8 @@ class HomeVofDamBreakTwoSpheres:
         elif self._me_drag:
             print(
                 f"  me_path_drag drag_xy={self._empirical_cfg.drag_xy}, "
-                f"drag_z={self._empirical_cfg.drag_z} (no buoyancy/push)"
+                f"drag_z={self._empirical_cfg.drag_z}, "
+                f"drag_ang={self._empirical_cfg.drag_ang} (no buoyancy/push)"
             )
         print(f"  initial heavy={heavy_center}, light={light_center}")
 
@@ -553,7 +585,7 @@ class HomeVofDamBreakTwoSpheres:
                 radius=SPHERE_RADIUS,
                 volume=self._sphere_volume,
                 rho_liquid=RHO_LIQUID,
-                gravity_abs=abs(RIGID_GRAVITY_Z),
+                gravity_abs=abs(self._rigid_gravity_z),
                 dh=DH,
                 nx=self._n,
                 ny=self._n,
@@ -563,7 +595,7 @@ class HomeVofDamBreakTwoSpheres:
 
     def _ramp_gravity(self) -> None:
         target_lbm_gz = float(self.model.gravity_z)
-        target_rigid_gz = RIGID_GRAVITY_Z
+        target_rigid_gz = float(self._rigid_gravity_z)
         self.model.gravity_z = 0.0
         self.rigid_domain.model.set_gravity((0.0, 0.0, 0.0))
 
@@ -578,7 +610,10 @@ class HomeVofDamBreakTwoSpheres:
         wp.synchronize_device(self.model._device)
         if self._late_pool is not None:
             self._late_pool.set_reference_volume_from_state(self.domain.state)
-        print(f"  gravity ramp done: gz_lbm={self.model.gravity_z}, rigid_z={target_rigid_gz}")
+        print(
+            f"  gravity ramp done: gz_lbm={self.model.gravity_z}, "
+            f"rigid_z={target_rigid_gz:.4g} (matched a=g*dh/dt^2)"
+        )
 
     def step(self) -> None:
         t0 = time.perf_counter()
@@ -671,9 +706,58 @@ class HomeVofDamBreakTwoSpheres:
                 print(f"  sphere traj closed: {self._sphere_log_path}")
 
     def _step_coupled(self) -> None:
+        # ME (horizontal FSI) → Archimedes lift → optional showcase/drag → XPBD.
         self.coupling.step(self.sim_dt)
+        self._apply_phi_volume_archimedes()
         self._apply_empirical_buoyancy_and_drag()
         self.rigid_domain.step(self.sim_dt)
+
+    def _apply_phi_volume_archimedes(self) -> None:
+        """Upward Fz = scale * s * ρ_f * V * |g| from shell φ (not ME)."""
+        if not self._archimedes:
+            return
+        state = self.domain.state
+        rigid = self.rigid_domain.state
+        self._phi_buoy_scratch = ensure_phi_volume_scratch(
+            device=str(self.model._device),
+            offsets_xyz=self._phi_buoy_offsets,
+            body_ids=(self.heavy_body_id, self.light_body_id),
+            scratch=self._phi_buoy_scratch,
+        )
+        subs = apply_phi_volume_buoyancy_gpu(
+            phi=state.phi,
+            cell=state.cell_type,
+            solid=state.solid_phi,
+            body_q=rigid.body_q,
+            body_f_apply=rigid.apply_body_forces,
+            radius=SPHERE_RADIUS,
+            dh=DH,
+            nx=self._n,
+            ny=self._n,
+            nz=self._n,
+            scratch=self._phi_buoy_scratch,
+            volume=self._sphere_volume,
+            rho_liquid=RHO_LIQUID,
+            gravity_abs=abs(self._rigid_gravity_z),
+            buoyancy_scale=self._archimedes_scale,
+            phi_wet=0.05,
+            ema_alpha=SUB_EMA_ALPHA,
+            dsub_cap=SUB_DSUB_CAP,
+            sync_submerged=False,
+        )
+        if subs:
+            self._last_submerged_by_body.update(subs)
+        scratch = self._phi_buoy_scratch
+        if scratch is not None:
+            forces = scratch["forces"].numpy()
+            ids = scratch["body_ids_host"]
+            for i, body_id in enumerate(ids):
+                f = forces[i]
+                self._last_extra_force_by_body[int(body_id)] = (
+                    float(f[0]),
+                    float(f[1]),
+                    float(f[2]),
+                )
 
     def _apply_empirical_buoyancy_and_drag(self) -> None:
         if self._empirical_fsi is None:
@@ -698,20 +782,79 @@ class HomeVofDamBreakTwoSpheres:
 
     def _sync_buoyancy_submerged(self) -> None:
         plugin = self._empirical_fsi
-        if plugin is None or plugin.scratch is None:
+        if plugin is not None and plugin.scratch is not None:
+            scratch = plugin.scratch
+            sub = scratch["submerged"].numpy()
+            ids = scratch["body_ids_host"]
+            for i, body_id in enumerate(ids):
+                self._last_submerged_by_body[int(body_id)] = float(sub[i])
+            forces = scratch["forces"].numpy()
+            for i, body_id in enumerate(ids):
+                f = forces[i]
+                self._last_extra_force_by_body[int(body_id)] = (
+                    float(f[0]),
+                    float(f[1]),
+                    float(f[2]),
+                )
             return
-        scratch = plugin.scratch
-        sub = scratch["submerged"].numpy()
-        ids = scratch["body_ids_host"]
-        for i, body_id in enumerate(ids):
-            self._last_submerged_by_body[int(body_id)] = float(sub[i])
-        forces = scratch["forces"].numpy()
-        for i, body_id in enumerate(ids):
-            f = forces[i]
-            self._last_extra_force_by_body[int(body_id)] = (
-                float(f[0]),
-                float(f[1]),
-                float(f[2]),
+        scratch = self._phi_buoy_scratch
+        if scratch is not None and self._archimedes:
+            sub = scratch["submerged"].numpy()
+            ids = scratch["body_ids_host"]
+            for i, body_id in enumerate(ids):
+                self._last_submerged_by_body[int(body_id)] = float(sub[i])
+            forces = scratch["forces"].numpy()
+            for i, body_id in enumerate(ids):
+                f = forces[i]
+                self._last_extra_force_by_body[int(body_id)] = (
+                    float(f[0]),
+                    float(f[1]),
+                    float(f[2]),
+                )
+            return
+        self._sample_shell_wet_fraction()
+
+    def _sample_shell_wet_fraction(self) -> None:
+        """Estimate submerged fraction from φ at shell samples (status/CSV)."""
+        state = self.domain.state
+        phi = state.phi.numpy()
+        cell = state.cell_type.numpy()
+        solid = state.solid_phi.numpy()
+        n = self._n
+        radius = SPHERE_RADIUS
+        # Sparse shell directions (same spirit as empirical plugin).
+        dirs = (
+            (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0), (0.0, -1.0, 0.0),
+            (0.0, 0.0, 1.0), (0.0, 0.0, -1.0),
+            (0.577, 0.577, 0.577), (-0.577, 0.577, 0.577),
+            (0.577, -0.577, 0.577), (-0.577, -0.577, 0.577),
+            (0.577, 0.577, -0.577), (-0.577, 0.577, -0.577),
+            (0.577, -0.577, -0.577), (-0.577, -0.577, -0.577),
+        )
+        for body_id in (self.heavy_body_id, self.light_body_id):
+            pos = np.asarray(
+                self.rigid_domain.state.get_body_position(body_id), dtype=np.float64
+            )
+            wet = 0
+            valid = 0
+            for ox, oy, oz in dirs:
+                sx = pos[0] + ox * radius
+                sy = pos[1] + oy * radius
+                sz = pos[2] + oz * radius
+                i = int(np.clip(sx / DH, 0, n - 1))
+                j = int(np.clip(sy / DH, 0, n - 1))
+                k = int(np.clip(sz / DH, 0, n - 1))
+                if solid[i, j, k] < 0.0:
+                    continue
+                valid += 1
+                if int(cell[i, j, k]) == 0:
+                    continue
+                if float(phi[i, j, k]) <= 0.08:
+                    continue
+                wet += 1
+            self._last_submerged_by_body[int(body_id)] = (
+                float(wet) / float(valid) if valid > 0 else 0.0
             )
 
     def render(self) -> None:
@@ -775,6 +918,15 @@ class HomeVofDamBreakTwoSpheres:
                 f" nIF={int(self._last_height_eq.get('n_if', 0))}"
                 f" skipB={int(self._last_height_eq.get('n_body_skip', 0))}"
             )
+        me_note = ""
+        J = self.coupling.last_me_impulse
+        if J is not None and J.shape[0] > max(self.heavy_body_id, self.light_body_id):
+            jh = J[self.heavy_body_id, 0:3]
+            jl = J[self.light_body_id, 0:3]
+            me_note = (
+                f" ME_J=({np.linalg.norm(jh):.3g},{np.linalg.norm(jl):.3g})"
+                f" res={self.coupling.last_me_apply_rel:.2e}"
+            )
         print(
             f"[t={self.sim_time:.1f}s] "
             f"heavy=({heavy_pos[0]:.2f},{heavy_pos[1]:.2f},{heavy_pos[2]:.2f}) "
@@ -782,7 +934,7 @@ class HomeVofDamBreakTwoSpheres:
             f"sub=({self._last_submerged_by_body.get(self.heavy_body_id, 0.0):.2f},"
             f"{self._last_submerged_by_body.get(self.light_body_id, 0.0):.2f}) "
             f"light_v=({light_vel[0]:+.3f},{light_vel[2]:+.3f}) "
-            f"sim={self._last_ms:.0f}ms{heq}",
+            f"sim={self._last_ms:.0f}ms{heq}{me_note}",
             file=sys.stderr,
             flush=True,
         )
@@ -805,7 +957,7 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Enable showcase empirical buoyancy/push/drag + eq-wall. "
-            "Default off: raster → Eq.24 → link ME → optional ME-path drag → rigid."
+            "Default off: paper Sec.4.3 raster → Eq.24 → link ME → rigid."
         ),
     )
     parser.add_argument(
@@ -819,21 +971,43 @@ def create_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "Opt-in submerged linear drag on ME path (no buoyancy/push). "
-            "Off by default for pure-ME research; ignored when --showcase-fsi is set."
+            "Optional non-paper submerged drag on the ME path (no buoyancy/push). "
+            "Default off: paper Sec.4.3 ME only. Ignored with --showcase-fsi."
         ),
     )
     parser.add_argument(
         "--me-drag-xy",
         type=float,
         default=ME_PATH_DRAG_XY,
-        help="ME-path horizontal drag rate (default 0.75).",
+        help=f"ME-path horizontal drag rate when --me-drag (default {ME_PATH_DRAG_XY}).",
     )
     parser.add_argument(
         "--me-drag-z",
         type=float,
         default=ME_PATH_DRAG_Z,
-        help="ME-path vertical drag rate (default 10).",
+        help=f"ME-path vertical drag rate when --me-drag (default {ME_PATH_DRAG_Z}).",
+    )
+    parser.add_argument(
+        "--me-drag-ang",
+        type=float,
+        default=ME_PATH_DRAG_ANG,
+        help=f"ME-path angular drag rate when --me-drag (default {ME_PATH_DRAG_ANG}).",
+    )
+    parser.add_argument(
+        "--archimedes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "φ-volume Archimedes Fz after the bore (default on). "
+            "Needed for visible light-sphere bobbing; pure ME vertical is too weak "
+            "under Guo gravity. Use --no-archimedes to disable."
+        ),
+    )
+    parser.add_argument(
+        "--archimedes-scale",
+        type=float,
+        default=ARCHIMEDES_SCALE,
+        help=f"Multiplier on ρ V g s (default {ARCHIMEDES_SCALE}).",
     )
     parser.add_argument(
         "--buoyancy-force-scale",
@@ -906,6 +1080,9 @@ def main() -> None:
         me_drag=bool(args.me_drag),
         me_drag_xy=float(args.me_drag_xy),
         me_drag_z=float(args.me_drag_z),
+        me_drag_ang=float(args.me_drag_ang),
+        archimedes=bool(args.archimedes),
+        archimedes_scale=float(args.archimedes_scale),
     )
     try:
         newton.examples.run(example, args)

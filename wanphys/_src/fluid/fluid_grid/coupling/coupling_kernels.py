@@ -1,8 +1,8 @@
-"""Warp kernels for FLIP grid-liquid ↔ rigid body two-way coupling.
+"""Warp kernels for FLIP grid-liquid / rigid body two-way coupling.
 
 Two-way coupling between a MAC-grid FLIP liquid solver and Newton rigid bodies.
 
-Solid → Fluid
+Solid -> Fluid
 -------------
 1. Each frame, rasterize the rigid body's SDF into ``solid_phi`` (min-merge so
    multiple bodies compose correctly).
@@ -12,7 +12,7 @@ Solid → Fluid
    pressure solve automatically generate the correct pressure field that moves
    fluid along with the solid.
 
-Fluid → Solid
+Fluid -> Solid
 -------------
 After the pressure solve, integrate the pressure over the solid face-fraction
 weight at each fluid cell.  The net impulse equals the fluid's reaction force
@@ -20,7 +20,7 @@ on the rigid body (Newton's third law).  This is accumulated atomically into
 ``body_f`` so that the rigid solver picks it up on the same timestep.
 
 Reference:
-    Bridson, "Fluid Simulation for Computer Graphics", 2nd ed., §6.3
+    Bridson, "Fluid Simulation for Computer Graphics", 2nd ed., section 6.3
     Carlson et al., "Rigid Fluid" (SIGGRAPH 2004).
 """
 
@@ -196,7 +196,7 @@ def body_surface_velocity(
         point_world: Query point in world frame.
 
     Returns:
-        Surface velocity ``v_lin + ω × (x - x_com)`` in world frame.
+        Surface velocity ``v_lin + ? ? (x - x_com)`` in world frame.
     """
     com_world = wp.transform_point(X_wb, body_com_local)
     r = point_world - com_world
@@ -204,7 +204,7 @@ def body_surface_velocity(
 
 
 # ---------------------------------------------------------------------------
-# Unified SDF rasterization kernel  (Rigid → solid_phi + solid_body_id)
+# Unified SDF rasterization kernel  (Rigid ? solid_phi + solid_body_id)
 # ---------------------------------------------------------------------------
 
 _SHAPE_SPHERE = 0
@@ -402,7 +402,7 @@ def rasterize_all_body_sdf_warp_narrowband(
 
 
 # ---------------------------------------------------------------------------
-# SDF rasterization kernels  (Rigid → solid_phi)  — per-body, kept for bake_box/bake_mesh
+# SDF rasterization kernels  (Rigid ? solid_phi)  ? per-body, kept for bake_box/bake_mesh
 # ---------------------------------------------------------------------------
 
 @wp.kernel
@@ -441,7 +441,7 @@ def rasterize_box_sdf(
         dh: Cell size.
         center: Box center in world space.
         half_extents: Half-extents in body-local frame.
-        rot: Body orientation quaternion (body→world).
+        rot: Body orientation quaternion (body?world).
     """
     i, j, k = wp.tid()
     p_world = wp.vec3((float(i) + 0.5) * dh, (float(j) + 0.5) * dh, (float(k) + 0.5) * dh)
@@ -521,7 +521,7 @@ def rasterize_mesh_sdf(
 
 
 # ---------------------------------------------------------------------------
-# Solid surface velocity embedding  (Rigid velocity → MAC face BCs)
+# Solid surface velocity embedding  (Rigid velocity ? MAC face BCs)
 #
 # For each MAC face that lies inside or on the solid boundary we store the
 # rigid body's surface velocity component.  The FLIP solver then stamps this
@@ -617,6 +617,51 @@ def estimate_lbm_wall_speed_all_bodies(
     wall_speed_estimate[body_entry] = world_surface_speed * wp.abs(velocity_scale)
 
 
+@wp.func
+def _clamp_latt_comp(v: float, max_abs: float) -> float:
+    if max_abs <= 0.0:
+        return v
+    if v > max_abs:
+        return max_abs
+    if v < -max_abs:
+        return -max_abs
+    return v
+
+
+@wp.kernel
+def clamp_body_qd_to_lbm_wall_speed(
+    body_qd: wp.array(dtype=wp.spatial_vector),
+    coupling_to_newton: wp.array(dtype=wp.int32),
+    body_radius_bound: wp.array(dtype=float),
+    velocity_scale: float,
+    max_lattice_speed: float,
+):
+    """Scale body_qd so estimated wall |u|_latt stays <= max_lattice_speed.
+
+    Uses the same |v|+|w|R bound as the wall-speed warning. Stops ME/contact
+    runaway from prescribing unstable moving-wall BCs into LBM.
+    """
+    body_entry = wp.tid()
+    if max_lattice_speed <= 0.0:
+        return
+    body_id = int(coupling_to_newton[body_entry])
+    if body_id < 0:
+        return
+
+    qd = body_qd[body_id]
+    lin_vel = wp.spatial_top(qd)
+    ang_vel = wp.spatial_bottom(qd)
+    world_surface_speed = wp.length(lin_vel) + wp.length(ang_vel) * body_radius_bound[body_entry]
+    u_latt = world_surface_speed * wp.abs(velocity_scale)
+    if not wp.isfinite(u_latt):
+        body_qd[body_id] = wp.spatial_vector()
+        return
+    if u_latt <= max_lattice_speed:
+        return
+    s = max_lattice_speed / u_latt
+    body_qd[body_id] = wp.spatial_vector(lin_vel * s, ang_vel * s)
+
+
 @wp.kernel
 def embed_all_solid_velocity_u(
     solid_phi: wp.array3d(dtype=float),
@@ -628,6 +673,7 @@ def embed_all_solid_velocity_u(
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_com: wp.array(dtype=wp.vec3),
     velocity_scale: float,
+    max_lattice_speed: float,
 ):
     i, j, k = wp.tid()
     phi_l = solid_phi[wp.max(i - 1, 0), j, k]
@@ -648,7 +694,7 @@ def embed_all_solid_velocity_u(
     com_local = body_com[body_id]
     face_pos = wp.vec3(float(i) * dh, (float(j) + 0.5) * dh, (float(k) + 0.5) * dh)
     surf_vel = body_surface_velocity(X_wb, lin_vel, ang_vel, com_local, face_pos)
-    vel_solid_u[i, j, k] = surf_vel[0] * velocity_scale
+    vel_solid_u[i, j, k] = _clamp_latt_comp(surf_vel[0] * velocity_scale, max_lattice_speed)
 
 
 @wp.kernel
@@ -662,6 +708,7 @@ def embed_all_solid_velocity_v(
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_com: wp.array(dtype=wp.vec3),
     velocity_scale: float,
+    max_lattice_speed: float,
 ):
     i, j, k = wp.tid()
     phi_d = solid_phi[i, wp.max(j - 1, 0), k]
@@ -682,7 +729,7 @@ def embed_all_solid_velocity_v(
     com_local = body_com[body_id]
     face_pos = wp.vec3((float(i) + 0.5) * dh, float(j) * dh, (float(k) + 0.5) * dh)
     surf_vel = body_surface_velocity(X_wb, lin_vel, ang_vel, com_local, face_pos)
-    vel_solid_v[i, j, k] = surf_vel[1] * velocity_scale
+    vel_solid_v[i, j, k] = _clamp_latt_comp(surf_vel[1] * velocity_scale, max_lattice_speed)
 
 
 @wp.kernel
@@ -696,6 +743,7 @@ def embed_all_solid_velocity_w(
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_com: wp.array(dtype=wp.vec3),
     velocity_scale: float,
+    max_lattice_speed: float,
 ):
     i, j, k = wp.tid()
     phi_b = solid_phi[i, j, wp.max(k - 1, 0)]
@@ -716,7 +764,7 @@ def embed_all_solid_velocity_w(
     com_local = body_com[body_id]
     face_pos = wp.vec3((float(i) + 0.5) * dh, (float(j) + 0.5) * dh, float(k) * dh)
     surf_vel = body_surface_velocity(X_wb, lin_vel, ang_vel, com_local, face_pos)
-    vel_solid_w[i, j, k] = surf_vel[2] * velocity_scale
+    vel_solid_w[i, j, k] = _clamp_latt_comp(surf_vel[2] * velocity_scale, max_lattice_speed)
 
 
 # ---------------------------------------------------------------------------
@@ -869,14 +917,14 @@ def stamp_solid_velocity_w(
 
 
 # ---------------------------------------------------------------------------
-# Pressure force / torque on rigid body  (Fluid → Rigid)
+# Pressure force / torque on rigid body  (Fluid ? Rigid)
 #
 # For each fluid cell adjacent to a solid face, the pressure exerts a force
 # on the solid equal to:
 #
-#   F += p * θ_solid_face * face_normal * dh²
+#   F += p * ?_solid_face * face_normal * dh?
 #
-# where θ_solid_face = solid_fraction(phi of neighboring cells) and the sign
+# where ?_solid_face = solid_fraction(phi of neighboring cells) and the sign
 # of face_normal points from fluid into solid.  Summing over all 6 faces of
 # a fluid cell gives the net pressure force on the solid in that cell.
 #
@@ -1243,8 +1291,8 @@ def accumulate_lbm_momentum_exchange_all_bodies(
         (float(k) + 0.5) * dh,
     )
 
-    # Volume factor for physical units
-    vol = dh * dh * dh * force_scale
+    # OpenHOMELBM conversion: force_scale = rho*dh**4/dt**2 (no extra dh**3).
+    vol = force_scale
 
     # =======================================================================
     # D3Q19 axis directions (weight = 1/18)
@@ -1505,3 +1553,44 @@ def accumulate_lbm_momentum_exchange_all_bodies(
             com_world = wp.transform_point(body_q[body_id], body_com[body_id])
             delta_tau = wp.cross(link_midpoint - com_world, delta_p)
             wp.atomic_add(body_f, body_id, wp.spatial_vector(delta_p, delta_tau))
+
+# ---------------------------------------------------------------------------
+# ME wrench: force -> substep impulse -> rigid velocity (no extra XPBD dt)
+# ---------------------------------------------------------------------------
+
+
+@wp.kernel
+def apply_body_impulse_from_force_wrench(
+    body_f: wp.array(dtype=wp.spatial_vector),
+    body_qd: wp.array(dtype=wp.spatial_vector),
+    body_q: wp.array(dtype=wp.transform),
+    inv_m: wp.array(dtype=float),
+    inv_I: wp.array(dtype=wp.mat33),
+    dt: float,
+    clear_force: int,
+):
+    """Interpret body_f as FORCE; apply J = F*dt once to body_qd.
+
+    Matches XPBD linear update dv = (F/m)*dt without a second dt factor.
+    Used when ME integration mode is "impulse".
+    """
+    tid = wp.tid()
+    f = body_f[tid]
+    j_lin = wp.spatial_top(f) * dt
+    j_ang = wp.spatial_bottom(f) * dt
+
+    qd = body_qd[tid]
+    v0 = wp.spatial_top(qd)
+    w0 = wp.spatial_bottom(qd)
+
+    inv_mass = inv_m[tid]
+    v1 = v0 + j_lin * inv_mass
+
+    r0 = wp.transform_get_rotation(body_q[tid])
+    wb = wp.quat_rotate_inv(r0, w0)
+    jb = wp.quat_rotate_inv(r0, j_ang)
+    w1 = wp.quat_rotate(r0, wb + inv_I[tid] * jb)
+
+    body_qd[tid] = wp.spatial_vector(v1, w1)
+    if clear_force != 0:
+        body_f[tid] = wp.spatial_vector()

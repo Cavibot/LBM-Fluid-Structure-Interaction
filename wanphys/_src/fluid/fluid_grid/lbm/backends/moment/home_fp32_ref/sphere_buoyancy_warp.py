@@ -94,12 +94,14 @@ def assemble_sphere_buoyancy_forces_kernel(
     body_ids: wp.array(dtype=wp.int32),
     density: wp.array(dtype=float),
     volume: float,
+    radius: float,
     rho_liquid: float,
     gravity_abs: float,
     buoyancy_scale: float,
     push_rate: float,
     drag_xy: float,
     drag_z: float,
+    drag_ang: float,
     vel_scale: float,
     sub_ema: wp.array(dtype=float),
     ema_alpha: float,
@@ -132,6 +134,7 @@ def assemble_sphere_buoyancy_forces_kernel(
     bv_x = qd[0]
     bv_y = qd[1]
     bv_z = qd[2]
+    bw = wp.spatial_bottom(qd)
 
     fv_x = float(0.0)
     fv_y = float(0.0)
@@ -152,10 +155,10 @@ def assemble_sphere_buoyancy_forces_kernel(
         + 0.35 * push * (fv_z - bv_z)
         - drag_z * mass * submerged * bv_z
     )
-    out_forces[bid] = wp.spatial_vector(
-        wp.vec3(fx, fy, fz),
-        wp.vec3(0.0, 0.0, 0.0),
-    )
+    # Solid-sphere inertia proxy I=(2/5)mr^2; torque resists spin when wet.
+    i_sphere = 0.4 * mass * radius * radius
+    tau = -drag_ang * i_sphere * submerged * bw
+    out_forces[bid] = wp.spatial_vector(wp.vec3(fx, fy, fz), tau)
 
 
 def ensure_buoyancy_scratch(
@@ -221,6 +224,7 @@ def apply_sphere_buoyancy_forces_gpu(
     drag_xy: float,
     drag_z: float,
     vel_scale: float,
+    drag_ang: float = 0.0,
     phi_wet: float = 0.25,
     ema_alpha: float = 0.12,
     dsub_cap: float = 0.06,
@@ -274,12 +278,14 @@ def apply_sphere_buoyancy_forces_gpu(
             scratch["body_ids"],
             scratch["density"],
             float(volume),
+            float(radius),
             float(rho_liquid),
             float(gravity_abs),
             float(buoyancy_scale),
             float(push_rate),
             float(drag_xy),
             float(drag_z),
+            float(drag_ang),
             float(vel_scale),
             scratch["sub_ema"],
             float(np.clip(ema_alpha, 0.01, 1.0)),

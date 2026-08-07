@@ -226,12 +226,25 @@ class HomeFp32Bridge:
         dam_x: int,
         fill_z: int,
         rho_liquid: float | None = None,
+        *,
+        hydrostatic: bool = True,
     ) -> None:
-        """Seed dam-break column on GPU and push macros onto ``state``."""
+        """Seed dam-break column on GPU and push macros onto ``state``.
+
+        ``hydrostatic=True`` (default) stacks ``ρ(z)`` so Eq.32 ME can lift
+        light bodies; uniform ``ρ`` + Guo ``g`` alone leaves ``f*+f−2w≈0``.
+        """
         rho0 = float(
             self.model.initial_density if rho_liquid is None else rho_liquid
         )
-        host = seed_dam_break_column(self._ensure_gpu().shape, dam_x, fill_z, rho0)
+        g_z = float(getattr(self.model, "gravity_z", 0.0) or 0.0) if hydrostatic else 0.0
+        host = seed_dam_break_column(
+            self._ensure_gpu().shape,
+            dam_x,
+            fill_z,
+            rho0,
+            g_latt_z=g_z,
+        )
         self.seed_host_state(state, host)
 
     def seed_pool(

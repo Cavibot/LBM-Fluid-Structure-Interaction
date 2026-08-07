@@ -63,21 +63,48 @@ def _feq_w(
 def _accumulate_fused_link_me(
     body_id: int,
     link_mid: wp.vec3,
-    c_dir: wp.vec3,
     f_wall: float,
-    f_opp: float,
-    vol: float,
+    f_fluid: float,
+    w: float,
+    phi: float,
+    cxi: float,
+    cyi: float,
+    czi: float,
+    uxp: float,
+    uyp: float,
+    uzp: float,
+    conversion: float,
     body_q: wp.array(dtype=wp.transform),
     body_com: wp.array(dtype=wp.vec3),
     body_f: wp.array(dtype=wp.spatial_vector),
 ) -> None:
+    """HOME-FREE paper Sec.4.3 Eq.(32) with Ladd action–reaction on the solid.
+
+    Pull SoT builds paper ``Δĵ`` with ``c`` = solid→fluid = ``c_ī``. Empirically,
+    ``F_solid = +Δĵ`` drives light spheres *down* (anti-buoyancy) in our SoT;
+    ``F_solid = −Δĵ`` restores Archimedes-like lift and dam-break wash direction.
+    Keep the Eq.32 algebra; only the solid apply sign is Ladd-consistent here.
+    """
     if body_id < 0:
         return
-    df = -(f_wall + f_opp) * vol
-    delta_p = c_dir * df
+    if phi <= 0.0:
+        return
+    # Eq.32 hydrostatic piece: (f*+f-2w)c. For nearly-eq ρ=1 pops this cancels
+    # and buoyancy vanishes under Guo forcing; keep -2w as paper but note magnitude.
+    s = f_wall + f_fluid - 2.0 * w
+    d = f_wall - f_fluid
+    fx = phi * (s * cxi - d * uxp)
+    fy = phi * (s * cyi - d * uyp)
+    fz = phi * (s * czi - d * uzp)
+    dF = wp.vec3(-fx, -fy, -fz) * conversion
+    f2 = dF[0] * dF[0] + dF[1] * dF[1] + dF[2] * dF[2]
+    if not wp.isfinite(f2):
+        return
     com_world = wp.transform_point(body_q[body_id], body_com[body_id])
-    delta_tau = wp.cross(link_mid - com_world, delta_p)
-    wp.atomic_add(body_f, body_id, wp.spatial_vector(delta_p, delta_tau))
+    dtau = wp.cross(link_mid - com_world, dF)
+    if not wp.isfinite(dtau[0] + dtau[1] + dtau[2]):
+        return
+    wp.atomic_add(body_f, body_id, wp.spatial_vector(dF, dtau))
 
 
 @wp.func
@@ -151,7 +178,7 @@ def home_vof_apply_solid_mask_kernel(
     phi: wp.array3d(dtype=float),
     cell_type: wp.array3d(dtype=wp.int32),
 ) -> None:
-    """Force rasterized solid cells to empty gas (Home TYPE_S skip)."""
+    """Force rasterized solid cells to empty gas (HOME-FREE death nodes → G)."""
     i, j, k = wp.tid()
     if solid_phi[i, j, k] >= 0.0:
         return
@@ -494,21 +521,32 @@ def home_vof_fused_kernel(
                     rho_c, vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
                     uxp, uyp, uzp, cxi, cyi, czi, w,
                 )
-            # Stream-time link ME (optional): same f_wall / f_opp as this pull.
+            # HOME-FREE Sec.4.3: ME only on F/I cut cells (skip gas), Eq.(32).
+            # φ_liquid=1; φ_interface=φ0. Wall pop = Eq.24 (or feq if wall_eq).
             if me_enable != 0 and is_rigid_solid != 0:
-                bid = int(solid_body_id[ni, nj, nk])
-                vol = me_dh * me_dh * me_dh * me_force_scale
-                cell_center = wp.vec3(
-                    (float(i) + 0.5) * me_dh,
-                    (float(j) + 0.5) * me_dh,
-                    (float(k) + 0.5) * me_dh,
-                )
-                c_dir = wp.vec3(float(cxi), float(cyi), float(czi))
-                link_mid = cell_center - c_dir * (0.5 * me_dh)
-                _accumulate_fused_link_me(
-                    bid, link_mid, c_dir, fhn, fon_opp, vol,
-                    body_q, body_com, body_f,
-                )
+                me_phi = float(0.0)
+                if ctype == CELL_LIQUID:
+                    me_phi = 1.0
+                elif ctype == CELL_INTERFACE:
+                    me_phi = phi0
+                if me_phi > 1.0e-8:
+                    bid = int(solid_body_id[ni, nj, nk])
+                    cell_center = wp.vec3(
+                        (float(i) + 0.5) * me_dh,
+                        (float(j) + 0.5) * me_dh,
+                        (float(k) + 0.5) * me_dh,
+                    )
+                    # c_ī points from solid → fluid (stream pull dir); cut ≈ mid.
+                    c_dir = wp.vec3(float(cxi), float(cyi), float(czi))
+                    link_mid = cell_center - c_dir * (0.5 * me_dh)
+                    # f_fluid = f_i toward solid = fon[opp]; f_wall = f*_ī.
+                    _accumulate_fused_link_me(
+                        bid, link_mid, fhn, fon_opp, w, me_phi,
+                        float(cxi), float(cyi), float(czi),
+                        uxp, uyp, uzp,
+                        me_force_scale,
+                        body_q, body_com, body_f,
+                    )
         else:
             ntype = int(cell_type[ni, nj, nk])
             if ntype == CELL_IF:

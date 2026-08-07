@@ -101,8 +101,14 @@ def seed_dam_break_column(
     rho_liquid: float = 1.0,
     *,
     interface_phi: float = 0.5,
+    g_latt_z: float = 0.0,
+    cs2: float = 1.0 / 3.0,
 ) -> HomeVofState:
-    """Liquid column ``x < dam_x`` and ``z < fill_z``; mark free-surface IF."""
+    """Liquid column ``x < dam_x`` and ``z < fill_z``; mark free-surface IF.
+
+    If ``g_latt_z < 0``, set hydrostatic ``ρ(z)=ρ0(1+|g|(z_fs-z_c)/c_s²)`` so
+    link ME (Eq.32) can produce Archimedes lift under Guo-style body force.
+    """
     moments, phi, cell_type = _empty_fields(shape)
     nx, _ny, nz = shape
     dx = max(0, min(int(dam_x), nx))
@@ -111,6 +117,13 @@ def seed_dam_break_column(
         moments.rho[:dx, :, :fz] = float(rho_liquid)
         phi[:dx, :, :fz] = 1.0
         cell_type[:dx, :, :fz] = CELL_LIQUID
+        g_abs = abs(float(g_latt_z))
+        if g_abs > 0.0 and float(cs2) > 0.0:
+            # Cell-center depth below free surface at z=fz.
+            zc = np.arange(fz, dtype=np.float64) + 0.5
+            depth = float(fz) - zc
+            rho_z = float(rho_liquid) * (1.0 + g_abs * depth / float(cs2))
+            moments.rho[:dx, :, :fz] = rho_z[None, None, :]
     mark_liquid_interfaces(cell_type, phi, interface_phi=interface_phi)
     return HomeVofState(moments=moments, phi=phi, cell_type=cell_type)
 

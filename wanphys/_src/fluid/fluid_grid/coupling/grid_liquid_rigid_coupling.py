@@ -293,6 +293,7 @@ class GridLiquidRigidCoupling(CompositeSimulation):
                 rigid_state.body_qd,
                 rigid_backend.body_com,
                 1.0,
+                0.0,  # no lattice clamp (velocity already world/lattice per caller)
             ],
         )
         wp.launch(
@@ -308,6 +309,7 @@ class GridLiquidRigidCoupling(CompositeSimulation):
                 rigid_state.body_qd,
                 rigid_backend.body_com,
                 1.0,
+                0.0,
             ],
         )
         wp.launch(
@@ -323,6 +325,7 @@ class GridLiquidRigidCoupling(CompositeSimulation):
                 rigid_state.body_qd,
                 rigid_backend.body_com,
                 1.0,
+                0.0,
             ],
         )
 

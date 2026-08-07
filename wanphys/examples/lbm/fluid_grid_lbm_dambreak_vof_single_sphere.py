@@ -30,6 +30,7 @@ import warp as wp
 
 from wanphys._src.fluid.fluid_grid.coupling import (
     GridLbmRigidCoupling,
+    lattice_gravity_to_world,
     recommended_me_force_scale,
 )
 from wanphys._src.fluid.fluid_grid.lbm import LbmDomain
@@ -59,6 +60,9 @@ WALL_THICKNESS_CELLS: float = 2.0
 ME_PATH_DRAG_XY: float = 0.75
 ME_PATH_DRAG_Z: float = 10.0
 SPHERE_FRICTION_MU: float = 0.18
+SPHERE_CONTACT_KE: float = 250.0
+SPHERE_CONTACT_KD: float = 900.0
+SPHERE_CONTACT_RESTITUTION: float = 0.0
 FRAME_DT: float = 1.0 / 60.0
 SIM_SUBSTEPS: int = 12
 GRAVITY_RAMP_STEPS: int = 40
@@ -93,6 +97,10 @@ class HomeVofDamBreakSingleSphere:
         n_ref = 48
         gravity = -0.0020 * (float(n_ref) / float(self._n))
         self._substeps = max(SIM_SUBSTEPS, 12)
+        self.sim_dt = FRAME_DT / float(self._substeps)
+        self._lbm_gravity_z = float(gravity)
+        self._rigid_gravity_z = lattice_gravity_to_world(gravity, DH, self.sim_dt)
+        self._g_matched = self._rigid_gravity_z
 
         use_wall_eq = bool(self._empirical_fsi_enabled)
         self.model = make_home_vof_model(
@@ -110,7 +118,6 @@ class HomeVofDamBreakSingleSphere:
         )
         self.domain = LbmDomain(self.model)
         self.domain.create_state()
-        self.sim_dt = FRAME_DT / float(self._substeps)
         self.sim_time = 0.0
         self.frame_count = 0
         self._last_ms = 0.0
@@ -119,10 +126,7 @@ class HomeVofDamBreakSingleSphere:
 
         if feedback_force_scale is None:
             feedback_scale = recommended_me_force_scale(
-                DH,
-                self.sim_dt,
-                rigid_g_abs=abs(RIGID_GRAVITY_Z),
-                lbm_g_abs=abs(gravity),
+                DH, self.sim_dt, rho_fluid=RHO_LIQUID, match_rigid_g=True
             )
         else:
             feedback_scale = float(feedback_force_scale)
@@ -173,8 +177,16 @@ class HomeVofDamBreakSingleSphere:
         wall_t = WALL_THICKNESS_CELLS * DH
         radius = SPHERE_RADIUS
         z_floor = radius + 1.5 * DH
-        builder = RigidModelBuilder(gravity=RIGID_GRAVITY_Z)
-        wall_cfg = ShapeConfig(density=0.0, is_visible=False, is_solid=True, has_shape_collision=True)
+        builder = RigidModelBuilder(gravity=self._rigid_gravity_z)
+        wall_cfg = ShapeConfig(
+            density=0.0,
+            is_visible=False,
+            is_solid=True,
+            has_shape_collision=True,
+            ke=SPHERE_CONTACT_KE,
+            kd=SPHERE_CONTACT_KD,
+            restitution=SPHERE_CONTACT_RESTITUTION,
+        )
 
         def add_wall(label: str, center: tuple[float, float, float], he: tuple[float, float, float]) -> None:
             body = builder.add_body(position=center, label=label)
@@ -192,6 +204,9 @@ class HomeVofDamBreakSingleSphere:
             is_visible=True,
             is_solid=True,
             mu=SPHERE_FRICTION_MU,
+            ke=SPHERE_CONTACT_KE,
+            kd=SPHERE_CONTACT_KD,
+            restitution=SPHERE_CONTACT_RESTITUTION,
         )
         center = (world * 0.32, world * 0.5, z_floor)
         self.sphere_body_id = builder.add_body(position=center, label="sphere")
@@ -207,6 +222,7 @@ class HomeVofDamBreakSingleSphere:
         self.coupling.set_rigid_dynamics_enabled(False)
         self.coupling.set_two_way_feedback_enabled(True, force_scale=feedback_force_scale)
         self.coupling.set_feedback_mode("momentum_exchange")
+        self.coupling.set_me_integration_mode("impulse")
 
         if self._empirical_fsi_enabled:
             cfg = EmpiricalSphereFsiConfig()
@@ -226,7 +242,7 @@ class HomeVofDamBreakSingleSphere:
                 radius=radius,
                 volume=self._sphere_volume,
                 rho_liquid=RHO_LIQUID,
-                gravity_abs=abs(RIGID_GRAVITY_Z),
+                gravity_abs=abs(self._rigid_gravity_z),
                 dh=DH,
                 nx=self._n,
                 ny=self._n,
@@ -236,15 +252,16 @@ class HomeVofDamBreakSingleSphere:
 
     def _ramp_gravity(self) -> None:
         target_lbm = float(self.model.gravity_z)
+        target_rigid = float(self._rigid_gravity_z)
         self.model.gravity_z = 0.0
         self.rigid_domain.model.set_gravity((0.0, 0.0, 0.0))
         for step_index in range(GRAVITY_RAMP_STEPS):
             alpha = float(step_index + 1) / float(GRAVITY_RAMP_STEPS)
             self.model.gravity_z = alpha * target_lbm
-            self.rigid_domain.model.set_gravity((0.0, 0.0, alpha * RIGID_GRAVITY_Z))
+            self.rigid_domain.model.set_gravity((0.0, 0.0, alpha * target_rigid))
             self._step_coupled()
         self.model.gravity_z = target_lbm
-        self.rigid_domain.model.set_gravity((0.0, 0.0, RIGID_GRAVITY_Z))
+        self.rigid_domain.model.set_gravity((0.0, 0.0, target_rigid))
 
     def _step_coupled(self) -> None:
         self.coupling.step(self.sim_dt)
@@ -287,9 +304,17 @@ class HomeVofDamBreakSingleSphere:
                 self.rigid_domain.state.get_body_position(self.sphere_body_id),
                 dtype=np.float64,
             )
+            me_note = ""
+            J = self.coupling.last_me_impulse
+            if J is not None and J.shape[0] > self.sphere_body_id:
+                j = J[self.sphere_body_id, 0:3]
+                me_note = (
+                    f" ME_J={np.linalg.norm(j):.3g}"
+                    f" res={self.coupling.last_me_apply_rel:.2e}"
+                )
             print(
                 f"[t={self.sim_time:.1f}s] sphere=({pos[0]:.2f},{pos[1]:.2f},{pos[2]:.2f}) "
-                f"sim={self._last_ms:.0f}ms",
+                f"sim={self._last_ms:.0f}ms{me_note}",
                 file=sys.stderr,
                 flush=True,
             )
