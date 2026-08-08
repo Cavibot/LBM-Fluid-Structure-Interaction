@@ -5,10 +5,29 @@
 
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+
+def _load_float_txt(path: Path, dtype: type) -> np.ndarray:
+    """Load one-value-per-line floats; normalize MSVC ``-nan(ind)`` tokens."""
+    raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    norm = []
+    for ln in raw_lines:
+        s = ln.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low in ("-nan(ind)", "nan(ind)", "+nan(ind)", "-nan", "nan", "-1.#ind00", "1.#ind00"):
+            norm.append("nan")
+        elif low in ("-inf", "inf", "+inf", "1.#inf00", "-1.#inf00"):
+            norm.append("-inf" if low.startswith("-") else "inf")
+        else:
+            norm.append(s)
+    return np.loadtxt(StringIO("\n".join(norm)), dtype=dtype)
 
 # ---------------------------------------------------------------------------
 # Golden data loader
@@ -102,7 +121,10 @@ def load_bubble_golden(scene_name: str) -> dict[str, np.ndarray | int | float]:
     for name, dtype in _BUBBLE_OPTIONAL_FIELDS.items():
         path = scene_dir / f"{name}.txt"
         if path.is_file():
-            out[name] = np.loadtxt(path, dtype=dtype)
+            if dtype in (np.float32, np.float64):
+                out[name] = _load_float_txt(path, dtype)
+            else:
+                out[name] = np.loadtxt(path, dtype=dtype)
 
     for scalar in (
         "bubble_count",

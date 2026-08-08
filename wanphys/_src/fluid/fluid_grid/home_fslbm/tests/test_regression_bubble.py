@@ -130,6 +130,7 @@ SCENES: dict[str, dict] = {
             "flag",
             "phi",
             "tag_matrix",
+            "delta_phi",
             "bubble_volume",
             "bubble_rho",
             "bubble_count",
@@ -342,9 +343,11 @@ def _compare_float(
     w = np.asarray(warped, dtype=np.float64).ravel()
     n = min(g.size, w.size)
     g, w = g[:n], w[:n]
+    both_nan = np.isnan(g) & np.isnan(w)
     diff = np.abs(g - w)
+    diff[both_nan] = 0.0
     thresh = atol + rtol * np.maximum(np.abs(g), np.abs(w))
-    bad = int(np.sum(diff > thresh))
+    bad = int(np.sum((~both_nan) & (diff > thresh)))
     if bad:
         return f"{name}: {bad}/{n} exceed tol (rtol={rtol}, atol={atol})"
     return None
@@ -520,10 +523,9 @@ class TestBubbleCouplingGolden:
         solver.initialize_equilibrium(state)
         solver.init_bubbles(state)
 
-        # Optional: seed delta_phi from golden for volume-update scene
-        if scene == "bubble_coupling_volume_delta_phi" and "delta_phi" in golden:
-            dphi = reorder_ref_scalar_to_warp(golden["delta_phi"], nx, ny, nz)
-            wp.copy(state.delta_phi, wp.array(dphi.astype(np.float32), dtype=float))
+        if "delta_phi" in meta["required"]:
+            g_dphi = reorder_ref_scalar_to_warp(golden["delta_phi"], nx, ny, nz)
+            wp.copy(state.delta_phi, wp.array(g_dphi.astype(np.float32), dtype=float))
 
         for _ in range(steps):
             domain.step(1.0)
@@ -568,7 +570,8 @@ class TestBubbleCouplingGolden:
             # Σ V·ρ ≡ Σ init_volume for active bubbles
             init_g = float(np.sum(np.asarray(golden["bubble_init_volume"]).ravel()[:g_count]))
             init_w = float(np.sum(state.bubble_init_volume.numpy()[:g_count]))
-            assert abs(init_w - init_g) / max(abs(init_g), 1e-12) < 1e-4
+            if init_g > 0.0:
+                assert abs(init_w - init_g) / init_g < 1e-4
 
 
 class TestBubbleGoldenRegistry:

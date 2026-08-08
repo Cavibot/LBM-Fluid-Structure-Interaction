@@ -354,7 +354,7 @@ def surface_3_kernel(
         previous_tag[i, j, k] = prev_tag
         tag_matrix[i, j, k] = -1
         if prev_tag > 0:
-            wp.atomic_add(split_flag_gpu, 0, 1)
+            wp.atomic_max(split_flag_gpu, 0, 1)
         massexn = massn - rhon
         massn = rhon
         phin = 1.0

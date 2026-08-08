@@ -594,12 +594,13 @@ def num_rho_update_kernel(
     if wp.tid() != 0:
         return
     n = label_num_gpu[0]
-    bubble_count_gpu[0] = n
+    if n > 0:
+        bubble_count_gpu[0] = n
     label_num_gpu[0] = 0
-    for i in range(n):
+    bc = bubble_count_gpu[0]
+    for i in range(bc):
         vol = bubble_volume[i]
-        if vol > wp.float64(0.0):
-            bubble_rho[i] = bubble_init_volume[i] / vol
+        bubble_rho[i] = bubble_init_volume[i] / vol
 
 
 @wp.kernel
@@ -645,8 +646,7 @@ def bubble_rho_update_kernel(
     if b >= bubble_count:
         return
     vol = bubble_volume[b]
-    if vol > wp.float64(0.0):
-        bubble_rho[b] = bubble_init_volume[b] / vol
+    bubble_rho[b] = bubble_init_volume[b] / vol
 
 
 @wp.kernel

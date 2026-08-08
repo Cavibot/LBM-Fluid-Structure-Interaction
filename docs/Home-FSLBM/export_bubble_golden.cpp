@@ -45,7 +45,12 @@ static void make_dir(const char* path) {
 static void wf(const char* fn, const float* d, int n) {
     FILE* f = fopen(fn, "w");
     if (!f) { printf("ERR open %s\n", fn); return; }
-    for (int i = 0; i < n; i++) fprintf(f, "%.15e\n", (double)d[i]);
+    for (int i = 0; i < n; i++) {
+        double v = (double)d[i];
+        if (std::isnan(v)) fprintf(f, "nan\n");
+        else if (std::isinf(v)) fprintf(f, "%s\n", v > 0 ? "inf" : "-inf");
+        else fprintf(f, "%.15e\n", v);
+    }
     fclose(f);
     printf("  %s (%d floats)\n", fn, n);
 }
@@ -53,7 +58,11 @@ static void wf(const char* fn, const float* d, int n) {
 static void wd(const char* fn, const double* d, int n) {
     FILE* f = fopen(fn, "w");
     if (!f) { printf("ERR open %s\n", fn); return; }
-    for (int i = 0; i < n; i++) fprintf(f, "%.15e\n", d[i]);
+    for (int i = 0; i < n; i++) {
+        if (std::isnan(d[i])) fprintf(f, "nan\n");
+        else if (std::isinf(d[i])) fprintf(f, "%s\n", d[i] > 0 ? "inf" : "-inf");
+        else fprintf(f, "%.15e\n", d[i]);
+    }
     fclose(f);
     printf("  %s (%d doubles)\n", fn, n);
 }
@@ -167,7 +176,11 @@ static void export_ccl_pair_crop(mrFlow3D* fl, const char* out_dir,
     delete[] lab;
 }
 
-static void export_bubble_state(mrFlow3D* fl, const char* out_dir, int nx, int ny, int nz, int steps) {
+// delta_phi_ic: when non-null, write this field to delta_phi.txt instead of fl->delta_phi.
+// Coupling scenes seed delta_phi before the run; after steps fl->delta_phi is consumed (zeros).
+// Golden delta_phi.txt is the *initial condition*, not the post-run state (see phase3_bubble_golden_zh.md).
+static void export_bubble_state(mrFlow3D* fl, const char* out_dir, int nx, int ny, int nz, int steps,
+                                const float* delta_phi_ic = nullptr) {
     make_dir(out_dir);
     export_scalars_grid(out_dir, nx, ny, nz, steps);
     long N = fl->count;
@@ -183,7 +196,14 @@ static void export_bubble_state(mrFlow3D* fl, const char* out_dir, int nx, int n
     wf(path, fl->phi, (int)N);
 
     snprintf(path, sizeof(path), "%s/delta_phi.txt", out_dir);
-    wf(path, fl->delta_phi, (int)N);
+    const float* dphi_out = delta_phi_ic ? delta_phi_ic : fl->delta_phi;
+    wf(path, dphi_out, (int)N);
+    if (delta_phi_ic) {
+        int nz_dphi = 0;
+        for (long i = 0; i < N; i++)
+            if (delta_phi_ic[i] != 0.0f) nz_dphi++;
+        printf("  delta_phi.txt: initial condition (%d / %ld nonzero)\n", nz_dphi, N);
+    }
 
     snprintf(path, sizeof(path), "%s/tag_matrix.txt", out_dir);
     wi(path, fl->tag_matrix, (int)N);
@@ -531,7 +551,7 @@ static void gen_coupling_volume_delta_phi(const char* base) {
     checkCudaErrors(cudaDeviceSynchronize());
     trans_bubble_to_host(s);
 
-    // Seed synthetic delta_phi on tagged cells (Warp test seeds this BEFORE steps)
+    // Seed synthetic delta_phi on tagged cells (IC for volume-update coupling test)
     std::vector<float> delta0((size_t)fl->count, 0.0f);
     for (long id = 0; id < fl->count; id++) {
         if (fl->tag_matrix[id] > 0)
@@ -541,13 +561,7 @@ static void gen_coupling_volume_delta_phi(const char* base) {
     s->mlTransData2Gpu();
     run_coupling(s, steps);
     std::string out = std::string(base) + "/bubble_coupling_volume_delta_phi";
-    export_bubble_state(fl, out.c_str(), N, N, N, steps);
-    // Overwrite delta_phi.txt with the *initial* seed used by the Warp test
-    {
-        char path[512];
-        snprintf(path, sizeof(path), "%s/delta_phi.txt", out.c_str());
-        wf(path, delta0.data(), (int)delta0.size());
-    }
+    export_bubble_state(fl, out.c_str(), N, N, N, steps, delta0.data());
     delete s; delete fl;
 }
 
