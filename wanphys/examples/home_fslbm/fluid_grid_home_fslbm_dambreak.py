@@ -22,30 +22,32 @@ from wanphys._src.fluid.fluid_grid.home_fslbm import constants as C
 from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRenderer
 
 # ---------------------------------------------------------------------------
-NX: int = 128
-NY: int = 64
-NZ: int = 64
-DH: float = 1.0
+# Scene scale aligned with wanphys.examples.lbm.fluid_grid_lbm_dambreak_trt:
+# 128³ lattice, DH=0.02 → world ≈ 2.56 m; dam fills left 25% (full y/z).
+N: int = 128
+DH: float = 0.02
+DAM_X_FRAC: float = 0.25
+DAM_Z_FRAC: float = 0.50  # free surface above; avoid ceiling-sealed full-height column
 
-OMEGA: float = 1.0
+OMEGA: float = 1.998
 # Plan / dam_break_64 / falling_droplet golden use |g|=1e-3. The temporary
 # 1e-4 workaround was only needed while gravity was incorrectly accumulated.
 GRAVITY_Z: float = -1.0e-3
 SURFACE_TENSION: float = 6.0 * 4e-3
 
-# Water column (cells), interior — matches planned test_regression_dambreak.
-COL_NX: int = 40
-COL_NY: int = 30
-COL_NZ: int = 30
 INTERFACE_DELTA: float = 1.5
 
 SSFR_THRESHOLD: float = 0.5
-# Diagonal ~sqrt(128^2+64^2+64^2)≈156; quarter-cell steps → ~600, pad ×2.
-RAY_MARCH_STEPS: int = 1200
+# 128³ diagonal: ~√3×128 ≈ 222 lu; match LBM TRT dambreak sample budget.
+RAY_MARCH_STEPS: int = 1600
 
 FRAME_DT: float = 1.0 / 60.0
 SIM_SUBSTEPS: int = 4  # lattice steps per frame (HOME dt = 1)
 GRAVITY_RAMP_STEPS: int = 60
+
+# Camera: frame the ~2.56 m cube from +X, looking toward -X (Z-up).
+CAMERA_PITCH: float = -18.0
+CAMERA_YAW: float = -180.0
 
 
 def _box_signed_distance(
@@ -79,7 +81,12 @@ def _box_signed_distance(
 
 
 def _setup_water_column(state, nx: int, ny: int, nz: int) -> None:
-    """Fill a soft-edged water column; rest of domain is gas."""
+    """Fill left dam slab (LBM-style); rest of domain is gas.
+
+    Matches ``fluid_grid_lbm_dambreak_trt`` in x/y: water for
+    ``i < DAM_X_FRAC * nx``, full interior y. Height is ``DAM_Z_FRAC`` of
+    the domain so a free surface remains above the column.
+    """
     ii, jj, kk = np.meshgrid(
         np.arange(nx, dtype=np.int32),
         np.arange(ny, dtype=np.int32),
@@ -87,11 +94,12 @@ def _setup_water_column(state, nx: int, ny: int, nz: int) -> None:
         indexing="ij",
     )
 
-    # Cells [1 .. COL_*] sitting on the floor; y-span centered.
-    x0, x1 = 0.5, float(COL_NX) + 0.5
-    y_lo = (ny - COL_NY) // 2
-    y0, y1 = float(y_lo) - 0.5, float(y_lo + COL_NY - 1) + 0.5
-    z0, z1 = 0.5, float(COL_NZ) + 0.5
+    dam_x = max(2, int(float(nx) * DAM_X_FRAC))
+    dam_z = max(2, int(float(nz) * DAM_Z_FRAC))
+    # Soft box: i ∈ [1, dam_x), full y interior, z ∈ [1, dam_z).
+    x0, x1 = 0.5, float(dam_x) - 0.5
+    y0, y1 = 0.5, float(ny) - 1.5
+    z0, z1 = 0.5, float(dam_z) - 0.5
 
     sdf = _box_signed_distance(ii, jj, kk, x0, x1, y0, y1, z0, z1)
     phi = np.clip((-sdf) / INTERFACE_DELTA + 0.5, 0.0, 1.0).astype(np.float32)
@@ -140,13 +148,25 @@ def _init_rest_state(domain: HomeFslbmDomain) -> None:
     """Rest equilibrium + tag_matrix=-1 (ambient gas, no bubbles)."""
     domain.solver.initialize_equilibrium(domain.state, rho0=1.0, u0=(0.0, 0.0, 0.0))
     state = domain.state
-    tag = np.full((NX, NY, NZ), -1, dtype=np.int32)
+    tag = np.full((N, N, N), -1, dtype=np.int32)
     wp.copy(state.tag_matrix, wp.array(tag, dtype=wp.int32, device=state.tag_matrix.device))
     state.massex.zero_()
     state.force_x.zero_()
     state.force_y.zero_()
     state.force_z.zero_()
     state.delta_phi.zero_()
+
+
+def _setup_camera(viewer, world_size: float) -> None:
+    """Place the GL camera so the dam-break cube fills the view."""
+    if not hasattr(viewer, "set_camera"):
+        return
+    # From +X looking toward -X; y at domain mid, z elevated for a slight top-down tilt.
+    viewer.set_camera(
+        pos=wp.vec3(world_size * 2.15, world_size * 0.5, world_size * 0.85),
+        pitch=CAMERA_PITCH,
+        yaw=CAMERA_YAW,
+    )
 
 
 def _sync_double_buffer(domain: HomeFslbmDomain) -> None:
@@ -176,8 +196,11 @@ class HomeFslbmDamBreak:
         if hasattr(viewer, "_paused"):
             viewer._paused = True
 
+        world_size = float(N) * DH
+        dam_x = max(2, int(float(N) * DAM_X_FRAC))
+        dam_z = max(2, int(float(N) * DAM_Z_FRAC))
         self.model = HomeFslbmModel(
-            fluid_grid_res=(NX, NY, NZ),
+            fluid_grid_res=(N, N, N),
             fluid_grid_cell_size=DH,
             omega=OMEGA,
             gravity_x=0.0,
@@ -187,9 +210,9 @@ class HomeFslbmDamBreak:
             atmosphere_open=False,
         )
         print(
-            f"HOME-FSLBM Dam-Break: {NX}x{NY}x{NZ}, omega={OMEGA}, "
-            f"gz={GRAVITY_Z}, sigma={SURFACE_TENSION:.4g}, "
-            f"column={COL_NX}x{COL_NY}x{COL_NZ}"
+            f"HOME-FSLBM Dam-Break: {N}^3, dh={DH}, world={world_size:.3f}m, "
+            f"omega={OMEGA}, gz={GRAVITY_Z}, sigma={SURFACE_TENSION:.4g}, "
+            f"dam at x<{dam_x}, z<{dam_z}"
         )
 
         self.domain = HomeFslbmDomain(self.model)
@@ -199,8 +222,8 @@ class HomeFslbmDamBreak:
         self.frame_count = 0
         self._last_ms = 0.0
 
-        _setup_water_column(self.domain.state, NX, NY, NZ)
-        _set_boundary_walls(self.domain.state, NX, NY, NZ)
+        _setup_water_column(self.domain.state, N, N, N)
+        _set_boundary_walls(self.domain.state, N, N, N)
         _init_rest_state(self.domain)
         _sync_double_buffer(self.domain)
         wp.synchronize_device(self.model._device)
@@ -221,6 +244,7 @@ class HomeFslbmDamBreak:
 
         self.ssfr: ScreenSpaceFluidRenderer | None = None
         if isinstance(viewer, FluidViewerGL):
+            _setup_camera(viewer, world_size)
             self.ssfr = ScreenSpaceFluidRenderer(
                 viewer=viewer,
                 max_particles=1,
