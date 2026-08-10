@@ -1,0 +1,49 @@
+{
+  "stage": "B6-capillary-pressure",
+  "scenario": "dambreak",
+  "configuration": {
+    "resolution": [
+      128,
+      128,
+      128
+    ],
+    "requested_steps": 2000,
+    "lattice_surface_tension": 0.0005,
+    "physical_surface_tension": 5.000000000000001e-07,
+    "lattice_viscosity": 0.019999999999999997,
+    "lattice_acceleration": [
+      0.0,
+      -5e-05,
+      0.0
+    ],
+    "wall_contact_policy": "ambient-pressure-until-B7"
+  },
+  "environment": {
+    "python": "3.12.3",
+    "warp": "1.12.0",
+    "device": "cuda:0"
+  },
+  "last_valid_step": 1875,
+  "failure": "surface tension has 1 unresolved bulk curvatures",
+  "maximum_active_speed": 0.08990421146154404,
+  "minimum_interface_gas_density": 0.9908334612846375,
+  "maximum_interface_gas_density": 1.0072391033172607,
+  "maximum_wall_contact_skipped_count": 4406,
+  "relative_total_mass_drift": 7.864417300477542e-06,
+  "initial_shape": {
+    "volume": 498141.0,
+    "centroid_x": 16.254963955988366,
+    "centroid_y": 63.254963955988366,
+    "centroid_z": 63.5,
+    "shape_anisotropy": 14.988919054699652
+  },
+  "final_shape": {
+    "volume": 502359.169323317,
+    "centroid_x": 36.283860517289085,
+    "centroid_y": 29.35405330398746,
+    "centroid_z": 63.499795770724845,
+    "shape_anisotropy": 2.6182417266473306
+  },
+  "elapsed_seconds": 12.107659619301558,
+  "ms_per_completed_step": 6.457418463627497
+}

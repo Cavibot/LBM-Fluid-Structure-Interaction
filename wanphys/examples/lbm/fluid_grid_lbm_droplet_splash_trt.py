@@ -175,10 +175,12 @@ class TrtDropletSplash:
         self._equilibrate_pool()
         self._add_droplet_on_pool()
 
-        self.ssfr: ScreenSpaceFluidRenderer = ScreenSpaceFluidRenderer(
-            viewer=viewer, max_particles=1, particle_radius=0.01,
-            device=self.model._device)
-        viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
+        self.ssfr: ScreenSpaceFluidRenderer | None = None
+        if hasattr(viewer, "register_post_render_callback"):
+            self.ssfr = ScreenSpaceFluidRenderer(
+                viewer=viewer, max_particles=1, particle_radius=0.01,
+                device=self.model._device)
+            viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
         self.frame_count: int = 0; self._last_ms: float = 0.0
         print("Controls: [Space] unpause  [R] reset  [mouse] orbit  [scroll] zoom")
 
@@ -277,7 +279,7 @@ class TrtDropletSplash:
 
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)
-        if self.ssfr.available:
+        if self.ssfr is not None and self.ssfr.available:
             self.ssfr.set_density_field(density=self.domain.state.density,
                 grid_origin=(0.0, 0.0, 0.0), cell_size=DH,
                 threshold=SSFR_THRESHOLD, max_steps=RAY_MARCH_STEPS)

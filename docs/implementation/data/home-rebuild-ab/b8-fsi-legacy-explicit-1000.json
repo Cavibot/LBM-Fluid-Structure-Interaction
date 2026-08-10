@@ -1,0 +1,81 @@
+{
+  "backend": "legacy",
+  "body_displacement": [
+    0.0,
+    0.0,
+    -2.4377288818359375
+  ],
+  "cells": 250776,
+  "contact_angle_degrees": 90.0,
+  "cuda_graph_launches_per_step": 0.0,
+  "dead_cells": 120,
+  "device": "cuda:0",
+  "domain_type": "HomeFreeDomain",
+  "final_body_position": [
+    27.0,
+    27.0,
+    49.36227035522461
+  ],
+  "final_body_velocity": [
+    3.5389105534910925e-10,
+    2.799953047194492e-10,
+    -0.00014380535867530853,
+    4.938177089464091e-10,
+    6.952041026186961e-11,
+    1.79960643609256e-10
+  ],
+  "fresh_cells": 112,
+  "home_moment_minimum_bandwidth_gbps": 3.8677515070562025,
+  "home_moment_minimum_bytes_per_lup": 80,
+  "initial_body_position": [
+    27.0,
+    27.0,
+    51.79999923706055
+  ],
+  "kernel_launch_counting_enabled": false,
+  "kernel_launches_per_step": 0.0,
+  "maximum_dry_links": 1640,
+  "maximum_mass_drift": 9.360670473951849e-06,
+  "maximum_projected_divergence": 0.0,
+  "maximum_projection_iterations": 0,
+  "maximum_strong_residual": 0.0,
+  "maximum_wet_links": 424,
+  "mean_projection_iterations": 0.0,
+  "mean_steady_step_ms": 5.051134814767494,
+  "mean_step_ms": 5.187013685703278,
+  "mean_strong_iterations": 1,
+  "mean_transition_step_ms": 9.580430512626966,
+  "measured_steps": 1000,
+  "mlups": 48.34689383820253,
+  "p50_step_ms": 4.9971118569374084,
+  "p95_step_ms": 5.961436592042446,
+  "project_courant": false,
+  "projection_max_iterations": null,
+  "quantization_audited": false,
+  "quantization_maximum_roundtrip_error": {},
+  "quantization_maximum_saturation_counts": {
+    "rho": 0,
+    "rho_S_xx": 0,
+    "rho_S_xy": 0,
+    "rho_S_xz": 0,
+    "rho_S_yy": 0,
+    "rho_S_yz": 0,
+    "rho_S_zz": 0,
+    "rho_u_x": 0,
+    "rho_u_y": 0,
+    "rho_u_z": 0
+  },
+  "radius_cells": 4.0,
+  "resolution": [
+    54,
+    54,
+    86
+  ],
+  "steady_steps": 970,
+  "steps_per_second": 192.78915780697727,
+  "strong_iteration_limit": 1,
+  "transition_steps": 30,
+  "warmup_steps": 10,
+  "warp_mempool_current_mib": 106.30451393127441,
+  "warp_mempool_peak_mib": 108.31132698059082
+}

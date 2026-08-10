@@ -32,6 +32,16 @@ from .lbm import (
     LbmSolver,
     LbmState,
 )
+from .home_lbm import (
+    HomeFreeBackend,
+    HomeFreeDomain,
+    HomeFreeLegacyDomain,
+    HomeLbmDomain,
+    HomeLbmModel,
+    HomeLbmSolver,
+    HomeLbmState,
+    create_home_free_domain,
+)
 
 __all__ = [
     # base
@@ -60,5 +70,13 @@ __all__ = [
     "LbmModel",
     "LbmSolver",
     "LbmState",
+    # HOME-LBM and geometric HOME-Free
+    "HomeLbmModel",
+    "HomeLbmDomain",
+    "HomeLbmSolver",
+    "HomeLbmState",
+    "HomeFreeBackend",
+    "HomeFreeDomain",
+    "HomeFreeLegacyDomain",
+    "create_home_free_domain",
 ]
-

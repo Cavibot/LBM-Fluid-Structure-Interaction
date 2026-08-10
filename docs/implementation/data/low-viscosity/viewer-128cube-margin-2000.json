@@ -1,0 +1,134 @@
+{
+  "scene": "viewer-viscosity-margin-gate",
+  "config": {
+    "resolution_x": 128,
+    "resolution_y": 128,
+    "resolution_z": 128,
+    "column_end_x": 31,
+    "column_end_y": 125,
+    "cell_size": 0.1,
+    "time_step": 1.0,
+    "lattice_gravity_y": -5e-05,
+    "lattice_viscosities": [
+      0.015,
+      0.0125
+    ],
+    "steps": 2000,
+    "sample_every": 250,
+    "gas_density": 1.0,
+    "max_lattice_speed": 0.2,
+    "device": "cuda:0"
+  },
+  "cases": [
+    {
+      "lattice_viscosity": 0.014999999999999998,
+      "shear_omega": 1.8348623853211008,
+      "lattice_gravity_y": -5e-05,
+      "completed": true,
+      "completed_steps": 2000,
+      "failure": null,
+      "maximum_speed": 0.1920168250799179,
+      "relative_mass_drift": 9.38009058829541e-06,
+      "elapsed_seconds": 5.0070669036358595,
+      "steps_per_second": 399.435445639384,
+      "accepted": true,
+      "samples": [
+        {
+          "step": 250,
+          "relative_mass_drift": 2.9335428651927177e-06,
+          "max_speed_so_far": 0.029907990247011185
+        },
+        {
+          "step": 500,
+          "relative_mass_drift": 8.102070575237564e-06,
+          "max_speed_so_far": 0.04557240009307861
+        },
+        {
+          "step": 750,
+          "relative_mass_drift": 1.107352406419827e-05,
+          "max_speed_so_far": 0.06455868482589722
+        },
+        {
+          "step": 1000,
+          "relative_mass_drift": 1.1389004882947388e-05,
+          "max_speed_so_far": 0.06825760006904602
+        },
+        {
+          "step": 1250,
+          "relative_mass_drift": 1.0995919449214011e-05,
+          "max_speed_so_far": 0.08242614567279816
+        },
+        {
+          "step": 1500,
+          "relative_mass_drift": 1.0677765140806609e-05,
+          "max_speed_so_far": 0.08942113071680069
+        },
+        {
+          "step": 1750,
+          "relative_mass_drift": 1.0995226480839229e-05,
+          "max_speed_so_far": 0.10765063017606735
+        },
+        {
+          "step": 2000,
+          "relative_mass_drift": 9.38009058829541e-06,
+          "max_speed_so_far": 0.1920168250799179
+        }
+      ]
+    },
+    {
+      "lattice_viscosity": 0.0125,
+      "shear_omega": 1.8604651162790697,
+      "lattice_gravity_y": -5e-05,
+      "completed": true,
+      "completed_steps": 2000,
+      "failure": null,
+      "maximum_speed": 0.19619746506214142,
+      "relative_mass_drift": 8.301318887778123e-06,
+      "elapsed_seconds": 5.012088978663087,
+      "steps_per_second": 399.03521436155256,
+      "accepted": true,
+      "samples": [
+        {
+          "step": 250,
+          "relative_mass_drift": 3.061521913842418e-06,
+          "max_speed_so_far": 0.03072066232562065
+        },
+        {
+          "step": 500,
+          "relative_mass_drift": 8.411838462313863e-06,
+          "max_speed_so_far": 0.04752672091126442
+        },
+        {
+          "step": 750,
+          "relative_mass_drift": 1.1466886208192108e-05,
+          "max_speed_so_far": 0.06246250122785568
+        },
+        {
+          "step": 1000,
+          "relative_mass_drift": 1.1757266794433111e-05,
+          "max_speed_so_far": 0.07391314953565598
+        },
+        {
+          "step": 1250,
+          "relative_mass_drift": 1.1123493709759486e-05,
+          "max_speed_so_far": 0.08423089981079102
+        },
+        {
+          "step": 1500,
+          "relative_mass_drift": 1.0728444816917981e-05,
+          "max_speed_so_far": 0.09696905314922333
+        },
+        {
+          "step": 1750,
+          "relative_mass_drift": 1.0563225606351585e-05,
+          "max_speed_so_far": 0.106883704662323
+        },
+        {
+          "step": 2000,
+          "relative_mass_drift": 8.301318887778123e-06,
+          "max_speed_so_far": 0.19619746506214142
+        }
+      ]
+    }
+  ]
+}

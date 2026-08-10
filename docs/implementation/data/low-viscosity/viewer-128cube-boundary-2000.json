@@ -1,0 +1,129 @@
+{
+  "scene": "viewer-viscosity-boundary-gate",
+  "config": {
+    "resolution_x": 128,
+    "resolution_y": 128,
+    "resolution_z": 128,
+    "column_end_x": 31,
+    "column_end_y": 125,
+    "cell_size": 0.1,
+    "time_step": 1.0,
+    "lattice_gravity_y": -5e-05,
+    "lattice_viscosities": [
+      0.02,
+      0.01
+    ],
+    "steps": 2000,
+    "sample_every": 250,
+    "gas_density": 1.0,
+    "max_lattice_speed": 0.2,
+    "device": "cuda:0"
+  },
+  "cases": [
+    {
+      "lattice_viscosity": 0.02,
+      "shear_omega": 1.7857142857142856,
+      "lattice_gravity_y": -5e-05,
+      "completed": true,
+      "completed_steps": 2000,
+      "failure": null,
+      "maximum_speed": 0.14437542855739594,
+      "relative_mass_drift": 8.478734453396457e-06,
+      "elapsed_seconds": 4.970650974661112,
+      "steps_per_second": 402.36178524611773,
+      "accepted": true,
+      "samples": [
+        {
+          "step": 250,
+          "relative_mass_drift": 2.878625315291517e-06,
+          "max_speed_so_far": 0.029370073229074478
+        },
+        {
+          "step": 500,
+          "relative_mass_drift": 8.166131598736748e-06,
+          "max_speed_so_far": 0.04385354742407799
+        },
+        {
+          "step": 750,
+          "relative_mass_drift": 1.1256192020732441e-05,
+          "max_speed_so_far": 0.0577135905623436
+        },
+        {
+          "step": 1000,
+          "relative_mass_drift": 1.1260143599875535e-05,
+          "max_speed_so_far": 0.0665067583322525
+        },
+        {
+          "step": 1250,
+          "relative_mass_drift": 1.0884153028903669e-05,
+          "max_speed_so_far": 0.07565342634916306
+        },
+        {
+          "step": 1500,
+          "relative_mass_drift": 1.037544557003373e-05,
+          "max_speed_so_far": 0.08439706265926361
+        },
+        {
+          "step": 1750,
+          "relative_mass_drift": 1.0104519892634135e-05,
+          "max_speed_so_far": 0.09331455826759338
+        },
+        {
+          "step": 2000,
+          "relative_mass_drift": 8.478734453396457e-06,
+          "max_speed_so_far": 0.14437542855739594
+        }
+      ]
+    },
+    {
+      "lattice_viscosity": 0.01,
+      "shear_omega": 1.8867924528301885,
+      "lattice_gravity_y": -5e-05,
+      "completed": false,
+      "completed_steps": 1987,
+      "failure": "wall HOME-Free speed 0.20556478202342987 exceeds 0.2",
+      "maximum_speed": 0.19940873980522156,
+      "relative_mass_drift": 9.252949944021218e-06,
+      "elapsed_seconds": 4.931467346847057,
+      "steps_per_second": 402.92267194476955,
+      "accepted": false,
+      "samples": [
+        {
+          "step": 250,
+          "relative_mass_drift": 3.1907809191959496e-06,
+          "max_speed_so_far": 0.031119244173169136
+        },
+        {
+          "step": 500,
+          "relative_mass_drift": 8.228157180335525e-06,
+          "max_speed_so_far": 0.048990536481142044
+        },
+        {
+          "step": 750,
+          "relative_mass_drift": 1.1374521903654816e-05,
+          "max_speed_so_far": 0.06586594879627228
+        },
+        {
+          "step": 1000,
+          "relative_mass_drift": 1.1826690991273304e-05,
+          "max_speed_so_far": 0.07774492353200912
+        },
+        {
+          "step": 1250,
+          "relative_mass_drift": 1.139423852597025e-05,
+          "max_speed_so_far": 0.09152337163686752
+        },
+        {
+          "step": 1500,
+          "relative_mass_drift": 1.1271571608711506e-05,
+          "max_speed_so_far": 0.10160617530345917
+        },
+        {
+          "step": 1750,
+          "relative_mass_drift": 1.0947362664309288e-05,
+          "max_speed_so_far": 0.11365131288766861
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+.................................................................. [ 12%]
+................................................................................ [ 28%]
+....................................................... [ 38%]
+........................................................................ [ 52%]
+.................................................... [ 62%]
+........................................................................ [ 76%]
+...........................................................................................................................                [100%]
+=============================== warnings summary ===============================
+newton/tests/test_home_free_column_impact.py: 1132 warnings
+newton/tests/test_home_free_entry_exit.py: 728 warnings
+newton/tests/test_home_free_floating.py: 104 warnings
+newton/tests/test_home_free_geometric_domain.py: 24 warnings
+newton/tests/test_home_free_geometric_entry_exit.py: 1168 warnings
+newton/tests/test_home_free_light_heavy.py: 480 warnings
+newton/tests/test_home_free_offline_acceptance.py: 940 warnings
+newton/tests/test_home_free_offline_scene_config.py: 8 warnings
+newton/tests/test_home_free_rigid_coupling.py: 20 warnings
+newton/tests/test_home_lbm_fsi_momentum.py: 2 warnings
+newton/tests/test_home_lbm_lubrication.py: 2 warnings
+newton/tests/test_home_lbm_rigid_coupling.py: 5 warnings
+newton/tests/test_home_lbm_settling.py: 5 warnings
+newton/tests/home_rebuild/test_home_free_fsi_viewer.py: 2 warnings
+  /root/autodl-tmp/LBM-Fluid-Structure-Interaction/wanphys/_src/rigid/model.py:433: DeprecationWarning: as_newton_model() 是临时内部接口，将在 Newton 移除后失效。请使用 WanPhys 原生 API 代替。
+    self.as_newton_model()._add_custom_attributes(
+
+newton/tests/test_home_free_column_impact.py: 4 warnings
+newton/tests/test_home_free_entry_exit.py: 4 warnings
+newton/tests/test_home_free_floating.py: 4 warnings
+newton/tests/test_home_free_geometric_domain.py: 6 warnings
+newton/tests/test_home_free_geometric_entry_exit.py: 4 warnings
+newton/tests/test_home_free_light_heavy.py: 4 warnings
+newton/tests/test_home_free_offline_acceptance.py: 4 warnings
+newton/tests/test_home_free_offline_scene_config.py: 4 warnings
+newton/tests/test_home_free_rigid_coupling.py: 5 warnings
+newton/tests/test_home_lbm_fsi_momentum.py: 2 warnings
+newton/tests/test_home_lbm_lubrication.py: 1 warning
+newton/tests/test_home_lbm_rigid_coupling.py: 3 warnings
+newton/tests/test_home_lbm_settling.py: 5 warnings
+newton/tests/home_rebuild/test_home_free_fsi_viewer.py: 1 warning
+  /root/autodl-tmp/LBM-Fluid-Structure-Interaction/wanphys/_src/rigid/domain.py:111: DeprecationWarning: control() 直接返回 newton.Control 对象，属于临时内部接口。后续将由 WanPhys 原生 Control 抽象替代。
+    self._control = self._model.control()
+
+newton/tests/test_home_free_column_impact.py: 4 warnings
+newton/tests/test_home_free_entry_exit.py: 4 warnings
+newton/tests/test_home_free_floating.py: 4 warnings
+newton/tests/test_home_free_geometric_domain.py: 6 warnings
+newton/tests/test_home_free_geometric_entry_exit.py: 4 warnings
+newton/tests/test_home_free_light_heavy.py: 4 warnings
+newton/tests/test_home_free_offline_acceptance.py: 4 warnings
+newton/tests/test_home_free_offline_scene_config.py: 4 warnings
+newton/tests/test_home_free_rigid_coupling.py: 5 warnings
+newton/tests/test_home_lbm_fsi_momentum.py: 2 warnings
+newton/tests/test_home_lbm_lubrication.py: 1 warning
+newton/tests/test_home_lbm_rigid_coupling.py: 3 warnings
+newton/tests/test_home_lbm_settling.py: 5 warnings
+newton/tests/home_rebuild/test_home_free_fsi_viewer.py: 1 warning
+  /root/autodl-tmp/LBM-Fluid-Structure-Interaction/wanphys/_src/rigid/model.py:473: DeprecationWarning: _newton_backend 是临时内部接口，供迁移与调试使用。Newton 移除后此属性将不再可用，请勿在业务代码中依赖。
+    return self._newton_backend.control()
+
+newton/tests/test_home_free_column_impact.py: 4 warnings
+newton/tests/test_home_free_entry_exit.py: 4 warnings
+newton/tests/test_home_free_floating.py: 4 warnings
+newton/tests/test_home_free_geometric_domain.py: 6 warnings
+newton/tests/test_home_free_geometric_entry_exit.py: 4 warnings
+newton/tests/test_home_free_light_heavy.py: 4 warnings
+newton/tests/test_home_free_offline_acceptance.py: 4 warnings
+newton/tests/test_home_free_offline_scene_config.py: 4 warnings
+newton/tests/test_home_free_rigid_coupling.py: 5 warnings
+newton/tests/test_home_lbm_fsi_momentum.py: 2 warnings
+newton/tests/test_home_lbm_lubrication.py: 1 warning
+newton/tests/test_home_lbm_rigid_coupling.py: 3 warnings
+newton/tests/test_home_lbm_settling.py: 5 warnings
+newton/tests/home_rebuild/test_home_free_fsi_viewer.py: 2 warnings
+  /root/autodl-tmp/LBM-Fluid-Structure-Interaction/wanphys/_src/rigid/model.py:533: DeprecationWarning: as_newton_model() 是临时内部接口，将在 Newton 移除后失效。请使用 WanPhys 原生 API 代替。
+    return self.as_newton_model()
+
+newton/tests/home_rebuild/test_home_free_fsi_viewer.py::test_fsi_viewer_null_advances_one_coupled_step
+  /root/autodl-tmp/LBM-Fluid-Structure-Interaction/wanphys/examples/lbm/home_rebuild/fsi/sphere_entry_3d_viewer.py:153: DeprecationWarning: setup_viewer() 依赖 Newton Viewer API，属于临时内部接口。待 WanPhys 自有 Viewer 适配层完成后将移除。
+    self.rigid.model.setup_viewer(self.viewer)
+
+newton/tests/home_rebuild/test_home_free_fsi_viewer.py::test_fsi_viewer_null_advances_one_coupled_step
+  /root/autodl-tmp/LBM-Fluid-Structure-Interaction/wanphys/_src/rigid/model.py:491: DeprecationWarning: _newton_backend 是临时内部接口，供迁移与调试使用。Newton 移除后此属性将不再可用，请勿在业务代码中依赖。
+    viewer.set_model(self._newton_backend)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+520 passed, 4776 warnings, 185 subtests passed in 475.59s (0:07:55)

@@ -1,0 +1,47 @@
+{
+  "stage": "B2-raw-Courant-shadow-PLIC-VOF",
+  "configuration": {
+    "resolution": [
+      128,
+      128,
+      128
+    ],
+    "requested_steps": 200,
+    "completed_shadow_steps": 200,
+    "split_orders": [
+      [
+        0,
+        1,
+        2
+      ],
+      [
+        2,
+        1,
+        0
+      ]
+    ]
+  },
+  "environment": {
+    "python": "3.12.3",
+    "warp": "1.12.0",
+    "device": "cuda:0"
+  },
+  "baseline_state_unchanged_by_shadow": true,
+  "shadow_failure_step": null,
+  "shadow_error": null,
+  "drift_violation_count": 199,
+  "maximum_active_divergence": 0.004701550584286451,
+  "maximum_absolute_step_volume_drift": 0.00017152752693179083,
+  "final_cumulative_shadow_volume_drift": 0.004877536549530669,
+  "shadow_minimum_fill": 0.0,
+  "shadow_maximum_fill": 1.0,
+  "baseline_maximum_speed": 0.021529527381062508,
+  "baseline_relative_total_mass_drift": 1.7878902898368386e-06,
+  "elapsed_seconds": 14.752680368721485,
+  "verification_seconds": 0.5906633958220482,
+  "baseline_seconds": 0.4797314964234829,
+  "shadow_seconds": 13.681555878371,
+  "baseline_ms_per_step": 2.3986574821174145,
+  "shadow_ms_per_completed_step": 68.407779391855,
+  "combined_ms_per_step": 70.80643687397242
+}

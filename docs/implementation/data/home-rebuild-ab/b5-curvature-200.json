@@ -1,0 +1,47 @@
+{
+  "stage": "B5-read-only-bulk-3D-curvature",
+  "configuration": {
+    "resolution": [
+      128,
+      128,
+      128
+    ],
+    "steps": 200,
+    "observer_interval": 10,
+    "physical_viscosity": 0.0002,
+    "physical_gravity_y": -5e-06,
+    "lattice_viscosity": 0.019999999999999997,
+    "lattice_acceleration": [
+      0.0,
+      -5e-05,
+      0.0
+    ],
+    "wall_contact_policy": "reported-and-skipped-until-wetting-stage"
+  },
+  "environment": {
+    "python": "3.12.3",
+    "warp": "1.12.0",
+    "device": "cuda:0"
+  },
+  "state_unchanged_by_curvature": true,
+  "observation_count": 20,
+  "maximum_required_cell_count": 16698,
+  "maximum_valid_cell_count": 16142,
+  "maximum_wall_contact_skipped_count": 556,
+  "maximum_insufficient_neighbor_count": 0,
+  "maximum_ill_conditioned_count": 0,
+  "maximum_invalid_curvature_count": 0,
+  "minimum_bulk_completeness": 1.0,
+  "maximum_absolute_curvature": 0.47625842690467834,
+  "maximum_active_speed": 0.021529527381062508,
+  "relative_total_mass_drift": 1.7878902898368386e-06,
+  "elapsed_seconds": 5.595621481537819,
+  "verification_seconds": 0.5923822894692421,
+  "operational_seconds": 5.003239192068577,
+  "geometry_seconds": 0.05551747977733612,
+  "curvature_seconds": 4.42323362082243,
+  "curvature_ms_per_observation": 221.16168104112148,
+  "combined_ms_per_step": 25.016195960342884,
+  "combined_mlups": 83.83177055874226,
+  "solve_estimated_seconds": 0.524488091468811
+}

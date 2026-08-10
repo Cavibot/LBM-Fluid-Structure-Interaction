@@ -51,6 +51,14 @@ from .fluid_grid import (
     LbmModel,
     LbmSolver,
     LbmState,
+    HomeLbmModel,
+    HomeLbmDomain,
+    HomeLbmSolver,
+    HomeLbmState,
+    HomeFreeBackend,
+    HomeFreeDomain,
+    HomeFreeLegacyDomain,
+    create_home_free_domain,
 )
 
 __all__ = [
@@ -85,8 +93,16 @@ __all__ = [
     "LbmDomain",
     "LbmSolver",
     "LbmState",
+    # HOME-LBM and geometric HOME-Free
+    "HomeLbmModel",
+    "HomeLbmDomain",
+    "HomeLbmSolver",
+    "HomeLbmState",
+    "HomeFreeBackend",
+    "HomeFreeDomain",
+    "HomeFreeLegacyDomain",
+    "create_home_free_domain",
 ]
-
 
 
 

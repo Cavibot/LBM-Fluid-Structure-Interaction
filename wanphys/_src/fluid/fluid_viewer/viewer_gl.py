@@ -743,11 +743,17 @@ class ScreenSpaceFluidRenderer:
         gl.glBindVertexArray(0)
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
 
-        self._particle_buffer = wp.RegisteredGLBuffer(
-            gl_buffer_id=_as_gl_id(self._particle_vbo),
-            device=self.device,
-            flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
-        )
+        try:
+            self._particle_buffer = wp.RegisteredGLBuffer(
+                gl_buffer_id=_as_gl_id(self._particle_vbo),
+                device=self.device,
+                flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
+            )
+        except Exception:
+            # Software OpenGL contexts (for example TigerVNC/llvmpipe) cannot
+            # register their buffers with CUDA. Density rendering has a CPU
+            # texture-upload fallback and does not need the particle buffer.
+            self._particle_buffer = None
 
         self._depth_fbo = gl.GLuint()
         gl.glGenFramebuffers(1, self._depth_fbo)
@@ -948,11 +954,14 @@ class ScreenSpaceFluidRenderer:
                 None, gl.GL_DYNAMIC_DRAW,
             )
             gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
-            self._density_pbo_warp = wp.RegisteredGLBuffer(
-                gl_buffer_id=_as_gl_id(self._density_pbo),
-                device=self.device,
-                flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
-            )
+            try:
+                self._density_pbo_warp = wp.RegisteredGLBuffer(
+                    gl_buffer_id=_as_gl_id(self._density_pbo),
+                    device=self.device,
+                    flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
+                )
+            except Exception:
+                self._density_pbo_warp = None
             self._density_pbo_capacity = total_cells
 
         # --- GPU → PBO via wp.copy (no CPU involvement) ------------------

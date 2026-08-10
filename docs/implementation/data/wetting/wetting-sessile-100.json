@@ -1,0 +1,56 @@
+[
+  {
+    "theta": 60.0,
+    "initial": {
+      "volume": 524.1201877221465,
+      "bottom_area": 122.68822779506445,
+      "bottom_rms_radius": 4.489526262305299,
+      "height": 7
+    },
+    "final": {
+      "volume": 523.9759050854245,
+      "bottom_area": 123.13412902754499,
+      "bottom_rms_radius": 4.496596484046308,
+      "height": 7
+    },
+    "relative_volume_drift": -0.0002752854022834764,
+    "max_speed": 0.0004972988972440362,
+    "max_wetting_cells": 88
+  },
+  {
+    "theta": 90.0,
+    "initial": {
+      "volume": 524.1201877221465,
+      "bottom_area": 122.68822779506445,
+      "bottom_rms_radius": 4.489526262305299,
+      "height": 7
+    },
+    "final": {
+      "volume": 523.9671060139572,
+      "bottom_area": 123.08068789727986,
+      "bottom_rms_radius": 4.495418661160409,
+      "height": 7
+    },
+    "relative_volume_drift": -0.0002920736727479406,
+    "max_speed": 0.0004991923342458904,
+    "max_wetting_cells": 80
+  },
+  {
+    "theta": 120.0,
+    "initial": {
+      "volume": 524.1201877221465,
+      "bottom_area": 122.68822779506445,
+      "bottom_rms_radius": 4.489526262305299,
+      "height": 7
+    },
+    "final": {
+      "volume": 523.9331009253801,
+      "bottom_area": 122.48566928040236,
+      "bottom_rms_radius": 4.484749571201616,
+      "height": 7
+    },
+    "relative_volume_drift": -0.0003569539986228517,
+    "max_speed": 0.0005500082625076175,
+    "max_wetting_cells": 82
+  }
+]

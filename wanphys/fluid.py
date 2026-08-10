@@ -13,6 +13,14 @@ from wanphys._src.fluid import (
     ParticleFluidModel,
     ParticleFluidSolverBase,
     ParticleFluidState,
+    HomeLbmModel,
+    HomeLbmDomain,
+    HomeLbmSolver,
+    HomeLbmState,
+    HomeFreeBackend,
+    HomeFreeDomain,
+    HomeFreeLegacyDomain,
+    create_home_free_domain,
 )
 
 __all__ = [
@@ -26,4 +34,13 @@ __all__ = [
     "ParticleFluidState",
     "ParticleFluidSolverBase",
     "ParticleFluidDomain",
+    # HOME-LBM and geometric HOME-Free
+    "HomeLbmModel",
+    "HomeLbmDomain",
+    "HomeLbmSolver",
+    "HomeLbmState",
+    "HomeFreeBackend",
+    "HomeFreeDomain",
+    "HomeFreeLegacyDomain",
+    "create_home_free_domain",
 ]

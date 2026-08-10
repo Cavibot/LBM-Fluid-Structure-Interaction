@@ -1,0 +1,40 @@
+{
+  "stage": "B1-read-only-PLIC",
+  "configuration": {
+    "resolution": [
+      128,
+      128,
+      128
+    ],
+    "steps": 1000,
+    "observer_interval": 10,
+    "physical_viscosity": 0.0002,
+    "physical_gravity_y": -5e-06,
+    "lattice_viscosity": 0.019999999999999997,
+    "lattice_acceleration": [
+      0.0,
+      -5e-05,
+      0.0
+    ]
+  },
+  "environment": {
+    "python": "3.12.3",
+    "warp": "1.12.0",
+    "device": "cuda:0"
+  },
+  "state_unchanged_by_plic": true,
+  "observation_count": 100,
+  "invalid_interface_count": 0,
+  "maximum_interface_cell_count": 26108,
+  "maximum_interface_area": 1.9257104396820068,
+  "maximum_active_speed": 0.0665067583322525,
+  "relative_total_mass_drift": 1.1260143599875535e-05,
+  "elapsed_seconds": 3.183393694460392,
+  "verification_seconds": 0.56139125674963,
+  "operational_seconds": 2.622002437710762,
+  "observation_seconds": 0.27102503925561905,
+  "solve_estimated_seconds": 2.350977398455143,
+  "combined_ms_per_step": 2.622002437710762,
+  "observer_ms_per_observation": 2.7102503925561905,
+  "combined_mlups": 799.8283944506923
+}

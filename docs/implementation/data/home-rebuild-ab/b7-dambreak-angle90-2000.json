@@ -1,0 +1,52 @@
+{
+  "stage": "B7-contact-angle-wetting",
+  "scenario": "dambreak",
+  "configuration": {
+    "resolution": [
+      128,
+      128,
+      128
+    ],
+    "requested_steps": 2000,
+    "lattice_surface_tension": 0.0005,
+    "physical_surface_tension": 5.000000000000001e-07,
+    "lattice_viscosity": 0.019999999999999997,
+    "lattice_acceleration": [
+      0.0,
+      -5e-05,
+      0.0
+    ],
+    "wall_contact_policy": "configured-contact-angle",
+    "contact_angle_degrees": 90.0
+  },
+  "environment": {
+    "python": "3.12.3",
+    "warp": "1.12.0",
+    "device": "cuda:0"
+  },
+  "last_valid_step": 390,
+  "failure": "surface tension has 2 unresolved bulk curvatures",
+  "maximum_active_speed": 0.03159897401928902,
+  "minimum_interface_gas_density": 0.9942814707756042,
+  "maximum_interface_gas_density": 1.0027730464935303,
+  "maximum_wall_contact_skipped_count": 0,
+  "maximum_wall_contact_fitted_count": 4404,
+  "maximum_wetting_cell_count": 810,
+  "relative_total_mass_drift": 4.420030467740001e-06,
+  "initial_shape": {
+    "volume": 498141.0,
+    "centroid_x": 16.254963955988366,
+    "centroid_y": 63.254963955988366,
+    "centroid_z": 63.5,
+    "shape_anisotropy": 14.988919054699652
+  },
+  "final_shape": {
+    "volume": 504274.1724781873,
+    "centroid_x": 16.48086180276657,
+    "centroid_y": 60.8381938510502,
+    "centroid_z": 63.5000064307607,
+    "shape_anisotropy": 14.430440595284871
+  },
+  "elapsed_seconds": 2.5218414589762688,
+  "ms_per_completed_step": 6.466260151221202
+}

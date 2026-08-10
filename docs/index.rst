@@ -55,6 +55,7 @@ Newton Physics
    FAQ <faq>
    Migration Guide <migration>
    Integrations <integrations/index>
+   Current Project Implementation <implementation/index>
 
 
 .. toctree::

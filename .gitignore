@@ -53,10 +53,14 @@ wanphys/examples/output/*.gif
 ply_output/
 
 # Personal notes and agent run caches
+.codegraph/
 .docs/
 .omo/
+LBM论文资料整理/
+tmp/
 
 *.DS_Store
+._*
 nul
 .stfolder/
 

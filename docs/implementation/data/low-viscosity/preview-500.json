@@ -1,0 +1,145 @@
+{
+  "scene": "home-free-linkwise-low-viscosity-scan",
+  "config": {
+    "resolution_x": 64,
+    "resolution_y": 56,
+    "resolution_z": 16,
+    "column_end_x": 16,
+    "column_end_y": 35,
+    "cell_size": 0.1,
+    "time_step": 1.0,
+    "lattice_gravity_y": -5e-05,
+    "lattice_viscosities": [
+      0.02,
+      0.01,
+      0.005
+    ],
+    "steps": 500,
+    "sample_every": 100,
+    "gas_density": 1.0,
+    "max_lattice_speed": 0.2,
+    "device": "cuda:0"
+  },
+  "cases": [
+    {
+      "lattice_viscosity": 0.02,
+      "shear_omega": 1.7857142857142856,
+      "lattice_gravity_y": -5e-05,
+      "completed": true,
+      "completed_steps": 500,
+      "failure": null,
+      "maximum_speed": 0.02564762532711029,
+      "relative_mass_drift": 3.1245207071663595e-06,
+      "elapsed_seconds": 0.43377023190259933,
+      "steps_per_second": 1152.6839861898873,
+      "accepted": true,
+      "samples": [
+        {
+          "step": 100,
+          "relative_mass_drift": 6.521871292503226e-07,
+          "max_speed_so_far": 0.006252002902328968
+        },
+        {
+          "step": 200,
+          "relative_mass_drift": 1.4017746412097625e-06,
+          "max_speed_so_far": 0.011830579489469528
+        },
+        {
+          "step": 300,
+          "relative_mass_drift": 1.947860229210664e-06,
+          "max_speed_so_far": 0.017779242247343063
+        },
+        {
+          "step": 400,
+          "relative_mass_drift": 2.5912977422934356e-06,
+          "max_speed_so_far": 0.022532284259796143
+        },
+        {
+          "step": 500,
+          "relative_mass_drift": 3.1245207071663595e-06,
+          "max_speed_so_far": 0.02564762532711029
+        }
+      ]
+    },
+    {
+      "lattice_viscosity": 0.01,
+      "shear_omega": 1.8867924528301885,
+      "lattice_gravity_y": -5e-05,
+      "completed": true,
+      "completed_steps": 500,
+      "failure": null,
+      "maximum_speed": 0.031935688108205795,
+      "relative_mass_drift": 1.8741042249107413e-06,
+      "elapsed_seconds": 0.4122003484517336,
+      "steps_per_second": 1213.0023710024768,
+      "accepted": true,
+      "samples": [
+        {
+          "step": 100,
+          "relative_mass_drift": 6.664689959127567e-07,
+          "max_speed_so_far": 0.00696023553609848
+        },
+        {
+          "step": 200,
+          "relative_mass_drift": 1.5460754687114453e-06,
+          "max_speed_so_far": 0.013303549028933048
+        },
+        {
+          "step": 300,
+          "relative_mass_drift": 1.589417136674882e-06,
+          "max_speed_so_far": 0.02067326009273529
+        },
+        {
+          "step": 400,
+          "relative_mass_drift": 1.7803578430800916e-06,
+          "max_speed_so_far": 0.027282053604722023
+        },
+        {
+          "step": 500,
+          "relative_mass_drift": 1.8741042249107413e-06,
+          "max_speed_so_far": 0.031935688108205795
+        }
+      ]
+    },
+    {
+      "lattice_viscosity": 0.005,
+      "shear_omega": 1.941747572815534,
+      "lattice_gravity_y": -5e-05,
+      "completed": true,
+      "completed_steps": 500,
+      "failure": null,
+      "maximum_speed": 0.03556475043296814,
+      "relative_mass_drift": 1.0543671151956075e-06,
+      "elapsed_seconds": 0.40217991173267365,
+      "steps_per_second": 1243.2246997267898,
+      "accepted": true,
+      "samples": [
+        {
+          "step": 100,
+          "relative_mass_drift": 6.919459330944507e-07,
+          "max_speed_so_far": 0.00778940599411726
+        },
+        {
+          "step": 200,
+          "relative_mass_drift": 1.6155119581371884e-06,
+          "max_speed_so_far": 0.014047161675989628
+        },
+        {
+          "step": 300,
+          "relative_mass_drift": 1.3718686995413885e-06,
+          "max_speed_so_far": 0.022713713347911835
+        },
+        {
+          "step": 400,
+          "relative_mass_drift": 1.1972698467457238e-06,
+          "max_speed_so_far": 0.030120767652988434
+        },
+        {
+          "step": 500,
+          "relative_mass_drift": 1.0543671151956075e-06,
+          "max_speed_so_far": 0.03556475043296814
+        }
+      ]
+    }
+  ]
+}

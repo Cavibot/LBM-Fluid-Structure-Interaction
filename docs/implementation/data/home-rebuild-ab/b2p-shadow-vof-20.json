@@ -1,0 +1,51 @@
+{
+  "stage": "B2P-projected-shadow-PLIC-VOF",
+  "configuration": {
+    "resolution": [
+      128,
+      128,
+      128
+    ],
+    "requested_steps": 20,
+    "completed_shadow_steps": 12,
+    "split_orders": [
+      [
+        0,
+        1,
+        2
+      ],
+      [
+        2,
+        1,
+        0
+      ]
+    ],
+    "project_courant": true
+  },
+  "environment": {
+    "python": "3.12.3",
+    "warp": "1.12.0",
+    "device": "cuda:0"
+  },
+  "baseline_state_unchanged_by_shadow": true,
+  "shadow_failure_step": 13,
+  "shadow_error": "FloatingPointError: Courant PCG failed: invalid=0, residual=0.00011287902637319578, divergence=5.326946848072112e-07",
+  "drift_violation_count": 0,
+  "maximum_active_divergence": 0.004701550584286451,
+  "maximum_projected_divergence": 4.1707244236022234e-07,
+  "maximum_projection_iterations": 320,
+  "maximum_face_correction": 0.010083519853651524,
+  "maximum_absolute_step_volume_drift": 6.064611646896463e-09,
+  "final_cumulative_shadow_volume_drift": -4.2672324238659226e-08,
+  "shadow_minimum_fill": 0.0,
+  "shadow_maximum_fill": 1.0,
+  "baseline_maximum_speed": 0.013398275710642338,
+  "baseline_relative_total_mass_drift": 4.4715549481197875e-08,
+  "elapsed_seconds": 2.0450981073081493,
+  "verification_seconds": 0.3033863380551338,
+  "baseline_seconds": 0.055797282606363297,
+  "shadow_seconds": 1.6857341080904007,
+  "baseline_ms_per_step": 2.789864130318165,
+  "shadow_ms_per_completed_step": 140.47784234086672,
+  "combined_ms_per_step": 87.0765695348382
+}

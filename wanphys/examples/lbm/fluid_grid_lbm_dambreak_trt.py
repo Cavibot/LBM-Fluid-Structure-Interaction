@@ -84,7 +84,31 @@ class TrtDamBreak:
         self.domain = LbmDomain(self.model); self.domain.create_state()
         self.sim_dt = FRAME_DT / SIM_SUBSTEPS; self.sim_time = 0.0
 
-        state = self.domain.state; stride = n*n*n; dam_x = int(n*DAM_X_FRAC)
+        self._reset_state()
+
+        self.ssfr = None
+        if hasattr(viewer, "register_post_render_callback"):
+            self.ssfr = ScreenSpaceFluidRenderer(viewer=viewer, max_particles=1, particle_radius=0.01,
+                                                   device=self.model._device)
+            viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
+        if hasattr(viewer, "renderer"):
+            viewer.renderer.register_key_press(self._on_key_press)
+        self.frame_count = 0; self._last_ms = 0.0
+        print("Controls: [Space] unpause  [R] reset  [mouse] orbit")
+
+    def _reset_state(self):
+        """Restore the original dam-break state and gravity ramp."""
+        self.viewer._paused = True
+        self.sim_time = 0.0
+        self.frame_count = 0
+
+        n = int(self.model.nx)
+        stride = n * n * n
+        dam_x = int(n * DAM_X_FRAC)
+        state = self.domain.state
+        state.velocity_x.zero_()
+        state.velocity_y.zero_()
+        state.velocity_z.zero_()
         wp.launch(_init, dim=(n,n,n),
             inputs=[state.f, state.density, dam_x, RHO_WATER, RHO_AIR, 42, n,n,n,stride])
         for a in ['f','density','velocity_x','velocity_y','velocity_z','solid_phi','solid_body_id']:
@@ -101,12 +125,13 @@ class TrtDamBreak:
             self.domain.step(self.sim_dt)
         self.model.gravity_z = target_gz
         wp.synchronize_device(self.model._device)
+        print("Dam-break reset; press Space to run.")
 
-        self.ssfr = ScreenSpaceFluidRenderer(viewer=viewer, max_particles=1, particle_radius=0.01,
-                                               device=self.model._device)
-        viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
-        self.frame_count = 0; self._last_ms = 0.0
-        print("Controls: [Space] unpause  [R] reset  [mouse] orbit")
+    def _on_key_press(self, symbol: int, modifiers: int):
+        import pyglet
+
+        if symbol == pyglet.window.key.R:
+            self._reset_state()
 
     def step(self):
         t0 = time.perf_counter()
@@ -136,7 +161,7 @@ class TrtDamBreak:
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
-        if self.ssfr.available:
+        if self.ssfr is not None and self.ssfr.available:
             self.ssfr.set_density_field(density=self.domain.state.density,
                 grid_origin=(0,0,0), cell_size=DH, threshold=SSFR_THRESHOLD, max_steps=RAY_MARCH_STEPS)
         self.viewer.end_frame()

@@ -241,13 +241,15 @@ class TrtDropletFloor:
         self._init_gas_background()
         self._add_droplet_in_gas()
 
-        self.ssfr: ScreenSpaceFluidRenderer = ScreenSpaceFluidRenderer(
-            viewer=viewer,
-            max_particles=1,
-            particle_radius=0.01,
-            device=self.model._device,
-        )
-        viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
+        self.ssfr: ScreenSpaceFluidRenderer | None = None
+        if hasattr(viewer, "register_post_render_callback"):
+            self.ssfr = ScreenSpaceFluidRenderer(
+                viewer=viewer,
+                max_particles=1,
+                particle_radius=0.01,
+                device=self.model._device,
+            )
+            viewer.register_post_render_callback(lambda v: self.ssfr.render(v))
         self.frame_count: int = 0
         self._last_ms: float = 0.0
         print("Controls: [Space] unpause  [R] reset  [mouse] orbit  [scroll] zoom")
@@ -350,7 +352,7 @@ class TrtDropletFloor:
     def render(self) -> None:
         """Render the current frame via screen-space ray-marching."""
         self.viewer.begin_frame(self.sim_time)
-        if self.ssfr.available:
+        if self.ssfr is not None and self.ssfr.available:
             self.ssfr.set_density_field(
                 density=self.domain.state.density,
                 grid_origin=(0.0, 0.0, 0.0),

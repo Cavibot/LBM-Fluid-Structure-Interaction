@@ -1,0 +1,71 @@
+{
+  "scene": "viewer-low-viscosity-exact-gate",
+  "config": {
+    "resolution_x": 128,
+    "resolution_y": 128,
+    "resolution_z": 128,
+    "column_end_x": 31,
+    "column_end_y": 125,
+    "cell_size": 0.1,
+    "time_step": 1.0,
+    "lattice_gravity_y": -5e-05,
+    "lattice_viscosities": [
+      0.005
+    ],
+    "steps": 2000,
+    "sample_every": 250,
+    "gas_density": 1.0,
+    "max_lattice_speed": 0.2,
+    "device": "cuda:0"
+  },
+  "case": {
+    "lattice_viscosity": 0.005,
+    "shear_omega": 1.941747572815534,
+    "lattice_gravity_y": -5e-05,
+    "completed": false,
+    "completed_steps": 1837,
+    "failure": "wall HOME-Free speed 0.21817034482955933 exceeds 0.2",
+    "maximum_speed": 0.19543331861495972,
+    "relative_mass_drift": 1.2993098230993036e-05,
+    "elapsed_seconds": 4.493150616064668,
+    "steps_per_second": 408.84451846151086,
+    "accepted": false,
+    "samples": [
+      {
+        "step": 250,
+        "relative_mass_drift": 3.694034951059624e-06,
+        "max_speed_so_far": 0.033944401890039444
+      },
+      {
+        "step": 500,
+        "relative_mass_drift": 8.811019812155787e-06,
+        "max_speed_so_far": 0.05281195789575577
+      },
+      {
+        "step": 750,
+        "relative_mass_drift": 1.155267003898927e-05,
+        "max_speed_so_far": 0.07306304574012756
+      },
+      {
+        "step": 1000,
+        "relative_mass_drift": 1.2095702309634826e-05,
+        "max_speed_so_far": 0.08723565191030502
+      },
+      {
+        "step": 1250,
+        "relative_mass_drift": 1.2666861273631553e-05,
+        "max_speed_so_far": 0.09662587195634842
+      },
+      {
+        "step": 1500,
+        "relative_mass_drift": 1.3108655833658636e-05,
+        "max_speed_so_far": 0.11432544142007828
+      },
+      {
+        "step": 1750,
+        "relative_mass_drift": 1.3433936853014787e-05,
+        "max_speed_so_far": 0.12333384901285172
+      }
+    ]
+  }
+}

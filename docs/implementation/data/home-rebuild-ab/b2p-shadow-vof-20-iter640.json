@@ -1,0 +1,52 @@
+{
+  "stage": "B2P-projected-shadow-PLIC-VOF",
+  "configuration": {
+    "resolution": [
+      128,
+      128,
+      128
+    ],
+    "requested_steps": 20,
+    "completed_shadow_steps": 20,
+    "split_orders": [
+      [
+        0,
+        1,
+        2
+      ],
+      [
+        2,
+        1,
+        0
+      ]
+    ],
+    "project_courant": true,
+    "projection_maximum_iterations": 640
+  },
+  "environment": {
+    "python": "3.12.3",
+    "warp": "1.12.0",
+    "device": "cuda:0"
+  },
+  "baseline_state_unchanged_by_shadow": true,
+  "shadow_failure_step": null,
+  "shadow_error": null,
+  "drift_violation_count": 0,
+  "maximum_active_divergence": 0.004701550584286451,
+  "maximum_projected_divergence": 2.42325768340379e-07,
+  "maximum_projection_iterations": 640,
+  "maximum_face_correction": 0.010083517991006374,
+  "maximum_absolute_step_volume_drift": 9.81080476468097e-09,
+  "final_cumulative_shadow_volume_drift": -1.0336492449777883e-07,
+  "shadow_minimum_fill": 0.0,
+  "shadow_maximum_fill": 1.0,
+  "baseline_maximum_speed": 0.013398275710642338,
+  "baseline_relative_total_mass_drift": 4.4715549481197875e-08,
+  "elapsed_seconds": 4.5170995108783245,
+  "verification_seconds": 0.58196210116148,
+  "baseline_seconds": 0.05551306530833244,
+  "shadow_seconds": 3.879504706710577,
+  "baseline_ms_per_step": 2.775653265416622,
+  "shadow_ms_per_completed_step": 193.97523533552885,
+  "combined_ms_per_step": 196.75088860094547
+}
