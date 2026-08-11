@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import numpy as np
 import warp as wp
 
 from . import constants as C
@@ -273,27 +272,84 @@ def ccl_apply_renumber_kernel(
         labels[tid] = remap[lab]
 
 
+@wp.kernel
+def ccl_pack_u8_3d_to_flat_kernel(
+    src: wp.array3d(dtype=wp.uint8),
+    dst: wp.array(dtype=wp.uint8),
+    nx: int,
+    ny: int,
+    nz: int,
+):
+    """Pack ``array3d[x,y,z]`` → flat x-fastest ``uint8`` (device-side)."""
+    x, y, z = wp.tid()
+    if x >= nx or y >= ny or z >= nz:
+        return
+    dst[_flat_idx(x, y, z, nx, ny)] = src[x, y, z]
+
+
+@wp.kernel
+def ccl_unpack_i32_flat_to_3d_kernel(
+    src: wp.array(dtype=wp.int32),
+    dst: wp.array3d(dtype=wp.int32),
+    nx: int,
+    ny: int,
+    nz: int,
+):
+    """Unpack flat x-fastest ``int32`` → ``array3d[x,y,z]`` (device-side)."""
+    x, y, z = wp.tid()
+    if x >= nx or y >= ny or z >= nz:
+        return
+    dst[x, y, z] = src[_flat_idx(x, y, z, nx, ny)]
+
+
+@wp.kernel
+def ccl_mark_labels_present_kernel(
+    labels: wp.array(dtype=wp.int32),
+    present: wp.array(dtype=wp.int32),
+    n: int,
+):
+    """Mark which provisional label ids appear (``present[lab]=1``)."""
+    tid = wp.tid()
+    if tid >= n:
+        return
+    lab = labels[tid]
+    if lab > 0:
+        present[lab] = 1
+
+
+@wp.kernel
+def ccl_build_dense_remap_kernel(
+    present: wp.array(dtype=wp.int32),
+    scanned: wp.array(dtype=wp.int32),
+    remap: wp.array(dtype=wp.int32),
+    n_slots: int,
+):
+    """Build dense remap: ``new_id = exclusive_scan[lab] + 1`` if present."""
+    lab = wp.tid()
+    if lab >= n_slots:
+        return
+    if present[lab] != 0:
+        remap[lab] = scanned[lab] + 1
+    else:
+        remap[lab] = 0
+
+
+@wp.kernel
+def ccl_count_from_scan_kernel(
+    present: wp.array(dtype=wp.int32),
+    scanned: wp.array(dtype=wp.int32),
+    out_count: wp.array(dtype=wp.int32),
+    last_idx: int,
+):
+    """``label_num = exclusive_scan[last] + present[last]``."""
+    if wp.tid() != 0:
+        return
+    out_count[0] = scanned[last_idx] + present[last_idx]
+
+
 # ---------------------------------------------------------------------------
-# Host-side CCL driver
+# Device CCL driver (no full-field host round-trips)
 # ---------------------------------------------------------------------------
-
-
-def _array3d_to_flat_uint8(arr3d: wp.array3d, nx: int, ny: int, nz: int) -> wp.array:
-    """Convert array3d[x,y,z] → flat x-fastest uint8."""
-    host = arr3d.numpy()
-    flat = np.asfortranarray(host).ravel(order="F").astype(np.uint8, copy=False)
-    return wp.array(flat, dtype=wp.uint8, device=arr3d.device)
-
-
-def _array3d_to_flat_int32(arr3d: wp.array3d, nx: int, ny: int, nz: int) -> wp.array:
-    host = arr3d.numpy()
-    flat = np.asfortranarray(host).ravel(order="F").astype(np.int32, copy=False)
-    return wp.array(flat, dtype=wp.int32, device=arr3d.device)
-
-
-def _flat_int32_to_array3d(flat: wp.array, arr3d: wp.array3d, nx: int, ny: int, nz: int) -> None:
-    host = flat.numpy().reshape((nx, ny, nz), order="F")
-    wp.copy(arr3d, wp.array(host, dtype=wp.int32, device=arr3d.device))
 
 
 def connected_component_labeling(
@@ -301,6 +357,9 @@ def connected_component_labeling(
     label_matrix: wp.array3d,
 ) -> int:
     """Run YACCLAB-style CCL and write dense labels 1..N into ``label_matrix``.
+
+    Layout conversion and dense renumber run entirely on device (Warp kernels
+    + ``wp.utils.array_scan``), avoiding full-field ``numpy()`` D↔H copies.
 
     Parameters
     ----------
@@ -317,10 +376,18 @@ def connected_component_labeling(
     nx, ny, nz = int(input_matrix.shape[0]), int(input_matrix.shape[1]), int(input_matrix.shape[2])
     n = nx * ny * nz
     device = input_matrix.device
+    dim3 = (nx, ny, nz)
 
-    img = _array3d_to_flat_uint8(input_matrix, nx, ny, nz)
+    img = wp.empty(n, dtype=wp.uint8, device=device)
     labels = wp.zeros(n, dtype=wp.int32, device=device)
     last_cube_fg = wp.zeros(1, dtype=wp.uint8, device=device)
+
+    wp.launch(
+        ccl_pack_u8_3d_to_flat_kernel,
+        dim=dim3,
+        inputs=[input_matrix, img, nx, ny, nz],
+        device=device,
+    )
 
     grid = ((nx + 1) // 2, (ny + 1) // 2, (nz + 1) // 2)
 
@@ -339,27 +406,48 @@ def connected_component_labeling(
         device=device,
     )
 
-    # Dense renumber on host (≡ thrust::sort + unique + renumber_1/2)
-    host_labels = labels.numpy()
-    unique = np.unique(host_labels)
-    # unique includes 0 (background). Dense map: old_label → 1..N
-    pos = unique[unique > 0]
-    label_num = int(pos.size)
-    if label_num > 0:
-        max_lab = int(host_labels.max())
-        remap_host = np.zeros(max_lab + 1, dtype=np.int32)
-        for new_id, old_id in enumerate(pos, start=1):
-            remap_host[int(old_id)] = new_id
-        remap = wp.array(remap_host, dtype=wp.int32, device=device)
-        wp.launch(
-            ccl_apply_renumber_kernel,
-            dim=n,
-            inputs=[labels, remap, n],
-            device=device,
-        )
+    # Dense renumber on device (≡ thrust::sort + unique + renumber_*).
+    # Provisional labels are in 1..n (root+1); slot 0 is background.
+    n_slots = n + 1
+    present = wp.zeros(n_slots, dtype=wp.int32, device=device)
+    wp.launch(
+        ccl_mark_labels_present_kernel,
+        dim=n,
+        inputs=[labels, present, n],
+        device=device,
+    )
+    scanned = wp.empty(n_slots, dtype=wp.int32, device=device)
+    wp.utils.array_scan(present, scanned, inclusive=False)
 
-    _flat_int32_to_array3d(labels, label_matrix, nx, ny, nz)
-    return label_num
+    remap = wp.zeros(n_slots, dtype=wp.int32, device=device)
+    wp.launch(
+        ccl_build_dense_remap_kernel,
+        dim=n_slots,
+        inputs=[present, scanned, remap, n_slots],
+        device=device,
+    )
+    label_num_gpu = wp.zeros(1, dtype=wp.int32, device=device)
+    wp.launch(
+        ccl_count_from_scan_kernel,
+        dim=1,
+        inputs=[present, scanned, label_num_gpu, n],
+        device=device,
+    )
+
+    wp.launch(
+        ccl_apply_renumber_kernel,
+        dim=n,
+        inputs=[labels, remap, n],
+        device=device,
+    )
+    wp.launch(
+        ccl_unpack_i32_flat_to_3d_kernel,
+        dim=dim3,
+        inputs=[labels, label_matrix, nx, ny, nz],
+        device=device,
+    )
+
+    return int(label_num_gpu.numpy()[0])
 
 
 # ---------------------------------------------------------------------------
