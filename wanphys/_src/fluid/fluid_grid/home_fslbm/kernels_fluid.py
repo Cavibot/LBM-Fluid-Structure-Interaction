@@ -1716,22 +1716,17 @@ def _kernel_compute_rho_u(
 def swap_moments_kernel(
     f_mom: wp.array(dtype=float),
     f_mom_post: wp.array(dtype=float),
-    g_mom: wp.array(dtype=float),
-    g_mom_post: wp.array(dtype=float),
     stride: int,
-    gas_stride: int,
 ):
-    """Swap post-collision moments into current arrays.
+    """Copy post-collision HOME moments into current arrays.
 
-    This implements the ``mrSolver3D_step2Kernel`` logical equivalent:
-    at the end of each phase, fMom = fMomPost and gMom = gMomPost.
+    Matches reference ``mrSolver3D_step2Kernel`` which only swaps fMom.
+    Dissolved-gas gMom is swapped inside ``g_handle`` (Phase 1).
     """
     tid = wp.tid()
     if tid < stride:
         for m in range(C.NUM_MOMENTS):
             f_mom[m * stride + tid] = f_mom_post[m * stride + tid]
-        for m in range(C.NUM_DIRS_GAS):
-            g_mom[m * gas_stride + tid] = g_mom_post[m * gas_stride + tid]
 
 
 # ============================================================================

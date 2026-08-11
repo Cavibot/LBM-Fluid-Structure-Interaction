@@ -85,6 +85,16 @@ _BUBBLE_OPTIONAL_FIELDS: dict[str, type] = {
     "bubble_volume": np.float64,
     "bubble_init_volume": np.float64,
     "bubble_rho": np.float64,
+    # Phase 4 gas / foam
+    "g_mom": np.float32,
+    "delta_g": np.float32,
+    "c_value": np.float32,
+    "disjoin_force": np.float32,
+    "pop_in": np.float32,
+    "pop_out": np.float32,
+    "moment_in": np.float32,
+    "moment_out": np.float32,
+    "uxuyuz": np.float32,
 }
 
 

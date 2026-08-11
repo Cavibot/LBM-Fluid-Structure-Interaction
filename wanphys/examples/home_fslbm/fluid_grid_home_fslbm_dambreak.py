@@ -24,7 +24,7 @@ from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRende
 # ---------------------------------------------------------------------------
 # Scene scale aligned with wanphys.examples.lbm.fluid_grid_lbm_dambreak_trt:
 # 128³ lattice, DH=0.02 → world ≈ 2.56 m; dam fills left 25% (full y/z).
-N: int = 64
+N: int = 128
 DH: float = 0.02
 DAM_X_FRAC: float = 0.25
 DAM_Z_FRAC: float = 0.50  # free surface above; avoid ceiling-sealed full-height column

@@ -193,6 +193,29 @@ target_link_libraries(export_bubble_golden
         CUDA::cudart
 )
 
+# ---- export_gas_foam_golden — Phase 4 CMR-MRT gas + foam golden data ----
+add_executable(export_gas_foam_golden
+    ${INC_DIR}/export_gas_foam_golden.cpp
+)
+set_property(TARGET export_gas_foam_golden PROPERTY POSITION_INDEPENDENT_CODE ON)
+set_property(TARGET export_gas_foam_golden PROPERTY CXX_STANDARD 17)
+target_include_directories(export_gas_foam_golden
+    PRIVATE
+    ./3rdParty/
+    ${INC_DIR}/common
+    ${INC_DIR}/inc/2D/cpu
+    ${INC_DIR}/inc/2D/gpu
+    ${INC_DIR}/inc/3D/cpu
+    ${INC_DIR}/inc/3D/gpu
+)
+target_link_libraries(export_gas_foam_golden
+    PRIVATE
+        ${PROJECT_NAME}-cuda
+        ${PROJECT_NAME}-cpu
+        ${OpenCV_LIBS}
+        CUDA::cudart
+)
+
 # ---- export_curvature_golden — curvature cross-validation golden data ----
 add_executable(export_curvature_golden
     ${INC_DIR}/export_curvature_golden.cu

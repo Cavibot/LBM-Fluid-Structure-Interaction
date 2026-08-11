@@ -1,4 +1,4 @@
-﻿
+
 #include "../../../common/mlcudaCommon.h"
 #include "mrConstantParamsGpu3D.h"
 #include "mrUtilFuncGpu3D.h"
@@ -1917,56 +1917,111 @@ void mrInit3DGpu(mrFlow3D* mlflow, MLFluidParam3D* param)
 
 
 
-void g_handle(mrFlow3D* mlflow, MLFluidParam3D* param, int time)
+static void _gas_grid(MLFluidParam3D* param, dim3& threads1, dim3& grid1,
+	int& sample_x, int& sample_y, int& sample_z, int& total_num)
+{
+	sample_x = param->samples.x;
+	sample_y = param->samples.y;
+	sample_z = param->samples.z;
+	total_num = sample_x * sample_y * sample_z;
+	threads1 = dim3(BLOCK_NX, BLOCK_NY, BLOCK_NZ);
+	grid1 = dim3(
+		(unsigned)ceil(REAL(sample_x) / threads1.x),
+		(unsigned)ceil(REAL(sample_y) / threads1.y),
+		(unsigned)ceil(REAL(sample_z) / threads1.z)
+	);
+}
+
+void launch_g_reconstruction(mrFlow3D* mlflow, MLFluidParam3D* param)
+{
+	int sample_x, sample_y, sample_z, total_num;
+	dim3 threads1, grid1;
+	_gas_grid(param, threads1, grid1, sample_x, sample_y, sample_z, total_num);
+	g_reconstruction << <grid1, threads1 >> > (mlflow, sample_x, sample_y, sample_z, total_num);
+	checkCudaErrors(cudaGetLastError());
+	checkCudaErrors(cudaDeviceSynchronize());
+}
+
+void launch_g_stream_collide(mrFlow3D* mlflow, MLFluidParam3D* param, int time)
+{
+	int sample_x, sample_y, sample_z, total_num;
+	dim3 threads1, grid1;
+	_gas_grid(param, threads1, grid1, sample_x, sample_y, sample_z, total_num);
+	g_stream_collide << <grid1, threads1 >> > (mlflow, sample_x, sample_y, sample_z, total_num, time);
+	checkCudaErrors(cudaGetLastError());
+	checkCudaErrors(cudaDeviceSynchronize());
+}
+
+void launch_g_swap(mrFlow3D* mlflow, MLFluidParam3D* param)
+{
+	int sample_x, sample_y, sample_z, total_num;
+	dim3 threads1, grid1;
+	_gas_grid(param, threads1, grid1, sample_x, sample_y, sample_z, total_num);
+	mrSolver3D_g_step2Kernel << <1, 1 >> > (mlflow, sample_x, sample_y, sample_z, total_num);
+	checkCudaErrors(cudaGetLastError());
+	checkCudaErrors(cudaDeviceSynchronize());
+}
+
+void launch_bubble_volume_g_update(mrFlow3D* mlflow, MLFluidParam3D* param, int time)
+{
+	int sample_x, sample_y, sample_z, total_num;
+	dim3 threads1, grid1;
+	_gas_grid(param, threads1, grid1, sample_x, sample_y, sample_z, total_num);
+	bubble_volume_g_update_kernel << <grid1, threads1 >> >
+		(mlflow, sample_x, sample_y, sample_z, total_num, time);
+	checkCudaErrors(cudaGetLastError());
+	checkCudaErrors(cudaDeviceSynchronize());
+}
+
+void launch_bubble_rho_update(mrFlow3D* mlflow)
+{
+	bubble_rho_update_kernel << <1, 1 >> > (mlflow);
+	checkCudaErrors(cudaDeviceSynchronize());
+}
+
+void launch_calculate_disjoint(mrFlow3D* mlflow, MLFluidParam3D* param)
+{
+	int sample_x, sample_y, sample_z, total_num;
+	dim3 threads1, grid1;
+	_gas_grid(param, threads1, grid1, sample_x, sample_y, sample_z, total_num);
+	calculate_disjoint << <grid1, threads1 >> > (mlflow, sample_x, sample_y, sample_z, total_num);
+	checkCudaErrors(cudaGetLastError());
+	checkCudaErrors(cudaDeviceSynchronize());
+}
+
+void launch_atmosphere_rho_update(mrFlow3D* mlflow, MLFluidParam3D* param,
+	float N, float l0p, float roup, float labma, float u0p, int time_step)
 {
 	int sample_x = param->samples.x;
 	int sample_y = param->samples.y;
 	int sample_z = param->samples.z;
-	int total_num = sample_x * sample_y * sample_z;
+	int sample_num = sample_x * sample_y;
+	int total_num = sample_num * sample_z;
 	dim3 threads1(BLOCK_NX, BLOCK_NY, BLOCK_NZ);
 	dim3 grid1(
-		ceil(REAL(sample_x) / threads1.x),
-		ceil(REAL(sample_y) / threads1.y),
-		ceil(REAL(sample_z) / threads1.z)
+		(unsigned)ceil(REAL(sample_x) / threads1.x),
+		(unsigned)ceil(REAL(sample_y) / threads1.y),
+		(unsigned)ceil(REAL(sample_z) / threads1.z)
 	);
-	// g reconstruction
-	g_reconstruction << <grid1, threads1 >> >
-		(
-			mlflow,
-			sample_x, sample_y, sample_z,
-			total_num
-			);
+	atmosphere_rho_update_kernel << <grid1, threads1 >> >
+		(mlflow, sample_x, sample_y, sample_z, sample_num, total_num, N, l0p, roup, labma, u0p, time_step);
 	checkCudaErrors(cudaGetLastError());
 	checkCudaErrors(cudaDeviceSynchronize());
-	g_stream_collide << <grid1, threads1 >> >
-		(
-			mlflow,
-			sample_x, sample_y, sample_z,
-			total_num, time
-			);
-	checkCudaErrors(cudaGetLastError());
+}
+
+void launch_atmosphere_volme_update(mrFlow3D* mlflow)
+{
+	atmosphere_volme_update_kernel << <1, 1 >> > (mlflow);
 	checkCudaErrors(cudaDeviceSynchronize());
-	// updated the volume of the bubble caused by g
-	bubble_volume_g_update_kernel << <grid1, threads1 >> >
-		(
-			mlflow,
-			sample_x, sample_y, sample_z,
-			total_num, time
-			);
-	checkCudaErrors(cudaGetLastError());
-	checkCudaErrors(cudaDeviceSynchronize());
-	mrSolver3D_g_step2Kernel << <1, 1 >> >
-		(
-			mlflow,
-			sample_x, sample_y, sample_z,
-			total_num
-			);
-	checkCudaErrors(cudaGetLastError());
-	checkCudaErrors(cudaDeviceSynchronize());
-	
-	// update the new rho with the updated volume
-	bubble_rho_update_kernel << <1, 1 >> > (mlflow);
-	checkCudaErrors(cudaDeviceSynchronize());
+}
+
+void g_handle(mrFlow3D* mlflow, MLFluidParam3D* param, int time)
+{
+	launch_g_reconstruction(mlflow, param);
+	launch_g_stream_collide(mlflow, param, time);
+	launch_bubble_volume_g_update(mlflow, param, time);
+	launch_g_swap(mlflow, param);
+	launch_bubble_rho_update(mlflow);
 }
 
 
