@@ -1152,7 +1152,14 @@ class ScreenSpaceFluidRenderer:
         self._composite_pass(view, proj, texel, camera)
 
     def _composite_pass(self, view: np.ndarray, proj: np.ndarray, texel: np.ndarray, camera):
-        """Composite fluid surface over scene (shared by particle and ray-march paths)."""
+        """Composite fluid surface over scene (shared by particle and ray-march paths).
+
+        Writes to the default framebuffer (FBO 0) because the scene colour/depth
+        live in ``renderer._frame_texture`` / ``_frame_depth_texture``; binding
+        ``_frame_fbo`` as the draw target while sampling those textures would be
+        a feedback loop.  After compositing, blit colour back into ``_frame_fbo``
+        so ``ViewerGL.get_frame()`` (used by offline MP4 recording) sees fluid.
+        """
         gl = self._gl
         renderer = self.viewer.renderer
         width, height = self._frame_size
@@ -1214,6 +1221,24 @@ class ScreenSpaceFluidRenderer:
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
         gl.glUseProgram(0)
+
+        # Sync composited colour into the resolved frame FBO for get_frame().
+        if renderer._frame_fbo is not None:
+            gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
+            gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, renderer._frame_fbo)
+            gl.glBlitFramebuffer(
+                0,
+                0,
+                width,
+                height,
+                0,
+                0,
+                width,
+                height,
+                gl.GL_COLOR_BUFFER_BIT,
+                gl.GL_NEAREST,
+            )
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
 
     def _set_particle_uniforms(self, uniforms: dict[str, int], view: np.ndarray, proj: np.ndarray, height: int):
         gl = self._gl

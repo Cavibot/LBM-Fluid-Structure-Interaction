@@ -8,6 +8,7 @@ Run as a module, e.g.::
 
     python -m wanphys.examples.home_fslbm.fluid_grid_home_fslbm_dambreak --viewer gl
     python -m wanphys.examples.home_fslbm.fluid_grid_home_fslbm_dambreak_foam --viewer gl
+    python -m wanphys.examples.home_fslbm.fluid_grid_home_fslbm_dambreak_foam_record --duration 10 -o out.mp4
     python -m wanphys.examples.home_fslbm.fluid_grid_home_fslbm_foam_pair --viewer gl
     python -m wanphys.examples.home_fslbm.fluid_grid_home_fslbm_rising_bubble_gas --viewer gl
 """
