@@ -196,7 +196,11 @@ class VofDamBreak:
         state = self.domain.state
         if self.domain.solver._home_fp32 is not None:
             self.domain.solver._home_fp32.seed_dam_break(
-                state, dam_x=dam_x, fill_z=fill_z, rho_liquid=RHO_LIQUID
+                state,
+                dam_x=dam_x,
+                fill_z=fill_z,
+                rho_liquid=RHO_LIQUID,
+                hydrostatic=False,
             )
             out = self.domain._state_out
             self.domain.solver._home_fp32.sync_to_state(out)

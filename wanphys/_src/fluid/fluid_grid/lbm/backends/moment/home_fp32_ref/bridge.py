@@ -229,12 +229,13 @@ class HomeFp32Bridge:
         fill_z: int,
         rho_liquid: float | None = None,
         *,
-        hydrostatic: bool = True,
+        hydrostatic: bool = False,
     ) -> None:
         """Seed dam-break column on GPU and push macros onto ``state``.
 
-        ``hydrostatic=True`` (default) stacks ``ρ(z)`` so Eq.32 ME can lift
-        light bodies; uniform ``ρ`` + Guo ``g`` alone leaves ``f*+f−2w≈0``.
+        Default ``hydrostatic=False``: uniform liquid ``ρ=ρ0`` (incompressible-style).
+        Opt-in ``hydrostatic=True`` stacks ``ρ(z)`` for weakly-compressible ME
+        experiments only — it changes initial inventory and is not normal VOF water.
         """
         rho0 = float(
             self.model.initial_density if rho_liquid is None else rho_liquid

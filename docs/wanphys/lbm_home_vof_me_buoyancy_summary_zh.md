@@ -11,36 +11,33 @@
 
 ## 1. 一句话结论
 
-**水平冲击、推球、力矩：链路 ME 可用；竖直阿基米德起伏：在当前 Guo + 近均匀 \(\rho\approx 1\) 设定下，纯 ME 几乎给不出，所以默认加了 φ 体积 Archimedes 补项。**
+**正常物理默认：液体 \(\rho\approx 1\) 均匀；水平冲击用链路 ME；竖直浮力用阿基米德 \(F_z=s\cdot\rho_L\cdot V\cdot|g|\)（`--archimedes`）。**
 
-这不是「VOF 不适合做动量交换」，而是 **体力实现让静水压差进不了链路力**。
+不要用静水 \(\rho(z)\) 冒充压差——那是弱可压 LBM 骗 ME 的实验路径（`--hydro-rho`），会改初始质量，**不是**不可压水。
+
+纯 ME 在 Guo+\(\rho\equiv1\) 下几乎无阿基米德力；要「又均匀密度又纯 ME 浮力」需切胞压力等后续工作。
 
 ---
 
-## 2. 当前默认路径（混合）
+## 2. 当前默认路径（正常物理）
 
 每子步顺序：
 
 ```text
 SDF 栅格化 → HOME Eq.24 动壁 → 重构链路 ME（式 32）
-         → φ-volume Archimedes（竖直 Fz，默认开）
-         → （可选）showcase / --me-drag
+         → φ-volume Archimedes（竖直，均匀 ρ_L）
+         → （可选）showcase / --me-drag / --hydro-rho
          → XPBD
 ```
 
 | 项 | 来源 | 作用 |
 |----|------|------|
-| 链路 ME | `link_me_warp.py` / fused ME | 波击、水平推、转矩；论文主路径 |
-| φ 体积 Archimedes | `phi_volume_buoyancy_warp.py` | \(F_z=\mathrm{scale}\cdot s\cdot\rho_L\cdot V\cdot\|g\|\)；竖直起伏 |
-| showcase 浮力/推/拖 | `--showcase-fsi` | 更重的经验插件，**非**默认 |
-| ME 路径拖曳 | `--me-drag` | 可选阻尼，**非**默认 |
+| 链路 ME | `link_me_warp.py` / fused ME | 波击、水平推、转矩 |
+| φ 体积 Archimedes | `phi_volume_buoyancy_warp.py` | \(F_z=\mathrm{scale}\cdot s\cdot\rho_L\cdot V\cdot\|g\|\)；不可压浮力 |
+| `--hydro-rho` | `hydrostatic_rho_warp.py` | **实验**：\(\rho(z)\) 骗 ME；默认关 |
+| showcase | `--showcase-fsi` | 更重经验插件 |
 
-开关：
-
-- `--no-archimedes`：关掉竖直补项 → 基本只剩贴地滚动  
-- `--archimedes-scale`：放大/缩小起伏（默认 `1.6`）  
-- 水量与其它 VOF 溃坝一致：`DAM_X_FRAC=0.25`，`FILL_Z_FRAC=0.5`  
-- 球**坝前干地**起步，等溃坝冲到后再谈浮沉（不预埋进水库）
+默认：**均匀 \(\rho\)**、`archimedes=on`、`hydro_rho=off`。水量 `DAM_X_FRAC=0.25`，`FILL_Z_FRAC=0.5`；球坝前干地起步。
 
 ---
 

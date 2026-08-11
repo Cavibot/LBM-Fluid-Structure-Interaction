@@ -3,24 +3,20 @@
 
 """HOME-FREE VOF dam-break with two dynamic rigid spheres (FSI).
 
-Default path:
-  SDF raster → Eq.24 walls → link ME (Eq.32) →
-  φ-volume Archimedes (vertical helper) → XPBD.
+Normal-physics default (uniform liquid ρ≈1):
+  SDF raster → Eq.24 walls → link ME (Eq.32: impact / torque) →
+  φ-volume Archimedes Fz=s·ρ·V·|g| (correct incompressible buoyancy) → XPBD.
 
-Path A (pure-ME buoyancy experiment):
-  ``--hydro-rho`` soft-maintains hydrostatic ``ρ(z)`` so Eq.32 can lift;
-  Archimedes is turned off. Spheres start dry ahead of the dam.
+Do **not** use hydrostatic ``ρ(z)`` for everyday runs — that is a weakly-
+compressible trick so ME can fake vertical lift. Opt-in only via ``--hydro-rho``
+(turns Archimedes off). Spheres start dry ahead of the dam.
 
-``--no-archimedes`` alone = no vertical helper (often floor skate / contact perch).
+``--no-archimedes`` = no vertical buoyancy (floor skate / contact perch).
 ``--showcase-fsi`` / ``--me-drag`` are separate non-default plugins.
 
 Run:
     uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
         --viewer gl --n 64
-
-    # Path A — ME buoyancy via maintained ρ(z)
-    uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \\
-        --viewer gl --n 64 --hydro-rho
 """
 
 from __future__ import annotations
@@ -95,9 +91,9 @@ SPHERE_VISUAL_MESH_LONGITUDES: int = 48
 SHOWCASE_LEGACY_FORCE_SCALE: float = 6.0
 # Empirical FSI (showcase plugin — not part of generic VOF / coupling core).
 BUOYANCY_FORCE_SCALE: float = 1.0
-# φ-volume Archimedes (default on): Fz = scale * s * ρ * V * |g|.
-# Scale >1 makes post-wash bobbing obvious while ME still does horizontal FSI.
-ARCHIMEDES_SCALE: float = 1.6
+# φ-volume Archimedes (default on): incompressible Fz = scale * s * ρ * V * |g|.
+# scale=1 is physical Archimedes; >1 was only for exaggerated demo bobbing.
+ARCHIMEDES_SCALE: float = 1.0
 WATER_HORIZONTAL_DRAG_RATE: float = 4.0
 WATER_VERTICAL_DRAG_RATE: float = 12.0
 FLUID_PUSH_RATE: float = 8.0
@@ -116,7 +112,8 @@ SUB_EMA_ALPHA: float = 0.08
 SUB_DSUB_CAP: float = 0.04
 WALL_THICKNESS_CELLS: float = 2.0
 
-# Path A: soft-maintain ρ(z) for Eq.32 Archimedes (see --hydro-rho).
+# Opt-in Path A only: soft-maintain ρ(z) for Eq.32 ME lift experiments.
+# Off by default — not normal incompressible water.
 HYDRO_RHO_RATE: float = 0.08
 HYDRO_RHO_EVERY: int = 4
 
@@ -444,7 +441,14 @@ class HomeVofDamBreakTwoSpheres:
         state = self.domain.state
         home = self.domain.solver._home_fp32
         assert home is not None
-        home.seed_dam_break(state, dam_x=dam_x, fill_z=fill_z, rho_liquid=RHO_LIQUID)
+        # Uniform ρ (normal physics). Hydrostatic ρ(z) only via --hydro-rho maintain.
+        home.seed_dam_break(
+            state,
+            dam_x=dam_x,
+            fill_z=fill_z,
+            rho_liquid=RHO_LIQUID,
+            hydrostatic=False,
+        )
         out = self.domain._state_out
         home.sync_to_state(out)
         for name in ("solid_phi", "solid_body_id", "vel_solid_u", "vel_solid_v", "vel_solid_w"):
@@ -591,12 +595,13 @@ class HomeVofDamBreakTwoSpheres:
         print(f"  me_drag={'on' if self._me_drag else 'off'}")
         print(
             f"  archimedes={'on' if self._archimedes else 'off'} "
-            f"scale={self._archimedes_scale:g} (phi-volume Fz; ME keeps horizontal)"
+            f"scale={self._archimedes_scale:g} "
+            f"(incompressible Fz=s·ρ·V·|g|; ME keeps impact)"
         )
         print(
             f"  hydro_rho={'on' if self._hydro_rho else 'off'} "
             f"rate={self._hydro_rho_rate:g} every={self._hydro_rho_every} "
-            f"(path A: soft ρ(z) for Eq.32 lift; disables Archimedes)"
+            f"(opt-in ρ(z) ME experiment; not default physics)"
         )
         if self._showcase_fsi:
             print(
@@ -1066,8 +1071,9 @@ def create_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "φ-volume Archimedes Fz after the bore (default on). "
-            "Ignored when --hydro-rho (path A uses ME + ρ(z) instead)."
+            "Incompressible Archimedes Fz=s·ρ·V·|g| (default on). "
+            "Normal-physics vertical buoyancy with uniform liquid ρ. "
+            "Ignored when --hydro-rho."
         ),
     )
     parser.add_argument(
@@ -1081,8 +1087,8 @@ def create_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "Path A: soft-maintain hydrostatic ρ(z) so Eq.32 ME can lift. "
-            "Turns off φ-volume Archimedes. Prefer this for pure-ME buoyancy tests."
+            "Experimental: maintain hydrostatic ρ(z) so Eq.32 ME can lift. "
+            "Not normal incompressible water; turns off Archimedes. Default off."
         ),
     )
     parser.add_argument(

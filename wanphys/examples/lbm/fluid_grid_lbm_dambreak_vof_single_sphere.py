@@ -163,7 +163,13 @@ class HomeVofDamBreakSingleSphere:
         state = self.domain.state
         home = self.domain.solver._home_fp32
         assert home is not None
-        home.seed_dam_break(state, dam_x=dam_x, fill_z=fill_z, rho_liquid=RHO_LIQUID)
+        home.seed_dam_break(
+            state,
+            dam_x=dam_x,
+            fill_z=fill_z,
+            rho_liquid=RHO_LIQUID,
+            hydrostatic=False,
+        )
         out = self.domain._state_out
         home.sync_to_state(out)
         for name in ("solid_phi", "solid_body_id", "vel_solid_u", "vel_solid_v", "vel_solid_w"):
