@@ -12,6 +12,12 @@ import numpy as np
 import pytest
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "slow: long-running Phase-5 stability gates (e.g. 1e4-step volume)"
+    )
+
+
 def _load_float_txt(path: Path, dtype: type) -> np.ndarray:
     """Load one-value-per-line floats; normalize MSVC ``-nan(ind)`` tokens."""
     raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -95,6 +101,11 @@ _BUBBLE_OPTIONAL_FIELDS: dict[str, type] = {
     "moment_in": np.float32,
     "moment_out": np.float32,
     "uxuyuz": np.float32,
+    "volume_rel_drift": np.float64,
+    "volume_series": np.float64,
+    "sum_disjoin": np.float32,
+    "max_disjoin": np.float32,
+    "com_distance": np.float32,
 }
 
 

@@ -108,6 +108,12 @@ class HomeFslbmModel(FluidGridModelBase):
     atmosphere_open: bool = False
     """Enable open-atmosphere top boundary."""
 
+    # ---- Stability / ablation switches (Phase 5) ---------------------------
+    enable_gas: bool = True
+    """If False, skip Phase-1 ``g_handle`` (dissolved gas + volume_g update)."""
+    enable_disjoin: bool = True
+    """If False, skip ``calculate_disjoint`` (disjoin_force remains zero)."""
+
     # ---- Inlet islet clearing (Phase 3) ------------------------------------
     clear_inlet_enabled: bool = False
     """If True, launch ``clear_inlet`` each step (default off; tests may enable)."""

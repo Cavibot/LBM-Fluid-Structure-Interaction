@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""HOME-FSLBM foam pair (Phase-4 visual gate).
+"""HOME-FSLBM foam pair (Phase-4/5 visual gate).
 
-Two close bubbles under disjoining pressure should not coalesce.
+Two close bubbles under disjoining pressure should not coalesce within the
+acceptance window (~500 solver steps).  Default: ``enable_gas=False`` so the
+demo isolates disjoining pressure (Phase-5 stability).
+
 Renders free surface from ``phi``; stderr prints bubble_count, COM distance,
-and sum(disjoin) probe.
+volumes/rho, and sum(disjoin) probe.
 
 Controls: [Space] pause/resume  [R] reset  [mouse] orbit  [scroll] zoom
 
@@ -38,6 +41,10 @@ OMEGA: float = 1.0
 GRAVITY_Z: float = 0.0
 SURFACE_TENSION: float = C.SURFACE_TENSION
 DISJOIN: float = C.DISJOINT_FACTOR
+# Phase-5: isolate foam gate from Henry → init_volume pumping
+ENABLE_GAS: bool = False
+# Soft guidance: ~500 solver steps ≈ 250 frames × 2 substeps
+ACCEPT_FRAMES: int = 250
 
 SSFR_THRESHOLD: float = 0.5
 RAY_MARCH_STEPS: int = 1200
@@ -112,16 +119,24 @@ class HomeFslbmFoamPair:
             gravity_z=GRAVITY_Z,
             surface_tension=SURFACE_TENSION,
             disjoin_factor=DISJOIN,
+            enable_gas=ENABLE_GAS,
+            enable_disjoin=True,
         )
         print(
             f"HOME-FSLBM Foam Pair: {N}^3, r={R}, centres={C0}/{C1}, "
-            f"disjoin={DISJOIN}"
+            f"disjoin={DISJOIN}, enable_gas={ENABLE_GAS}"
+        )
+        print(
+            f"  Acceptance window ~{ACCEPT_FRAMES} frames "
+            f"(~{ACCEPT_FRAMES * SIM_SUBSTEPS} steps); longer runs may show "
+            f"closed-tank anti-phase volume oscillation."
         )
         self.domain = HomeFslbmDomain(self.model)
         self.domain.create_state()
         self.sim_time = 0.0
         self.frame_count = 0
         self._last_ms = 0.0
+        self._v0 = None
 
         self.domain.solver.initialize_equilibrium(self.domain.state)
         _paint_two_bubbles(self.domain.state, N, N, N)
@@ -129,6 +144,9 @@ class HomeFslbmFoamPair:
         _sync_double_buffer(self.domain)
         wp.synchronize_device(self.model._device)
         print(f"  bubble_count={self.domain.state.bubble_count}")
+        bc = int(self.domain.state.bubble_count)
+        if bc > 0:
+            self._v0 = self.domain.state.bubble_volume.numpy()[:bc].copy()
 
         self.ssfr: ScreenSpaceFluidRenderer | None = None
         if isinstance(viewer, FluidViewerGL):
@@ -176,10 +194,19 @@ class HomeFslbmFoamPair:
             tag = self.domain.state.tag_matrix.numpy()
             coms = _tag_coms(tag)
             dist = float(np.linalg.norm(coms[0] - coms[1])) if len(coms) >= 2 else -1.0
+            bc = int(self.domain.state.bubble_count)
+            vols = self.domain.state.bubble_volume.numpy()[:bc] if bc > 0 else []
+            rhos = self.domain.state.bubble_rho.numpy()[:bc] if bc > 0 else []
+            v_str = ",".join(f"{v:.3f}" for v in vols)
+            r_str = ",".join(f"{r:.4f}" for r in rhos)
+            warn = ""
+            if self.frame_count > ACCEPT_FRAMES:
+                warn = " [past accept window]"
             print(
-                f"[t={self.sim_time:.1f}s] bubbles={self.domain.state.bubble_count} "
+                f"[t={self.sim_time:.1f}s] bubbles={bc} "
                 f"merge={self.domain.state.merge_flag} dist={dist:.2f} "
-                f"sum(disjoin)~{sum_dj:.3f} sim={self._last_ms:.0f}ms",
+                f"V=[{v_str}] rho=[{r_str}] sum(disjoin)~{sum_dj:.3f} "
+                f"sim={self._last_ms:.0f}ms{warn}",
                 file=sys.stderr,
                 flush=True,
             )

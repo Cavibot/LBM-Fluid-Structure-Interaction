@@ -245,64 +245,65 @@ class HomeFslbmSolver(FluidGridSolverBase):
 
         # ---- g_handle: reconstruction -> CMR stream-collide -> volume_g ----
         # Fluid moments for gas advection come from state_in (pre-fluid step).
-        wp.launch(
-            kernels_gas.g_reconstruction_kernel,
-            dim=dim,
-            inputs=[
-                state_out.g_mom,
-                state_in.f_mom,
-                state_out.flag,
-                state_out.tag_matrix,
-                state_out.bubble_rho,
-                state_out.delta_g,
-                self._cx, self._cy, self._cz, self._opposite,
-                float(self.model.henry_constant),
-                self.nx, self.ny, self.nz,
-                self._stride,
-            ],
-        )
-        wp.launch(
-            kernels_gas.g_stream_collide_kernel,
-            dim=dim,
-            inputs=[
-                state_out.g_mom,
-                state_out.g_mom_post,
-                state_in.f_mom,
-                state_out.flag,
-                state_out.src,
-                state_out.c_value,
-                state_out.islet,
-                self._cx, self._cy, self._cz,
-                self.nx, self.ny, self.nz,
-                self._stride,
-            ],
-        )
-        wp.launch(
-            kernels_gas.bubble_volume_g_update_kernel,
-            dim=dim,
-            inputs=[
-                state_out.delta_g,
-                state_out.phi,
-                state_out.flag,
-                state_out.tag_matrix,
-                state_out.bubble_init_volume,
-                self.nx, self.ny, self.nz,
-            ],
-        )
-        # mrSolver3D_g_step2Kernel: gMom <- gMomPost
-        wp.copy(state_out.g_mom, state_out.g_mom_post)
-        bc = int(state_out.bubble_count)
-        if bc > 0:
+        if self.model.enable_gas:
             wp.launch(
-                kernels_bubble.bubble_rho_update_kernel,
-                dim=bc,
+                kernels_gas.g_reconstruction_kernel,
+                dim=dim,
                 inputs=[
-                    state_out.bubble_volume,
-                    state_out.bubble_init_volume,
+                    state_out.g_mom,
+                    state_in.f_mom,
+                    state_out.flag,
+                    state_out.tag_matrix,
                     state_out.bubble_rho,
-                    bc,
+                    state_out.delta_g,
+                    self._cx, self._cy, self._cz, self._opposite,
+                    float(self.model.henry_constant),
+                    self.nx, self.ny, self.nz,
+                    self._stride,
                 ],
             )
+            wp.launch(
+                kernels_gas.g_stream_collide_kernel,
+                dim=dim,
+                inputs=[
+                    state_out.g_mom,
+                    state_out.g_mom_post,
+                    state_in.f_mom,
+                    state_out.flag,
+                    state_out.src,
+                    state_out.c_value,
+                    state_out.islet,
+                    self._cx, self._cy, self._cz,
+                    self.nx, self.ny, self.nz,
+                    self._stride,
+                ],
+            )
+            wp.launch(
+                kernels_gas.bubble_volume_g_update_kernel,
+                dim=dim,
+                inputs=[
+                    state_out.delta_g,
+                    state_out.phi,
+                    state_out.flag,
+                    state_out.tag_matrix,
+                    state_out.bubble_init_volume,
+                    self.nx, self.ny, self.nz,
+                ],
+            )
+            # mrSolver3D_g_step2Kernel: gMom <- gMomPost
+            wp.copy(state_out.g_mom, state_out.g_mom_post)
+            bc = int(state_out.bubble_count)
+            if bc > 0:
+                wp.launch(
+                    kernels_bubble.bubble_rho_update_kernel,
+                    dim=bc,
+                    inputs=[
+                        state_out.bubble_volume,
+                        state_out.bubble_init_volume,
+                        state_out.bubble_rho,
+                        bc,
+                    ],
+                )
 
         # ------------------------------------------------------------------
         # Phase 2: mrSolver3DGpu() — foam + fluid + free-surface
@@ -320,22 +321,25 @@ class HomeFslbmSolver(FluidGridSolverBase):
         wp.copy(state_out.vel_solid_w, state_in.vel_solid_w)
 
         # Disjoining pressure (before stream_collide)
-        wp.launch(
-            kernels_foam.calculate_disjoint_kernel,
-            dim=dim,
-            inputs=[
-                state_out.flag,
-                state_out.phi,
-                state_out.mass,
-                state_out.massex,
-                state_in.f_mom,
-                state_out.tag_matrix,
-                state_out.disjoin_force,
-                self._cx, self._cy, self._cz, self._opposite,
-                self.nx, self.ny, self.nz,
-                self._stride,
-            ],
-        )
+        if self.model.enable_disjoin:
+            wp.launch(
+                kernels_foam.calculate_disjoint_kernel,
+                dim=dim,
+                inputs=[
+                    state_out.flag,
+                    state_out.phi,
+                    state_out.mass,
+                    state_out.massex,
+                    state_in.f_mom,
+                    state_out.tag_matrix,
+                    state_out.disjoin_force,
+                    self._cx, self._cy, self._cz, self._opposite,
+                    self.nx, self.ny, self.nz,
+                    self._stride,
+                ],
+            )
+        else:
+            state_out.disjoin_force.zero_()
 
         # Optional clear_inlet (disabled by default)
         if self.model.clear_inlet_enabled:

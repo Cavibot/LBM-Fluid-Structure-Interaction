@@ -19,6 +19,7 @@ from . import kernels_bubble  # noqa: F401
 from . import kernels_foam  # noqa: F401
 from . import kernels_gas  # noqa: F401
 from . import kernels_surface  # noqa: F401
+from . import stability_probe  # noqa: F401
 
 __all__ = [
     "HomeFslbmDomain",
@@ -29,4 +30,5 @@ __all__ = [
     "kernels_foam",
     "kernels_gas",
     "kernels_surface",
+    "stability_probe",
 ]

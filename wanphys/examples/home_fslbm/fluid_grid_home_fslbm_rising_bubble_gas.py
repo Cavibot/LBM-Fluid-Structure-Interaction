@@ -130,6 +130,7 @@ class HomeFslbmRisingBubbleGas:
         self.frame_count = 0
         self._last_ms = 0.0
 
+        self._v0 = None
         self.domain.solver.initialize_equilibrium(self.domain.state)
         _paint_bubble(self.domain.state, N, N, N)
         _init_gas(self.domain.state, N, N, N)
@@ -137,6 +138,9 @@ class HomeFslbmRisingBubbleGas:
         _sync_double_buffer(self.domain)
         wp.synchronize_device(self.model._device)
         print(f"  bubble_count={self.domain.state.bubble_count}")
+        bc = int(self.domain.state.bubble_count)
+        if bc > 0:
+            self._v0 = float(self.domain.state.bubble_volume.numpy()[0])
 
         self.ssfr: ScreenSpaceFluidRenderer | None = None
         if isinstance(viewer, FluidViewerGL):
@@ -172,9 +176,17 @@ class HomeFslbmRisingBubbleGas:
             c_iface = float(c[iface].mean()) if iface.any() else 0.0
             gas = tag > 0
             com = np.argwhere(gas).mean(axis=0) if gas.any() else np.zeros(3)
+            bc = int(self.domain.state.bubble_count)
+            v_now = float(self.domain.state.bubble_volume.numpy()[0]) if bc > 0 else 0.0
+            drift = (
+                abs(v_now - self._v0) / abs(self._v0)
+                if self._v0 is not None and abs(self._v0) > 1e-30
+                else float("nan")
+            )
             print(
-                f"[t={self.sim_time:.1f}s] bubbles={self.domain.state.bubble_count} "
+                f"[t={self.sim_time:.1f}s] bubbles={bc} "
                 f"COM=({com[0]:.0f},{com[1]:.0f},{com[2]:.0f}) "
+                f"V={v_now:.3f} |dV|/V0={drift:.3e} "
                 f"max(c)={float(np.max(c)):.3e} mean_I(c)={c_iface:.3e} "
                 f"sim={self._last_ms:.0f}ms",
                 file=sys.stderr,

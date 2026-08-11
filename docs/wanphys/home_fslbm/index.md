@@ -17,4 +17,7 @@ HOME-FSLBM（自由表面 LBM + 气泡 + 溶解气体）从 CUDA C++ 参考代�
 阶段 4 设计与实现报告 <phase4_design_zh>
 阶段 4 测试计划 <phase4_test_plan_zh>
 阶段 4 气体/泡沫金标准导出说明 <phase4_gas_foam_golden_zh>
+阶段 5 设计与实现报告 <phase5_design_zh>
+阶段 5 测试计划 <phase5_test_plan_zh>
+阶段 5 稳定性金标准导出说明 <phase5_stability_golden_zh>
 ```

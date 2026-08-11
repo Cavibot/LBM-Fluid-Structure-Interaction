@@ -3,10 +3,11 @@
 
 """WanPhys HOME-FSLBM free-surface examples.
 
-Phase-2/4 demos for visual validation (dambreak, foam pair, rising bubble + gas).
+Phase-2/4/5 demos for visual validation (dambreak, foam pair, rising bubble + gas).
 Run as a module, e.g.::
 
     python -m wanphys.examples.home_fslbm.fluid_grid_home_fslbm_dambreak --viewer gl
+    python -m wanphys.examples.home_fslbm.fluid_grid_home_fslbm_dambreak_foam --viewer gl
     python -m wanphys.examples.home_fslbm.fluid_grid_home_fslbm_foam_pair --viewer gl
     python -m wanphys.examples.home_fslbm.fluid_grid_home_fslbm_rising_bubble_gas --viewer gl
 """
