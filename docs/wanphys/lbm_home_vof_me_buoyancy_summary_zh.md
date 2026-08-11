@@ -116,13 +116,21 @@ Headless 冒烟（水量改回后请以实跑为准）：`--viewer null --n 64`�
 
 ## 7. 若要坚持「更纯的 ME」
 
-方向（未默认落地）：
+方向：
 
-1. **让静水压进分布**：持久或重建 \(\rho(z)\) / 压力场，使 \(f^*+f-2w\) 在竖直方向非零。  
-2. **切胞压力积分**：在固体表面用 \(\varphi\)-切割单元压力，而不是只靠链路 \(\Delta\hat{\mathbf{j}}\) 的静水部分。  
-3. **接受论文验证方式**：原文重/轻兔子多为定性沉浮演示，并不声称闭系流体–刚体动量守恒或「零经验参数必出夸张起伏」。
+1. **Path A（已实现试跑）**：`--hydro-rho` 软维持静水 \(\rho(z)\)，并关闭 Archimedes。见 `hydrostatic_rho_warp.py`。  
+2. **切胞压力积分**：在固体表面用 \(\varphi\)-切割单元压力。  
+3. **接受论文验证方式**：原文重/轻体多为定性沉浮，并不声称零经验参数必出夸张起伏。
 
-在未做 (1)(2) 之前，**夸张竖直起伏只能来自补项或改 IC**；文档与 CLI 应标明：`--archimedes` 不是论文式 32。
+```bash
+# Path A：纯 ME 竖直（靠维持 ρ(z)）
+uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_vof_two_spheres \
+  --viewer gl --n 64 --hydro-rho
+```
+
+`--no-archimedes` 且无 `--hydro-rho` 时，轻球后期贴着重球略高多半是**接触顶起**，不是浮力。
+
+在未做稳妥的 A/B 之前，**夸张竖直起伏**仍可用默认 Archimedes 补项。
 
 ---
 

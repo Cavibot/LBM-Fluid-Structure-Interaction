@@ -148,6 +148,16 @@ class LbmModel(FluidGridModelBase):
     """Reserved."""
     vof_height_eq_every: int = 12
     """Run every N lattice steps."""
+    vof_hydrostatic_rho: bool = False
+    """Soft-maintain hydrostatic ``ρ(z)`` so Eq.32 ME can produce Archimedes.
+
+    Guo + uniform ``ρ≈1`` cancels the hydrostatic ME piece; this blends liquid
+    density toward ``ρ0(1+|g|depth/c_s²)`` per column free-surface height.
+    """
+    vof_hydrostatic_rho_rate: float = 0.08
+    """Blend α in ``ρ ← (1−α)ρ + α ρ_h`` per maintain call."""
+    vof_hydrostatic_rho_every: int = 4
+    """Run every N lattice steps when ``vof_hydrostatic_rho`` is on."""
     vof_home_moment_quant: bool = False
     """Persistent 16-bit HOME moment SoT (5×uint32/cell), paper §5.4 hybrid.
 

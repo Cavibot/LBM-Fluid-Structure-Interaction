@@ -93,6 +93,8 @@ class HomeFp32Bridge:
         self._late_pool = None
         self._height_eq_counter = 0
         self._last_height_eq_stats: dict[str, float] = {}
+        self._hydro_rho_counter = 0
+        self._last_hydro_rho_stats: dict[str, float] = {}
         self._fused_me: dict | None = None
 
     def prepare_fused_link_me(
@@ -454,6 +456,11 @@ class HomeFp32Bridge:
                 self._last_height_eq_stats = self.apply_height_equation(
                     state_out=None, sync_stats=sync_stats
                 )
+        if self.free_surface and bool(getattr(self.model, "vof_hydrostatic_rho", False)):
+            every_h = max(1, int(getattr(self.model, "vof_hydrostatic_rho_every", 4)))
+            self._hydro_rho_counter += 1
+            if self._hydro_rho_counter % every_h == 0:
+                self.apply_hydrostatic_rho(state_out=None)
         self.sync_to_state(state_out)
         if state_in is not None:
             wp.copy(state_out.solid_phi, state_in.solid_phi)
@@ -488,6 +495,25 @@ class HomeFp32Bridge:
             force_scale=float(force_scale),
             home_wall_eq=bool(self.model.vof_home_wall_eq),
         )
+
+    def apply_hydrostatic_rho(self, state_out: LbmState | None = None) -> None:
+        """Soft-blend liquid density toward column hydrostatic ``ρ(z)`` (path A).
+
+        Preserves wet ``Σmass`` via post-blend rescale (no invented water).
+        """
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.hydrostatic_rho_warp import (
+            apply_hydrostatic_rho_gpu,
+        )
+
+        buf = self._ensure_gpu()
+        self._last_hydro_rho_stats = apply_hydrostatic_rho_gpu(
+            buf,
+            rho0=float(getattr(self.model, "initial_density", 1.0) or 1.0),
+            g_latt_z=float(getattr(self.model, "gravity_z", 0.0) or 0.0),
+            alpha=float(getattr(self.model, "vof_hydrostatic_rho_rate", 0.08)),
+        )
+        if state_out is not None:
+            self.sync_to_state(state_out)
 
     def apply_height_equation(
         self,
