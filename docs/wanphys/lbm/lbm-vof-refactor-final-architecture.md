@@ -24,7 +24,7 @@
 - 状态结构、shape、device、VOF storage、数组不别名和初始一致性只在创建或初始化双缓冲时完整检查一次。
 - 每步仅保留 `state_in is not state_out` 和 VOF 跨阶段事务匹配等低成本保护。
 - Diagnostics 由 `VofSolver.finish_step()` 在提交完成后、清理 topology scratch 前直接执行；`LbmSolver` 只读转发结果。
-- 自由表面 GAS 是非活跃区域；新活跃格点的 kinetic、密度、速度和力初始化属于 LBM，不属于 VOF geometry。
+- LBM 本轮不接管 VOF `cell_type`、topology 或 kinetic 初始化；这些职责继续留在 VOF 子系统。
 - 每步只在最终 authoritative 状态形成后生成一次 MAC 速度。
 - 不允许同一事务重复调用 `complete_streaming()`。
 - VOF 调用顺序错误或事务不匹配时采用最简策略：直接 `raise RuntimeError`，不引入额外 Context、Coupler 或自动恢复协议。
@@ -47,12 +47,11 @@ wanphys/_src/fluid/fluid_grid/lbm/
 │   ├── collisions.py                   # 碰撞后端选择和 relaxation policy
 │   ├── forcing.py                      # ForceProvider 和外力策略
 │   ├── moments.py                      # NumPy 矩阵、relaxation rates 等 host 数学
-│   ├── active_cells.py                 # 新活跃/退休格点的 LBM kinetic 发布策略
 │   │
 │   └── kernels/
 │       ├── __init__.py                 # 不主动聚合所有 Kernel
 │       ├── common.py                   # 多阶段共享方向、权重、平衡分布等 wp.func
-│       ├── initialization.py           # equilibrium、持久编码和新活跃格点初始化
+│       ├── initialization.py           # equilibrium 与持久编码初始化
 │       ├── streaming.py                # FullF / HOME pull streaming、cut-link
 │       ├── encoding.py                 # FullF / HOME 转换与 populations 收集
 │       ├── collision.py                # SRT / TRT / NOCM population collision
@@ -80,6 +79,7 @@ wanphys/_src/fluid/fluid_grid/lbm/
     │   ├── advection.py                # 质量输运编排和 scratch 所有权
     │   ├── surface.py                  # 自由表面 population 补全和 GAS 恢复
     │   ├── transition.py               # 拓扑转换和质量重分配编排
+    │   ├── kinetic_init.py             # VOF 拓扑变化后的 kinetic 一致性处理
     │   ├── geometry.py                 # PLIC、法向和曲率高层对象及纯 Python 数学
     │   │
     │   └── kernels/
@@ -89,6 +89,7 @@ wanphys/_src/fluid/fluid_grid/lbm/
     │       ├── advection.py            # fixed-topology mass exchange
     │       ├── surface.py              # GAS → INTERFACE population 补全、GAS 恢复
     │       ├── transition.py           # propose / resolve / redistribute / finalize
+    │       ├── kinetic_init.py         # VOF kinetic 一致性 Kernel
     │       └── geometry.py             # authoritative normal / PLIC / curvature
     │
     └── diagnostics/
@@ -161,7 +162,6 @@ flowchart LR
     VOF -->|读取配置| VM
     VOF -->|推进| VS
     VOF ==>|执行 VOF| VK
-    VOF ==>|内部调用 LBM-owned 新活跃格点操作| LK
     VOF ==>|提交后直接调用| DIAG
     DIAG -.->|last_diagnostics| VOF
     VOF -.->|只读转发| SOLVER
@@ -249,6 +249,7 @@ flowchart TD
         ADV["advection.py"]:::vof
         SURFACE["surface.py"]:::vof
         TRANSITION["transition.py"]:::vof
+        KINETIC["kinetic_init.py"]:::vof
         GEOMETRY["geometry.py"]:::vof
     end
 
@@ -258,6 +259,7 @@ flowchart TD
         KADV["advection.py"]:::vofkernel
         KSURFACE["surface.py"]:::vofkernel
         KTRANSITION["transition.py"]:::vofkernel
+        KKINETIC["kinetic_init.py"]:::vofkernel
         KGEOMETRY["geometry.py"]:::vofkernel
     end
 
@@ -267,6 +269,7 @@ flowchart TD
     VSOLVER --> ADV
     VSOLVER --> SURFACE
     VSOLVER --> TRANSITION
+    VSOLVER --> KINETIC
     VSOLVER --> GEOMETRY
 
     IC -->|准备 phi0| INIT
@@ -279,12 +282,14 @@ flowchart TD
     ADV ==>|调用| KADV
     SURFACE ==>|调用| KSURFACE
     TRANSITION ==>|调用| KTRANSITION
+    KINETIC ==>|调用| KKINETIC
     GEOMETRY ==>|调用| KGEOMETRY
 
     KINIT --> KCOMMON
     KADV --> KCOMMON
     KSURFACE --> KCOMMON
     KTRANSITION --> KCOMMON
+    KKINETIC --> KCOMMON
     KGEOMETRY --> KCOMMON
 
     classDef api fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#111827
@@ -365,7 +370,7 @@ sequenceDiagram
     K->>S: 写入 kinetic、cell rho/u 和 force<br/>暂不生成 MAC velocity
 
     L->>V: finish_step(state_in, state_out)
-    Note over V,S: 核对同一 source / target / epoch<br/>使用 mass_tmp + density_out 提交 topology<br/>由 LBM 初始化新活跃格点 kinetic/rho/u/force<br/>更新 VOF geometry / epoch
+    Note over V,S: 核对同一 source / target / epoch<br/>VOF 按现有职责完成 topology、kinetic 一致性和 geometry<br/>LBM 不接管 cell_type 管理
     V->>G: 提交完成后、scratch 清理前只读诊断
     G-->>V: diagnostics result
     V-->>L: VOF 提交完成；结果可只读转发
@@ -545,20 +550,19 @@ population_floor
 - `MOVING_WALL` 与 `CUT_LINK` 重新建模为几何/链路能力，不继续伪装成普通 per-face 枚举值。
 - 在碰撞前复制或发布持久边界场的时机保持不变，不能因文件移动而漏掉或提前覆盖。
 
-## 13. 宏观状态与新活跃格点
+## 13. 宏观状态与 MAC 速度（本轮最简修正）
 
-自由表面模式下，GAS 是非活跃区域，不是被 LBM 求解的第二气相。职责固定为：
+本轮不改变 LBM 与 VOF 对 topology、`cell_type` 或 kinetic 初始化的现有职责边界，不建立新的 LBM 管理层、变化量协议或耦合接口。VOF 内部现有处理保持原位并保持数值语义不变。
 
-- VOF geometry 只负责 `phi / cell_type / normal / curvature`，不求解速度。
-- topology 判断主要使用候选密度；VOF 产生 `final_type / new_active / retired_active / mass / phi` 等变化信息。
-- `GAS → INTERFACE` 所需 populations/moments、密度、速度和力由 LBM-owned active-cell 初始化实现完成，设备 Kernel 放在 `lbm/solver/kernels/initialization.py`。
-- VOF 的 `finish_step()` 仍是原子提交入口；本轮通过 Solver 内部注入的 LBM active-cell 操作完成上述步骤，不增加公开 Coupler 或第四个业务方法。
+唯一行为修正是消除重复 MAC 计算：
 
-近期最简实现保留现有 cell-centered `rho/u` 写回和旧 GAS/新界面的局部修正，但删除 VOF 修正前的第一次 MAC `vel_u/v/w` 计算。`finish_step()` 完成后，`LbmSolver` 基于最终 authoritative state 只生成一次 MAC 速度。
+- 保留通用 LBM 对 cell-centered `rho/u` 和 force 的写回。
+- `_write_observables()` 不再立即调用 `_write_mac_velocities()`。
+- VOF `finish_step()` 完成现有状态修正后，由 `LbmSolver` 调用一次 `_write_mac_velocities(state_out)`。
+- 非 VOF 路径也在 cell-centered observable 写回后调用一次 `_write_mac_velocities(state_out)`。
+- 不增加第二次全网格 cell-centered `rho/u` 重算，不调整 VOF topology 或 kinetic 流程。
 
-`finish_step()` 内部提交顺序固定为：恢复旧 GAS storage → 计算 transition → 调用 LBM-owned 新活跃/退休格点操作 → 提交 VOF mass/phi/type/epoch → 重算 geometry → 验证 target → diagnostics → 清理 scratch。任一步失败都不交换 Domain 双缓冲，并保留 prepared 标记进入 fail-stop 状态。
-
-更长期若由 `LbmSolver` 统一提交 topology，则 VOF 只输出内部 topology delta；LBM 统一发布旧活跃格点候选结果、初始化新活跃格点、退休旧格点，再一次性发布宏观状态和 MAC。届时 diagnostics 也随提交所有权移动到“VOF 与 LBM 状态均完成”后的统一验收点。
+验收以 `moments_to_mac_u/v/w` 每个分量每步各启动一次为准，并要求最终 MAC 数值继续基于本步最终 `state_out.velocity_x/y/z`。
 
 ## 14. D3Q19 常量
 
@@ -598,7 +602,7 @@ D3Q19_UNIQUE_LINK_INDICES = tuple(
 - `VofSolver.last_diagnostics` 是唯一结果缓存；`LbmSolver.last_vof_diagnostics` 只是只读 property，不复制结果。
 - 增加状态对测试：同一对象、错 target、错 epoch、重复 prepare、跳过 prepare、finish 失败后重入都必须稳定 raise。
 - 增加 diagnostics 写保护测试：authoritative arrays 的指针和值在诊断前后不变，只允许诊断自有 buffer 改变。
-- 增加时序回归测试：确认边界场复制早于 force/collision，新活跃格点初始化早于 swap，MAC Kernel 每个分量每步只启动一次。
+- 增加时序回归测试：确认边界场复制早于 force/collision，且 MAC Kernel 每个分量每步只启动一次。
 - 增加导入 smoke test：`lbm`、`lbm.solver`、`lbm.vof`、`lbm.vof.solver`、`lbm.vof.diagnostics` 可独立导入且无循环。
 
 ## 17. 与当前实现的核对结论
@@ -611,10 +615,10 @@ D3Q19_UNIQUE_LINK_INDICES = tuple(
 | `state_out.density` 在 moments/force/collision 后才可用 | topology 不得在此之前最终判定 | topology proposal/commit 保留在 `finish_step()` |
 | `_copy_boundary_fields()` 在 streaming 前执行 | 时机属于耦合不变量 | 文件移动后仍在 streaming 前复制 |
 | `_write_observables()` 内生成 MAC，VOF 修正后又生成一次 | 第二次是必要覆盖，第一次是冗余 | 拆开 cell observable 与 MAC，最终只生成一次 MAC |
-| 新界面 kinetic 初始化由 `vof/kinetic_init.py` 实现 | 物理所有权错误，但执行时点基本正确 | 实现迁入 LBM active-cell 初始化；仍在 topology 确认后、交换前完成 |
+| VOF topology 与 kinetic 一致性处理位于 VOF 子系统 | 本轮保持现状 | 不迁移到 LBM，不增加 LBM `cell_type` 管理 |
 | diagnostics 由 `LbmSolver.step()` 直接收集 | 会迫使 LBM 了解 VOF scratch | 移入 `VofSolver.finish_step()` 的提交后/清理前位置 |
 | `_validate_vof_transaction_source()` 每步扫描 storage alias/reference mass | 正确但成本与职责过重 | 完整结构检查移至双缓冲创建/初始化；每步只保留最小事务门禁 |
 | `vof/__init__.py` eager-export 几乎全部阶段对象 | API 过宽且容易形成导入环 | 根入口只导出叶级模型/状态/契约，Solver 和 diagnostics 从各自子包入口导出 |
 | `boundaries.py` 同时包含解析、占位抽象和边界映射 | 既不是纯 model，也不是纯 solver | 按静态配置、shape-aware 解析、Kernel 执行三层拆分 |
 
-因此，重构不是重写算法：固定拓扑质量交换、自由表面 population 补全、通用 LBM、topology 提交、新活跃格点初始化、geometry、diagnostics、MAC、双缓冲交换的依赖顺序保持明确。结构提交与数值变更必须分批，先用等价移动建立新边界，再分别删除冗余 MAC、收窄检查和迁移 active-cell 所有权。
+因此，重构不是重写算法：固定拓扑质量交换、自由表面 population 补全、通用 LBM、VOF 内部提交、geometry、diagnostics、MAC、双缓冲交换的依赖顺序保持明确。结构提交与数值变更必须分批；本轮宏观发布只删除第一次 MAC 计算，不改变 topology 或 kinetic 所有权。

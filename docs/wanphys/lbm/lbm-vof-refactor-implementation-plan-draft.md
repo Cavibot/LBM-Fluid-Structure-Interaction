@@ -18,7 +18,7 @@
 - 结构移动和数值算法修改不得放在同一个提交中。
 - Domain 不暴露私有双缓冲供测试调用；阶段测试直接构造 Solver 和 State。
 - diagnostics 对 authoritative state 只读。
-- GAS 是非活跃区域；新活跃格点的 kinetic/rho/u/force 初始化由 LBM 拥有。
+- LBM 本轮不接管 VOF `cell_type`、topology 或 kinetic 初始化。
 - 正常时间步只执行一次最终 MAC `vel_u/v/w` 写回。
 
 ### 0.2 每步完成定义
@@ -104,7 +104,6 @@
 - `lbm/solver/collisions.py`
 - `lbm/solver/forcing.py`
 - `lbm/solver/moments.py`
-- `lbm/solver/active_cells.py`
 - `lbm/solver/kernels/common.py`
 - `lbm/solver/kernels/initialization.py`
 - `lbm/solver/kernels/streaming.py`
@@ -126,7 +125,7 @@
 - 单阶段 `wp.func` 与该阶段同文件；跨阶段 `wp.func` 进入唯一的 `kernels/common.py`。
 - NumPy 矩阵、relaxation policy 和纯 Python 策略保留在 Solver 高层文件。
 - 不改变 `_copy_boundary_fields()`、streaming、boundary、moments、force、collision、observable 的相对顺序。
-- 不在本步骤删除第一次 MAC 写回，也不迁移 VOF kinetic 初始化所有权。
+- 不在本步骤删除第一次 MAC 写回，也不改变 VOF topology 或 kinetic 职责。
 - 不创建每 Kernel 一个文件，不建立仅转发一次的包装类。
 
 ### 验收规格
@@ -179,7 +178,7 @@
 - `VofSolver` 只从 `vof/solver/__init__.py` 导出；diagnostics 对象只从 `vof/diagnostics/__init__.py` 导出。
 - VOF 模块对 LBM state 类型只使用 `TYPE_CHECKING`、Protocol 或局部导入，禁止根包循环导入。
 - `validation.py` 不反向依赖 `initial_conditions.py`。
-- 暂不删除原 kinetic 初始化逻辑；所有权切换留给 Phase 2。
+- 保留 VOF 原有 kinetic 初始化逻辑及其所有权，本轮不迁入 LBM。
 
 ### 验收规格
 
@@ -240,44 +239,35 @@
 - mass exchange 仍只读旧时间层；将其放到普通 pull streaming 后不改变 Step 1.1 基线。
 - `state_out.density` 产生前不执行最终 topology proposal/commit。
 
-## Step 2.2：迁移新活跃格点所有权并消除重复 MAC
+## Step 2.2：消除重复 MAC 计算
 
 ### 目标
 
-将 `GAS → INTERFACE` 的 kinetic/rho/u/force 初始化归还 LBM，并把 cell-centered observable 与 MAC 发布拆开，使最终 MAC 每步只计算一次。
+把 cell-centered observable 与 MAC 发布拆开，使 VOF 和非 VOF 路径的最终 MAC 每步都只计算一次；不改变 topology、`cell_type` 或 kinetic 初始化职责。
 
 ### 相关文件
 
 - `lbm/solver/solver.py`
-- `lbm/solver/active_cells.py`
-- `lbm/solver/kernels/initialization.py`
 - `lbm/solver/kernels/macroscopic.py`
-- `lbm/vof/solver/solver.py`
-- `lbm/vof/solver/transition.py`
-- 当前迁移来源：`lbm/vof/kinetic_init.py`、`kinetic_init_kernels.py`
 - `lbm/state.py`
-- `newton/tests/test_lbm_vof_p4.py`
 - `newton/tests/test_lbm_vof_p7.py`
 - `newton/tests/test_lbm_state_encoding.py`
 
 ### 实现边界
 
-- VOF geometry 只写 `phi/type/normal/curvature/plic`，不得计算或拥有流体速度。
-- VOF transition 产生内部 `final_type/new_active/retired_active/mass/phi` 变化信息。
-- LBM-owned active-cell 操作初始化 populations 或 HOME moments、rho/u/force，并处理退休格点。
-- 为保持三方法 API，`VofSolver.finish_step()` 通过构造期注入的内部 LBM operation 完成 active-cell 步骤；不新增公开 Coupler 类。
-- 固定内部顺序：恢复旧 GAS → transition → LBM active-cell 操作 → VOF commit → geometry → target validation。
 - `_write_observables()` 拆为 cell-centered 写回和最终 MAC 写回；删除 VOF 修正前的 MAC 计算。
-- 不增加第二次全网格 cell-centered rho/u 重算，只保留必要的局部新活跃/旧 GAS 修正。
+- VOF 路径在 `finish_step()` 完成现有处理后调用一次 `_write_mac_velocities(state_out)`。
+- 非 VOF 路径在 cell-centered observable 写回后调用一次 `_write_mac_velocities(state_out)`。
+- 不增加第二次全网格 cell-centered `rho/u` 重算。
+- 不移动、不改写 VOF kinetic 初始化，不让 LBM 读取或管理 VOF `cell_type`。
+- 不新增 topology 变化量、LBM 管理类、回调或耦合接口。
 
 ### 验收规格
 
-- `vof/solver/` 和 `vof/solver/kernels/` 不再包含 kinetic/rho/u/force 初始化实现。
-- 新界面 FullF populations 或 HOME moments 在 swap 前合法，下一步 streaming 不读取无效 GAS storage。
-- 新活跃格点 density 有限且为正，速度满足 `max_lattice_speed`，force 与配置一致。
-- 退休格点不会作为下一步活跃 donor 被读取。
 - instrumentation 证明 `moments_to_mac_u/v/w` 每个分量每步各启动一次。
-- FullF/HOME、positivity on/off、gravity on/off 的 VOF 定向测试通过。
+- 最终 MAC 数值由本步最终 `state_out.velocity_x/y/z` 生成。
+- FullF/HOME、VOF/非 VOF、positivity on/off 的定向测试通过。
+- VOF topology、kinetic 初始化结果及调用顺序与 Phase 1 基线一致。
 
 ## Step 2.3：将 diagnostics 内聚到 `finish_step()`
 
@@ -317,7 +307,7 @@
 ### Phase 2 出口门
 
 - 三方法生命周期成为唯一 VOF 步进路径。
-- 双缓冲、topology、新活跃格点、diagnostics、MAC 的时间顺序有直接测试保护。
+- 双缓冲、topology、diagnostics、MAC 的时间顺序有直接测试保护。
 - P1–P8、fix1/fix2、dambreak 单步和短程回归全部通过。
 
 ---
