@@ -244,6 +244,11 @@ class AuthoritativeVofDamBreakVisualExample:
         print_every: int = 30,
     ) -> None:
         self.viewer = viewer
+        self.viewer.set_camera(
+            pos=wp.vec3(3.11, -2.19, 1.41),
+            pitch=-12.4,
+            yaw=124.7,
+        )
         self.config = config
         self.print_every = int(print_every)
         self.scene = AuthoritativeVofDamBreakScene(config)

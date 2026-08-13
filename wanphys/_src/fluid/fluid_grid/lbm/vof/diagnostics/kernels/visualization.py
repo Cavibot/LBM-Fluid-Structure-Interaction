@@ -8,11 +8,13 @@ import warp as wp
 @wp.kernel
 def compact_interface_visuals_kernel(
     cell_type: wp.array3d(dtype=wp.uint8),
+    phi: wp.array3d(dtype=float),
     normal: wp.array3d(dtype=wp.vec3),
     solid_phi: wp.array3d(dtype=float),
     count: wp.array(dtype=wp.int32),
     points: wp.array(dtype=wp.vec3),
     normal_ends: wp.array(dtype=wp.vec3),
+    point_colors: wp.array(dtype=wp.vec3),
     origin_x: float,
     origin_y: float,
     origin_z: float,
@@ -30,6 +32,8 @@ def compact_interface_visuals_kernel(
     )
     points[output_index] = point
     normal_ends[output_index] = point + normal[i, j, k] * normal_length
+    fill = wp.clamp(phi[i, j, k], 0.0, 1.0)
+    point_colors[output_index] = wp.vec3(1.0 - fill, fill, 0.0)
 
 
 __all__ = ["compact_interface_visuals_kernel"]

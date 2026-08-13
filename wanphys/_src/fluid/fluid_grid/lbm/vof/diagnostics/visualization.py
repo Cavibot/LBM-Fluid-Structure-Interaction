@@ -100,7 +100,7 @@ class VofInterfaceVisualizer:
         )
         self._point_colors = wp.full(
             capacity,
-            wp.vec3(1.0, 0.35, 0.05),
+            wp.vec3(1.0, 0.0, 0.0),
             dtype=wp.vec3,
             device=device,
         )
@@ -116,11 +116,13 @@ class VofInterfaceVisualizer:
             dim=self.shape,
             inputs=[
                 view.cell_type,
+                view.phi,
                 view.normal,
                 solid_phi,
                 self._count,
                 self._points,
                 self._normal_ends,
+                self._point_colors,
                 *self.origin,
                 self.cell_size,
                 self.normal_length,
