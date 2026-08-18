@@ -269,5 +269,6 @@ def atmosphere_volme_update_kernel(
         return
     bc = bubble_count_gpu[0]
     for b in range(bc):
-        if bubble_rho[b] == wp.float64(1.0):
-            bubble_init_volume[b] = bubble_rho[b] * bubble_volume[b]
+        vol = bubble_volume[b]
+        if bubble_rho[b] == wp.float64(1.0) and vol > wp.float64(1.0e-12):
+            bubble_init_volume[b] = bubble_rho[b] * vol

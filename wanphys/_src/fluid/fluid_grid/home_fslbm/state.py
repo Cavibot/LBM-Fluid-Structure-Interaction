@@ -281,8 +281,11 @@ class HomeFslbmState(DomainState):
         return obj
 
     def shares_buffers_with(self, other: "HomeFslbmState") -> bool:
-        """True when ``other`` references the same GPU allocation for ``flag``."""
-        return self.flag.ptr == other.flag.ptr
+        """True when ``other`` shares the same in-place GPU allocations."""
+        return (
+            self.flag.ptr == other.flag.ptr
+            and self.bubble_volume.ptr == other.bubble_volume.ptr
+        )
 
     # ------------------------------------------------------------------
     # DomainState protocol

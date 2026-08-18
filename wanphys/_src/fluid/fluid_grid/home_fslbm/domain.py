@@ -97,8 +97,13 @@ class HomeFslbmDomain(Domain):
             dt,
             contacts=contacts,
         )
-        # Swap buffers
-        self._state_in, self._state_out = self._state_out, self._state_in
+        # Swap buffer handles only when in/out own distinct GPU allocations.
+        if (
+            self._state_in is not None
+            and self._state_out is not None
+            and not self._state_in.shares_buffers_with(self._state_out)
+        ):
+            self._state_in, self._state_out = self._state_out, self._state_in
 
     def pre_step(self, dt: float) -> None:
         """Hook called before each step."""

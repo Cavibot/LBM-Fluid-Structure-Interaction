@@ -1260,7 +1260,9 @@ def stream_collide_bvh_kernel(
         rho_k = 1.0  # default gas density
         if tag > 0:
             # bubble_rho is double; cast to float for arithmetic
-            rho_k = float(bubble_rho[tag - 1])
+            br = float(bubble_rho[tag - 1])
+            if br == br and br > 0.0 and br < 1.0e12:
+                rho_k = br
 
         # ---- Surface tension modulation (ref lines 879-888) ----
         # Reference indexes bubble arrays at (tag-1) even when tag<=0.

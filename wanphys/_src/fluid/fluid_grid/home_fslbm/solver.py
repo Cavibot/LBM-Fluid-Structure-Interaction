@@ -90,6 +90,17 @@ class HomeFslbmSolver(FluidGridSolverBase):
     def _buffers_aliased(state_in: HomeFslbmState, state_out: HomeFslbmState) -> bool:
         return state_in.shares_buffers_with(state_out)
 
+    @staticmethod
+    def _mirror_bubble_list_handles(
+        state_in: HomeFslbmState,
+        state_out: HomeFslbmState,
+    ) -> None:
+        """Mirror ``bubble_list_swap`` refs onto ``state_in`` when buffers are aliased."""
+        state_in.bubble_volume = state_out.bubble_volume
+        state_in.bubble_label_volume = state_out.bubble_label_volume
+        state_in.bubble_init_volume = state_out.bubble_init_volume
+        state_in.bubble_label_init_volume = state_out.bubble_label_init_volume
+
     def _copy_persistent_fields(
         self,
         state_in: HomeFslbmState,
@@ -335,6 +346,8 @@ class HomeFslbmSolver(FluidGridSolverBase):
 
         if merge_flag > 0 or split_flag > 0:
             self._handle_merge_split(state)
+            if aliased:
+                self._mirror_bubble_list_handles(state_in, state_out)
             wp.launch(
                 kernels_bubble.clear_detector_kernel,
                 dim=dim,

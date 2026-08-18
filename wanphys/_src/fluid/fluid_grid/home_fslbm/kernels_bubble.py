@@ -688,7 +688,8 @@ def num_rho_update_kernel(
     bc = bubble_count_gpu[0]
     for i in range(bc):
         vol = bubble_volume[i]
-        bubble_rho[i] = bubble_init_volume[i] / vol
+        if vol > wp.float64(1.0e-12):
+            bubble_rho[i] = bubble_init_volume[i] / vol
 
 
 @wp.kernel
@@ -734,7 +735,9 @@ def bubble_rho_update_kernel(
     if b >= bubble_count_gpu[0]:
         return
     vol = bubble_volume[b]
-    bubble_rho[b] = bubble_init_volume[b] / vol
+    # Guard div-by-zero: NaN rho poisons stream_collide / surface (see debug-cd5cb0).
+    if vol > wp.float64(1.0e-12):
+        bubble_rho[b] = bubble_init_volume[b] / vol
 
 
 @wp.kernel
