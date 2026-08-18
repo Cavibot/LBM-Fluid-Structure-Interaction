@@ -91,6 +91,26 @@ class TestDoublePrecisionBubbleArrays:
         assert default_state.bubble_label_volume.dtype == _warp.float64
 
 
+class TestAliasBuffers:
+    """Double-buffered domains share GPU allocations."""
+
+    def test_alias_shares_flag_ptr(self, default_model, _warp):
+        from wanphys._src.fluid.fluid_grid.home_fslbm.domain import HomeFslbmDomain
+
+        domain = HomeFslbmDomain(default_model)
+        domain.create_state()
+        assert domain._state_in is not None
+        assert domain._state_out is not None
+        assert domain._state_in.shares_buffers_with(domain._state_out)
+
+    def test_alias_method(self, default_state, default_model, _warp):
+        from wanphys._src.fluid.fluid_grid.home_fslbm.state import HomeFslbmState
+
+        alias = HomeFslbmState.alias(default_state)
+        assert alias.shares_buffers_with(default_state)
+        assert alias is not default_state
+
+
 class TestDefaultInitialValues:
     """Key fields must start with well-defined sentinel values."""
 

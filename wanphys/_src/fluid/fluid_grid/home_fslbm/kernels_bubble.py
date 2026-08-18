@@ -724,14 +724,14 @@ def bubble_rho_update_kernel(
     bubble_volume: wp.array(dtype=wp.float64),
     bubble_init_volume: wp.array(dtype=wp.float64),
     bubble_rho: wp.array(dtype=wp.float64),
-    bubble_count: int,
+    bubble_count_gpu: wp.array(dtype=wp.int32),
 ):
     """bubble_rho_update_kernel — ``mrLbmSolverGpu3D.cu:1356-1363``.
 
     ``ρ = V_init / V`` (init_volume stores ρ·V mass-like quantity after merges).
     """
     b = wp.tid()
-    if b >= bubble_count:
+    if b >= bubble_count_gpu[0]:
         return
     vol = bubble_volume[b]
     bubble_rho[b] = bubble_init_volume[b] / vol

@@ -41,6 +41,8 @@ DEFAULT_HEIGHT: int = 720
 DEFAULT_SUBSTEPS: int = 4
 DEFAULT_CRF: int = 18
 DEFAULT_OUTPUT: str = "dambreak_foam_256.mp4"
+DEFAULT_GRAVITY_Z: float = -5.0e-4
+DEFAULT_SURFACE_TENSION: float = 6.0 * 4e-3
 
 # Elevated side / three-quarter view (Z-up): look toward domain centre.
 CAMERA_PITCH: float = -45.0
@@ -186,6 +188,8 @@ class DamBreakFoamRecorder:
         n: int,
         substeps: int,
         fps: int,
+        gravity_z: float = DEFAULT_GRAVITY_Z,
+        surface_tension: float = DEFAULT_SURFACE_TENSION,
     ):
         self.viewer = viewer
         self.n = int(n)
@@ -193,6 +197,8 @@ class DamBreakFoamRecorder:
         self.frame_dt = 1.0 / float(fps)
         self.dh = foam.DH
         self.ray_steps = _ray_march_steps(self.n)
+        self.gravity_z = float(gravity_z)
+        self.surface_tension = float(surface_tension)
 
         if hasattr(viewer, "_paused"):
             viewer._paused = False
@@ -209,8 +215,8 @@ class DamBreakFoamRecorder:
             omega=foam.OMEGA,
             gravity_x=0.0,
             gravity_y=0.0,
-            gravity_z=foam.GRAVITY_Z,
-            surface_tension=foam.SURFACE_TENSION,
+            gravity_z=self.gravity_z,
+            surface_tension=self.surface_tension,
             disjoin_factor=foam.DISJOIN,
             atmosphere_open=foam.ATMOSPHERE_OPEN,
             enable_gas=foam.ENABLE_GAS,
@@ -218,7 +224,8 @@ class DamBreakFoamRecorder:
         )
         print(
             f"HOME-FSLBM Dam-Break Foam Record: {self.n}^3, dh={self.dh}, "
-            f"world={world_size:.3f}m, gz={foam.GRAVITY_Z}, "
+            f"world={world_size:.3f}m, gz={self.gravity_z}, "
+            f"sigma={self.surface_tension}, "
             f"atmosphere_open={foam.ATMOSPHERE_OPEN}, "
             f"enable_gas={foam.ENABLE_GAS}, dam x<{dam_x} z<{dam_z}, "
             f"ray_steps={self.ray_steps}",
@@ -340,6 +347,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--ffmpeg", type=str, default=None, help="Explicit path to ffmpeg executable.")
     p.add_argument("--device", type=str, default=None, help="Warp device, e.g. cuda:0.")
     p.add_argument(
+        "--gravity-z",
+        type=float,
+        default=DEFAULT_GRAVITY_Z,
+        help=f"Lattice gravity_z (default {DEFAULT_GRAVITY_Z}).",
+    )
+    p.add_argument(
+        "--surface-tension",
+        type=float,
+        default=DEFAULT_SURFACE_TENSION,
+        help=f"Surface tension (default {DEFAULT_SURFACE_TENSION}).",
+    )
+    p.add_argument(
         "--no-headless",
         action="store_true",
         help="Show a GL window while recording (default is headless).",
@@ -386,6 +405,8 @@ def main(argv: list[str] | None = None) -> int:
         n=int(args.n),
         substeps=int(args.substeps),
         fps=int(args.fps),
+        gravity_z=float(args.gravity_z),
+        surface_tension=float(args.surface_tension),
     )
 
     # Warm up GL / SSFR before opening the encoder.

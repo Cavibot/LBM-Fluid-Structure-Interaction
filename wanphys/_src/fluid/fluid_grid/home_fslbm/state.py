@@ -227,6 +227,63 @@ class HomeFslbmState(DomainState):
             (nx, ny, nz + 1), dtype=float, device=self.device
         )
 
+    @classmethod
+    def alias(cls, other: "HomeFslbmState") -> "HomeFslbmState":
+        """Return a lightweight view sharing ``other``'s GPU buffers.
+
+        Used for double-buffered domains where both logical states mutate
+        the same in-place fields; only ``f_mom`` / ``g_mom`` ping-pong
+        buffers are swapped via pointer exchange each step.
+        """
+        obj: HomeFslbmState = cls.__new__(cls)
+        obj.model = other.model
+        obj.res = other.res
+        obj.device = other.device
+        obj.requires_grad = other.requires_grad
+        obj._stride = other._stride
+        obj.f_mom = other.f_mom
+        obj.f_mom_post = other.f_mom_post
+        obj.flag = other.flag
+        obj.mass = other.mass
+        obj.massex = other.massex
+        obj.phi = other.phi
+        obj.force_x = other.force_x
+        obj.force_y = other.force_y
+        obj.force_z = other.force_z
+        obj.g_mom = other.g_mom
+        obj.g_mom_post = other.g_mom_post
+        obj.delta_g = other.delta_g
+        obj.c_value = other.c_value
+        obj.src = other.src
+        obj.delta_phi = other.delta_phi
+        obj.tag_matrix = other.tag_matrix
+        obj.previous_tag = other.previous_tag
+        obj.previous_merge_tag = other.previous_merge_tag
+        obj.input_matrix = other.input_matrix
+        obj.label_matrix = other.label_matrix
+        obj.merge_detector = other.merge_detector
+        obj.merge_flag = other.merge_flag
+        obj.split_flag = other.split_flag
+        obj.disjoin_force = other.disjoin_force
+        obj.islet = other.islet
+        obj.bubble_volume = other.bubble_volume
+        obj.bubble_init_volume = other.bubble_init_volume
+        obj.bubble_rho = other.bubble_rho
+        obj.bubble_label_init_volume = other.bubble_label_init_volume
+        obj.bubble_label_volume = other.bubble_label_volume
+        obj.label_num = other.label_num
+        obj.bubble_count = other.bubble_count
+        obj.solid_phi = other.solid_phi
+        obj.solid_body_id = other.solid_body_id
+        obj.vel_solid_u = other.vel_solid_u
+        obj.vel_solid_v = other.vel_solid_v
+        obj.vel_solid_w = other.vel_solid_w
+        return obj
+
+    def shares_buffers_with(self, other: "HomeFslbmState") -> bool:
+        """True when ``other`` references the same GPU allocation for ``flag``."""
+        return self.flag.ptr == other.flag.ptr
+
     # ------------------------------------------------------------------
     # DomainState protocol
     # ------------------------------------------------------------------

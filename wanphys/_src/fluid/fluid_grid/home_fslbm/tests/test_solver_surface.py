@@ -131,6 +131,8 @@ class TestSurfaceKernelLaunchOrder:
             reconstruct_distribution,
             ml_get_pi_after_collision,
             stream_collide_bvh_kernel,
+            stream_collide_bulk_kernel,
+            stream_collide_interface_kernel,
             calculate_phi,
             plic_cube,
         )
@@ -138,5 +140,7 @@ class TestSurfaceKernelLaunchOrder:
         assert reconstruct_distribution is not None
         assert ml_get_pi_after_collision is not None
         assert stream_collide_bvh_kernel is not None
+        assert stream_collide_bulk_kernel is not None
+        assert stream_collide_interface_kernel is not None
         assert calculate_phi is not None
         assert plic_cube is not None

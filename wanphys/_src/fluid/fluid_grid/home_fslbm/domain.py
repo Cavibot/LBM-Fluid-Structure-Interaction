@@ -78,7 +78,7 @@ class HomeFslbmDomain(Domain):
         Returns the newly created active state.
         """
         self._state_in = HomeFslbmState(self._model)
-        self._state_out = HomeFslbmState(self._model)
+        self._state_out = HomeFslbmState.alias(self._state_in)
         return self._state_in
 
     def step(

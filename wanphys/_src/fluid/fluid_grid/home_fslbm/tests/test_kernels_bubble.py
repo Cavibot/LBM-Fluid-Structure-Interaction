@@ -206,10 +206,11 @@ class TestParseLabelAndGasLaw:
         vol = wp.array(np.array([80.0], dtype=np.float64), dtype=wp.float64)
         init = wp.array(np.array([100.0], dtype=np.float64), dtype=wp.float64)
         rho = wp.array(np.array([1.0], dtype=np.float64), dtype=wp.float64)
+        bcount = wp.array(np.array([1], dtype=np.int32), dtype=wp.int32)
         wp.launch(
             bubble_rho_update_kernel,
             dim=1,
-            inputs=[vol, init, rho, 1],
+            inputs=[vol, init, rho, bcount],
         )
         assert abs(float(rho.numpy()[0]) - 1.25) < 1e-12
 

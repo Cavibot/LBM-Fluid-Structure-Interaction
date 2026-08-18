@@ -1002,6 +1002,9 @@ def stream_collide_bvh_kernel(
     # ---- State arrays (write) ----
     f_mom_post: wp.array(dtype=float),          # [10 × N] post-collision moments
 
+    # ---- Turbulence mask (read) ----
+    near_small_bubble: wp.array3d(dtype=wp.uint8),
+
     # ---- Parameters ----
     nx: int,
     ny: int,
@@ -1014,6 +1017,7 @@ def stream_collide_bvh_kernel(
     turbulence_factor: float,
     turbulence_radius: int,
     atmosphere_open: int,                       # bool → int
+    interface_only: int,                        # 0=bulk (TYPE_F…), 1=TYPE_I only
     px: int,
     py: int,
     pz: int,
@@ -1055,6 +1059,16 @@ def stream_collide_bvh_kernel(
         # Set flag to TYPE_F and skip — this cell acts as fluid
         flag[i, j, k] = wp.uint8(C.TYPE_F)
         return
+
+    # Bulk vs interface launch split (same numerics as monolithic kernel).
+    # ``interface_only < 0`` disables the split (monolithic pass).
+    if interface_only >= 0:
+        if interface_only != 0:
+            if flagsn_su != C.TYPE_I:
+                return
+        else:
+            if flagsn_su == C.TYPE_I:
+                return
 
     # ---- Load current-cell moments ----
     cr = f_mom[C.M_RHO * stride + cur_idx]
@@ -1534,40 +1548,22 @@ def stream_collide_bvh_kernel(
     # Without nearby bubbles the molecular omega is used.
 
     omega_eff = omega
-    omega_base = omega
 
     if turbulence_factor > 0.0 and turbulence_radius > 0:
-        # ---- Strain-rate from pop-computed stress (ref lines 1015-1020) ----
-        sxx = pixx_pop * inv_rho - C.CS2
-        syy = piyy_pop * inv_rho - C.CS2
-        szz = pizz_pop * inv_rho - C.CS2
-        sxy = pixy_pop * inv_rho
-        sxz = pixz_pop * inv_rho
-        syz = piyz_pop * inv_rho
-
-        # ---- Neighbourhood search (ref lines 1001-1027) ----
-        r = int(turbulence_radius)
-        _found = int(0)
-        for dij in range(-r, r):
-            for djk in range(-r, r):
-                for dkh in range(-r, r):
-                    if _found == 1:
-                        break
-                    ni = i + djk
-                    nj = j + dij
-                    nk = k + dkh
-                    if ni >= 0 and ni < nx and nj >= 0 and nj < ny and nk >= 0 and nk < nz:
-                        ntag = tag_matrix[ni, nj, nk]
-                        if ntag > 0:
-                            bv = float(bubble_volume[ntag - 1])
-                            if bv < 5000000.0:
-                                fact2 = turbulence_factor
-                                vis = fact2 * wp.sqrt(
-                                    sxx * sxx + 2.0 * sxy * sxy + 2.0 * sxz * sxz
-                                    + syy * syy + 2.0 * syz * syz + szz * szz
-                                )
-                                omega_eff = 1.0 / ((vis + 1.0e-4) * 3.0 + 0.5)
-                                _found = 1
+        if near_small_bubble[i, j, k] != wp.uint8(0):
+            # ---- Strain-rate from pop-computed stress (ref lines 1015-1020) ----
+            sxx = pixx_pop * inv_rho - C.CS2
+            syy = piyy_pop * inv_rho - C.CS2
+            szz = pizz_pop * inv_rho - C.CS2
+            sxy = pixy_pop * inv_rho
+            sxz = pixz_pop * inv_rho
+            syz = piyz_pop * inv_rho
+            fact2 = turbulence_factor
+            vis = fact2 * wp.sqrt(
+                sxx * sxx + 2.0 * sxy * sxy + 2.0 * sxz * sxz
+                + syy * syy + 2.0 * syz * syz + szz * szz
+            )
+            omega_eff = 1.0 / ((vis + 1.0e-4) * 3.0 + 0.5)
 
     # =====================================================================
     # Phase F: NOCM-MRT collision
@@ -1619,6 +1615,169 @@ def stream_collide_bvh_kernel(
     f_mom_post[C.M_SYY * stride + cur_idx] = pi_new.yy * inv_rho_new - C.CS2
     f_mom_post[C.M_SYZ * stride + cur_idx] = pi_new.yz * inv_rho_new
     f_mom_post[C.M_SZZ * stride + cur_idx] = pi_new.zz * inv_rho_new - C.CS2
+
+
+# ============================================================================
+# 5.1 Turbulence mask kernels (pre-pass for eddy viscosity)
+# ============================================================================
+
+
+@wp.kernel
+def mark_small_bubble_kernel(
+    tag_matrix: wp.array3d(dtype=wp.int32),
+    bubble_volume: wp.array(dtype=wp.float64),
+    mark: wp.array3d(dtype=wp.uint8),
+    nx: int,
+    ny: int,
+    nz: int,
+):
+    """Mark cells belonging to small bubbles (V < 5e6)."""
+    i, j, k = wp.tid()
+    mark[i, j, k] = wp.uint8(0)
+    tag = tag_matrix[i, j, k]
+    if tag > 0:
+        if float(bubble_volume[tag - 1]) < 5000000.0:
+            mark[i, j, k] = wp.uint8(1)
+
+
+@wp.kernel
+def dilate_near_small_bubble_kernel(
+    mark: wp.array3d(dtype=wp.uint8),
+    near: wp.array3d(dtype=wp.uint8),
+    radius: int,
+    nx: int,
+    ny: int,
+    nz: int,
+):
+    """Dilate ``mark`` with the reference stencil (axis swap dij/djk)."""
+    i, j, k = wp.tid()
+    r = radius
+    found = int(0)
+    out_val = wp.uint8(0)
+    for dij in range(-r, r):
+        for djk in range(-r, r):
+            for dkh in range(-r, r):
+                if found == 1:
+                    break
+                ni = i + djk
+                nj = j + dij
+                nk = k + dkh
+                if ni >= 0 and ni < nx and nj >= 0 and nj < ny and nk >= 0 and nk < nz:
+                    if mark[ni, nj, nk] != wp.uint8(0):
+                        out_val = wp.uint8(1)
+                        found = 1
+    near[i, j, k] = out_val
+
+
+# Bulk / interface entry points — same body, ``interface_only`` passed as a
+# launch-time literal (0 or 1) so Warp can dead-code-eliminate PLIC in bulk.
+stream_collide_bulk_kernel = stream_collide_bvh_kernel
+stream_collide_interface_kernel = stream_collide_bvh_kernel
+
+
+def launch_stream_collide_bvh(
+    dim: tuple[int, int, int],
+    device: wp.Device,
+    *,
+    f_mom: wp.array,
+    flag: wp.array3d,
+    phi: wp.array3d,
+    tag_matrix: wp.array3d,
+    disjoin_force: wp.array3d,
+    islet: wp.array3d,
+    bubble_volume: wp.array,
+    bubble_init_volume: wp.array,
+    bubble_rho: wp.array,
+    solid_phi: wp.array3d,
+    solid_body_id: wp.array3d,
+    vel_solid_u: wp.array3d,
+    vel_solid_v: wp.array3d,
+    vel_solid_w: wp.array3d,
+    mass: wp.array3d,
+    massex: wp.array3d,
+    delta_g: wp.array3d,
+    delta_phi: wp.array3d,
+    force_x: wp.array3d,
+    force_y: wp.array3d,
+    force_z: wp.array3d,
+    c_value: wp.array3d,
+    src: wp.array3d,
+    f_mom_post: wp.array,
+    near_small_bubble: wp.array3d,
+    nx: int,
+    ny: int,
+    nz: int,
+    stride: int,
+    omega: float,
+    surface_tension: float,
+    henry_constant: float,
+    disjoin_factor: float,
+    turbulence_factor: float,
+    turbulence_radius: int,
+    atmosphere_open: int,
+    px: int,
+    py: int,
+    pz: int,
+    cx: wp.array,
+    cy: wp.array,
+    cz: wp.array,
+    w3d: wp.array,
+    opposite: wp.array,
+) -> None:
+    """Launch bulk then interface ``stream_collide_bvh`` passes."""
+    head = [
+        f_mom,
+        flag,
+        phi,
+        tag_matrix,
+        disjoin_force,
+        islet,
+        bubble_volume,
+        bubble_init_volume,
+        bubble_rho,
+        solid_phi,
+        solid_body_id,
+        vel_solid_u,
+        vel_solid_v,
+        vel_solid_w,
+        mass,
+        massex,
+        delta_g,
+        delta_phi,
+        force_x,
+        force_y,
+        force_z,
+        c_value,
+        src,
+        f_mom_post,
+        near_small_bubble,
+    ]
+    tail = [
+        nx,
+        ny,
+        nz,
+        stride,
+        omega,
+        surface_tension,
+        henry_constant,
+        disjoin_factor,
+        turbulence_factor,
+        turbulence_radius,
+        atmosphere_open,
+    ]
+    tail_end = [px, py, pz, cx, cy, cz, w3d, opposite]
+    wp.launch(
+        stream_collide_bulk_kernel,
+        dim=dim,
+        inputs=head + tail + [0] + tail_end,
+        device=device,
+    )
+    wp.launch(
+        stream_collide_interface_kernel,
+        dim=dim,
+        inputs=head + tail + [1] + tail_end,
+        device=device,
+    )
 
 
 # ============================================================================

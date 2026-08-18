@@ -150,6 +150,8 @@ def sync_double_buffer(domain, names: tuple[str, ...] | None = None) -> None:
     src = domain.state
     dst = domain._state_out
     assert dst is not None
+    if src.shares_buffers_with(dst):
+        return
     if names is None:
         names = (
             "f_mom", "f_mom_post", "flag", "mass", "massex", "phi",

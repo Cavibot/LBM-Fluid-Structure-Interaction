@@ -179,6 +179,8 @@ def _sync_double_buffer(domain: HomeFslbmDomain) -> None:
     src = domain.state
     dst = domain._state_out
     assert dst is not None
+    if src.shares_buffers_with(dst):
+        return
     for name in (
         "f_mom",
         "f_mom_post",

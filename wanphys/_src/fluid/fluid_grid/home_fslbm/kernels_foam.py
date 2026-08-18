@@ -258,7 +258,7 @@ def atmosphere_volme_update_kernel(
     bubble_volume: wp.array(dtype=wp.float64),
     bubble_init_volume: wp.array(dtype=wp.float64),
     bubble_rho: wp.array(dtype=wp.float64),
-    bubble_count: int,
+    bubble_count_gpu: wp.array(dtype=wp.int32),
 ):
     """Correct init_volume for atmosphere bubbles (rho == 1).
 
@@ -267,6 +267,7 @@ def atmosphere_volme_update_kernel(
     tid = wp.tid()
     if tid != 0:
         return
-    for b in range(bubble_count):
+    bc = bubble_count_gpu[0]
+    for b in range(bc):
         if bubble_rho[b] == wp.float64(1.0):
             bubble_init_volume[b] = bubble_rho[b] * bubble_volume[b]

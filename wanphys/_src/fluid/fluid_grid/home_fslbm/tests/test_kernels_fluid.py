@@ -808,3 +808,65 @@ class TestTurbulenceOmegaModification:
         sxy = f_mom_out[C.M_SXY * N: C.M_SXY * N + N]
         assert np.max(np.abs(sxy)) > 1e-8, \
             "Strain-rate component S_xy is zero everywhere — turbulence model may not be active"
+
+
+# ===========================================================================
+# Test 8: turbulence mask matches reference neighbourhood stencil
+# ===========================================================================
+
+
+class TestTurbulenceMask:
+    """Dilated small-bubble mask must match hand-written reference loop."""
+
+    def test_dilation_matches_reference_stencil(self, _warp, _constants):
+        wp = _warp
+        import numpy as np
+        from wanphys._src.fluid.fluid_grid.home_fslbm.kernels_fluid import (
+            dilate_near_small_bubble_kernel,
+            mark_small_bubble_kernel,
+        )
+
+        N = 16
+        tag = np.zeros((N, N, N), dtype=np.int32)
+        tag[8, 8, 8] = 1
+        vol = np.zeros(4, dtype=np.float64)
+        vol[0] = 100.0  # small bubble
+
+        tag_wp = wp.array(tag, dtype=wp.int32, device="cuda:0")
+        vol_wp = wp.array(vol, dtype=wp.float64, device="cuda:0")
+        mark = wp.zeros((N, N, N), dtype=wp.uint8, device="cuda:0")
+        near = wp.zeros((N, N, N), dtype=wp.uint8, device="cuda:0")
+
+        wp.launch(
+            mark_small_bubble_kernel,
+            dim=(N, N, N),
+            inputs=[tag_wp, vol_wp, mark, N, N, N],
+        )
+        radius = 3
+        wp.launch(
+            dilate_near_small_bubble_kernel,
+            dim=(N, N, N),
+            inputs=[mark, near, radius, N, N, N],
+        )
+        near_np = near.numpy()
+
+        ref = np.zeros((N, N, N), dtype=np.uint8)
+        mark_np = mark.numpy()
+        r = radius
+        for i in range(N):
+            for j in range(N):
+                for k in range(N):
+                    found = False
+                    for dij in range(-r, r):
+                        for djk in range(-r, r):
+                            for dkh in range(-r, r):
+                                if found:
+                                    break
+                                ni = i + djk
+                                nj = j + dij
+                                nk = k + dkh
+                                if 0 <= ni < N and 0 <= nj < N and 0 <= nk < N:
+                                    if mark_np[ni, nj, nk] != 0:
+                                        ref[i, j, k] = 1
+                                        found = True
+        assert np.array_equal(near_np, ref)

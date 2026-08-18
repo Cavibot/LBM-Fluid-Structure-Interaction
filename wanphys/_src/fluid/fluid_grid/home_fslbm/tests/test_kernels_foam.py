@@ -259,7 +259,7 @@ class TestAtmosphere:
                 state.bubble_volume,
                 state.bubble_init_volume,
                 state.bubble_rho,
-                2,
+                wp.array(np.array([2], dtype=np.int32), dtype=wp.int32, device=state.device),
             ],
         )
         wp.synchronize()
