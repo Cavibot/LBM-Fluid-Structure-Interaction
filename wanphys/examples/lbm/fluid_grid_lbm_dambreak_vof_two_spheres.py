@@ -5,7 +5,7 @@
 
 Normal-physics default (uniform liquid ρ≈1):
   SDF raster → Eq.24 walls → link ME (Eq.32: impact / torque) →
-  φ-volume Archimedes Fz=s·ρ·V·|g| (correct incompressible buoyancy) → XPBD.
+  hydrostatic pressure buoyancy F=∮ −p n dA (p=ρ|g|h) → XPBD.
 
 Do **not** use hydrostatic ``ρ(z)`` for everyday runs — that is a weakly-
 compressible trick so ME can fake vertical lift. Opt-in only via ``--hydro-rho``
@@ -34,6 +34,8 @@ import numpy as np
 import warp as wp
 
 from wanphys._src.fluid.fluid_grid.coupling import (
+    ArchimedesBuoyancy,
+    ArchimedesBuoyancyConfig,
     GridLbmRigidCoupling,
     lattice_gravity_to_world,
     recommended_me_force_scale,
@@ -41,11 +43,6 @@ from wanphys._src.fluid.fluid_grid.coupling import (
 from wanphys._src.fluid.fluid_grid.lbm import LbmDomain, LbmState
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.generic import (
     make_home_vof_model,
-)
-from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.phi_volume_buoyancy_warp import (
-    apply_phi_volume_buoyancy_gpu,
-    ensure_phi_volume_scratch,
-    fibonacci_shell_offsets,
 )
 from wanphys.examples.lbm._home_vof_empirical_sphere_fsi import (
     EmpiricalSphereFsiConfig,
@@ -91,8 +88,8 @@ SPHERE_VISUAL_MESH_LONGITUDES: int = 48
 SHOWCASE_LEGACY_FORCE_SCALE: float = 6.0
 # Empirical FSI (showcase plugin — not part of generic VOF / coupling core).
 BUOYANCY_FORCE_SCALE: float = 1.0
-# φ-volume Archimedes (default on): incompressible Fz = scale * s * ρ * V * |g|.
-# scale=1 is physical Archimedes; >1 was only for exaggerated demo bobbing.
+# Pressure buoyancy (default on): F = scale * ∮ −p n dA, p = ρ|g|·depth.
+# scale=1 is physical; >1 was only for exaggerated demo bobbing.
 ARCHIMEDES_SCALE: float = 1.0
 WATER_HORIZONTAL_DRAG_RATE: float = 4.0
 WATER_VERTICAL_DRAG_RATE: float = 12.0
@@ -276,17 +273,16 @@ class HomeVofDamBreakTwoSpheres:
         self._me_drag_xy = float(me_drag_xy)
         self._me_drag_z = float(me_drag_z)
         self._me_drag_ang = float(me_drag_ang)
-        # Path A: maintain ρ(z) for ME buoyancy; turn off φ-volume Archimedes.
+        # Path A: maintain ρ(z) for ME buoyancy; turn off pressure Archimedes.
         self._hydro_rho = bool(hydro_rho) and not self._showcase_fsi
         self._hydro_rho_rate = float(hydro_rho_rate)
         self._hydro_rho_every = max(1, int(hydro_rho_every))
-        # φ-volume Archimedes when not using showcase / path-A hydro maintain.
+        # Pressure ∮−p n dA when not using showcase / path-A hydro maintain.
         self._archimedes = (
             bool(archimedes) and not self._showcase_fsi and not self._hydro_rho
         )
         self._archimedes_scale = float(archimedes_scale)
-        self._phi_buoy_scratch: dict | None = None
-        self._phi_buoy_offsets = fibonacci_shell_offsets(48, radii=(1.08, 1.18))
+        self._archimedes_buoy: ArchimedesBuoyancy | None = None
         self._enable_height_eq = bool(enable_height_eq)
         self._enable_moment_quant = bool(enable_moment_quant)
         self._height_eq_armed = False
@@ -585,6 +581,19 @@ class HomeVofDamBreakTwoSpheres:
         # ME writes force F; apply J=F·dt once (no second XPBD dt on ME).
         self.coupling.set_me_integration_mode("impulse")
 
+        if self._archimedes:
+            self._archimedes_buoy = ArchimedesBuoyancy(
+                device=str(self.model._device),
+                body_ids=(self.heavy_body_id, self.light_body_id),
+                radius=radius,
+                volume=self._sphere_volume,
+                config=ArchimedesBuoyancyConfig(
+                    scale=self._archimedes_scale,
+                    ema_alpha=SUB_EMA_ALPHA,
+                    dsub_cap=SUB_DSUB_CAP,
+                ),
+            )
+
         print(
             f"  spheres: r={radius}, heavy_ρ={HEAVY_SPHERE_DENSITY}, "
             f"light_ρ={LIGHT_SPHERE_DENSITY}, feedback={feedback_force_scale:.4g}, "
@@ -596,7 +605,7 @@ class HomeVofDamBreakTwoSpheres:
         print(
             f"  archimedes={'on' if self._archimedes else 'off'} "
             f"scale={self._archimedes_scale:g} "
-            f"(incompressible Fz=s·ρ·V·|g|; ME keeps impact)"
+            f"(pressure ∮−p n dA; ME keeps impact)"
         )
         print(
             f"  hydro_rho={'on' if self._hydro_rho else 'off'} "
@@ -755,58 +764,30 @@ class HomeVofDamBreakTwoSpheres:
                 print(f"  sphere traj closed: {self._sphere_log_path}")
 
     def _step_coupled(self) -> None:
-        # ME (horizontal FSI) → Archimedes lift → optional showcase/drag → XPBD.
+        # ME (impact) → Archimedes state force → optional showcase/drag → XPBD.
         self.coupling.step(self.sim_dt)
-        self._apply_phi_volume_archimedes()
+        self._apply_archimedes_buoyancy()
         self._apply_empirical_buoyancy_and_drag()
         self.rigid_domain.step(self.sim_dt)
 
-    def _apply_phi_volume_archimedes(self) -> None:
-        """Upward Fz = scale * s * ρ_f * V * |g| from shell φ (not ME)."""
-        if not self._archimedes:
+    def _apply_archimedes_buoyancy(self) -> None:
+        buoy = self._archimedes_buoy
+        if buoy is None or not self._archimedes:
             return
         state = self.domain.state
         rigid = self.rigid_domain.state
-        self._phi_buoy_scratch = ensure_phi_volume_scratch(
-            device=str(self.model._device),
-            offsets_xyz=self._phi_buoy_offsets,
-            body_ids=(self.heavy_body_id, self.light_body_id),
-            scratch=self._phi_buoy_scratch,
-        )
-        subs = apply_phi_volume_buoyancy_gpu(
+        buoy.apply(
             phi=state.phi,
             cell=state.cell_type,
             solid=state.solid_phi,
             body_q=rigid.body_q,
             body_f_apply=rigid.apply_body_forces,
-            radius=SPHERE_RADIUS,
             dh=DH,
-            nx=self._n,
-            ny=self._n,
-            nz=self._n,
-            scratch=self._phi_buoy_scratch,
-            volume=self._sphere_volume,
+            grid_shape=(self._n, self._n, self._n),
             rho_liquid=RHO_LIQUID,
             gravity_abs=abs(self._rigid_gravity_z),
-            buoyancy_scale=self._archimedes_scale,
-            phi_wet=0.05,
-            ema_alpha=SUB_EMA_ALPHA,
-            dsub_cap=SUB_DSUB_CAP,
-            sync_submerged=False,
+            sync_diagnostics=False,
         )
-        if subs:
-            self._last_submerged_by_body.update(subs)
-        scratch = self._phi_buoy_scratch
-        if scratch is not None:
-            forces = scratch["forces"].numpy()
-            ids = scratch["body_ids_host"]
-            for i, body_id in enumerate(ids):
-                f = forces[i]
-                self._last_extra_force_by_body[int(body_id)] = (
-                    float(f[0]),
-                    float(f[1]),
-                    float(f[2]),
-                )
 
     def _apply_empirical_buoyancy_and_drag(self) -> None:
         if self._empirical_fsi is None:
@@ -846,20 +827,11 @@ class HomeVofDamBreakTwoSpheres:
                     float(f[2]),
                 )
             return
-        scratch = self._phi_buoy_scratch
-        if scratch is not None and self._archimedes:
-            sub = scratch["submerged"].numpy()
-            ids = scratch["body_ids_host"]
-            for i, body_id in enumerate(ids):
-                self._last_submerged_by_body[int(body_id)] = float(sub[i])
-            forces = scratch["forces"].numpy()
-            for i, body_id in enumerate(ids):
-                f = forces[i]
-                self._last_extra_force_by_body[int(body_id)] = (
-                    float(f[0]),
-                    float(f[1]),
-                    float(f[2]),
-                )
+        buoy = self._archimedes_buoy
+        if buoy is not None and self._archimedes:
+            result = buoy.read_diagnostics()
+            self._last_submerged_by_body.update(result.submerged)
+            self._last_extra_force_by_body.update(result.forces)
             return
         self._sample_shell_wet_fraction()
 
@@ -1071,8 +1043,8 @@ def create_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Incompressible Archimedes Fz=s·ρ·V·|g| (default on). "
-            "Normal-physics vertical buoyancy with uniform liquid ρ. "
+            "Hydrostatic pressure buoyancy F=∮ −p n dA, p=ρ|g|h (default on). "
+            "Normal-physics vertical lift with uniform liquid ρ. "
             "Ignored when --hydro-rho."
         ),
     )
@@ -1080,7 +1052,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--archimedes-scale",
         type=float,
         default=ARCHIMEDES_SCALE,
-        help=f"Multiplier on ρ V g s (default {ARCHIMEDES_SCALE}).",
+        help=f"Multiplier on pressure integral (default {ARCHIMEDES_SCALE}).",
     )
     parser.add_argument(
         "--hydro-rho",

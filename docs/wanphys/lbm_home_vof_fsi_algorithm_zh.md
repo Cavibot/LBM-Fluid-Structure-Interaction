@@ -14,9 +14,9 @@
 
 ## 1. 一句话架构
 
-**默认每子步：刚体栅格化 → HOME Eq.24 动壁 → 矩重构链路 ME → φ 体积 Archimedes（竖直）→ XPBD。**
+**默认每子步：刚体栅格化 → HOME Eq.24 动壁 → 矩重构链路 ME → 静水压差 Archimedes（竖直）→ XPBD。**
 
-链路 ME 管水平冲击/力矩；Guo+\(\rho\approx1\) 下 ME 几乎无阿基米德力，故默认加 φ 体积 \(F_z\)（`--no-archimedes` 可关）。  
+链路 ME 管水平冲击/力矩；Guo+\(\rho\approx1\) 下 ME 几乎无阿基米德力，故默认加静水压差积分 \(F=\oint -p n\,dA\)（`--no-archimedes` 可关）。  
 showcase 浮力 / push / 拖曳 **仅** `--showcase-fsi` / `--empirical-fsi`；宏观 `approx` 为 legacy。
 
 ```text
@@ -27,7 +27,7 @@ showcase 浮力 / push / 拖曳 **仅** `--showcase-fsi` / `--empirical-fsi`；�
 │         embed MAC wall vel → vel_solid_*                   │
 │         LbmDomain.step → HomeFp32Bridge (流体+Eq.24固壁) │
 │         clear body_f + reconstructed-link ME → body_f      │
-│    ② φ-volume Archimedes Fz（默认；--no-archimedes 关）   │
+│    ② pressure Archimedes ∮−p n dA（默认；--no-archimedes 关） │
 │    ③ （仅 showcase）经验浮力 / 追赶 / 拖曳 → body_f        │
 │    ④ RigidDomain.step → collide + XPBD                     │
 │  （可选）t≥8 后每 N 步 height-eq 找平 IF φ                  │
@@ -77,7 +77,7 @@ showcase 浮力 / push / 拖曳 **仅** `--showcase-fsi` / `--empirical-fsi`；�
 
 ```python
 self.coupling.step(self.sim_dt)           # ① 栅格化 + 流体 + ME
-self._apply_phi_volume_archimedes()       # ② 竖直 φ 体积浮力（默认）
+self._apply_archimedes_buoyancy()         # ② 静水压差浮力（默认）
 # only if --showcase-fsi / --empirical-fsi:
 self._apply_empirical_buoyancy_and_drag() # ③ showcase 浮力/推/拖（可选）
 self.rigid_domain.step(self.sim_dt)       # ④ 碰撞 + XPBD
@@ -89,7 +89,7 @@ self.rigid_domain.step(self.sim_dt)       # ④ 碰撞 + XPBD
 - `set_two_way_feedback_enabled(True, force_scale=recommended_me_force_scale(dh, dt))`  
 - `set_feedback_mode("momentum_exchange")` — `home_fp32` 用矩重构链路 ME  
 - `vof_home_wall_eq=False` — HOME Eq.24（showcase 可开 eq-wall）  
-- φ 体积 Archimedes 默认 **开**（`--no-archimedes` / `--archimedes-scale`）  
+- 压差 Archimedes 默认 **开**（`--no-archimedes` / `--archimedes-scale`）  
 - showcase / `--me-drag` 默认 **关**  
 - 耦合侧可有 `|u|_latt` 钳制（WanPhys Ma 安全，**非**论文条款）
 
@@ -210,7 +210,7 @@ S^p_{\alpha\beta} = u^p_\alpha u^p_\beta + \bigl(S^x_{\alpha\beta}-u^x_\alpha u^
 （与 Ladd 作用反作用一致；\(+\Delta\hat{\mathbf{j}}\) 会把轻球往下按）。
 
 **浮力前提：** 均匀 \(\rho\equiv1\) + Guo \(g\) 时 \(f^*+f-2w\approx0\)，链路 ME 几乎无阿基米德力。  
-双球默认用 **坝前干地 + φ 体积 Archimedes** 做冲后起伏；`--no-archimedes` ≈ 纯 ME 竖直（通常贴地滚）。  
+双球默认用 **坝前干地 + 静水压差 Archimedes** 做冲后起伏；`--no-archimedes` ≈ 纯 ME 竖直（通常贴地滚）。  
 详见 [ME 与浮力结论](lbm_home_vof_me_buoyancy_summary_zh.md)。力矩用链中点近似论文交点 \(x_s\)（体素 SDF，无三角网格射线）。
 
 - 默认 `me_integration_mode="impulse"`：\(\mathbf{J}=\mathbf{F}\,\Delta t\) 一次写入 `body_qd`。  
@@ -286,18 +286,19 @@ F_z &= F_z^{\mathrm{buoy}} + 0.35\,\mathrm{push}\,(u_{f,z}-v_z) - k_z\,m\,s_b\,v
 
 **不是**阿基米德 SDF 体积积分；是壳采样启发式，用于稳住球–液观感。
 
-### 6.4 φ 体积 Archimedes（双球默认竖直补项）
+### 6.4 静水压差 Archimedes（双球默认竖直补项）
 
-**文件：** `phi_volume_buoyancy_warp.py`；算例 `_apply_phi_volume_archimedes`（`--archimedes`，默认开）。
+**文件：** `pressure_buoyancy_warp.py`；API `coupling/archimedes_buoyancy.py`；算例 `_apply_archimedes_buoyancy`（`--archimedes`，默认开）。
 
-壳采样 \(\varphi\) 得浸没 \(s\)，对**每个**球同一公式：
+按列自由面深度取静水压 \(p=\rho_L|g|\,h\)，在球表面 Fibonacci 采样积分：
 
 \[
-F_z = \texttt{archimedes\_scale}\cdot s\cdot\rho_L\cdot V\cdot |g_{\mathrm{rigid}}|
+\mathbf{F} = \texttt{archimedes\_scale}\oint -p\,\mathbf{n}\,dA
 \]
 
-无轻球特化；沉浮差来自 \(\rho_{\mathrm{sphere}}\) 与 \(s\)。这是演示用竖直补丁，**不是**式 32。  
-`--showcase-fsi` 时关闭本项，改走 §6.3。
+（湿表面由 \(\varphi\) 与 cell type 判定；大气压参考为 0。）  
+无轻球特化；沉浮差来自 \(\rho_{\mathrm{sphere}}\) 与湿区压差。这是状态力竖直补丁，**不是**式 32。  
+`--showcase-fsi` 时关闭本项，改走 §6.3。legacy `method="volume"` 仍可切回 \(F_z=s\rho V|g|\)。
 
 ---
 
@@ -375,7 +376,8 @@ RigidState (q, qd)
 | Eq.24 | `home_fp32_ref/bc.py` | `solid_moments_eq24` |
 | 反馈 / ME | `home_fp32_ref/link_me_warp.py`；`recommended_me_force_scale` | `accumulate_home_reconstructed_link_me_kernel` |
 | 浮力（showcase） | `home_fp32_ref/sphere_buoyancy_warp.py` | `apply_sphere_buoyancy_forces_gpu` |
-| φ 体积 Archimedes | `home_fp32_ref/phi_volume_buoyancy_warp.py` | `apply_phi_volume_buoyancy_gpu` |
+| 压差 Archimedes | `home_fp32_ref/pressure_buoyancy_warp.py` | `apply_pressure_buoyancy_gpu` |
+| （legacy）φ 体积 | `home_fp32_ref/phi_volume_buoyancy_warp.py` | `apply_phi_volume_buoyancy_gpu` |
 | 模型开关 | `lbm/model.py` | `vof_home_wall_eq`, `vof_height_eq*` |
 
 ---
@@ -384,7 +386,7 @@ RigidState (q, qd)
 
 1. **链路 ME 为矩重构近似**（无整场 `f`；与 fused 固壁 BC 一致）。  
 2. **Approx 反馈**为 legacy：单侧、粗糙；经验 `force_scale`。  
-3. **Guo+\(\rho\approx1\) 下 ME 几乎无阿基米德力**；默认 φ 体积 Archimedes 为竖直补项（非式 32）；showcase 推/拖仍为可选。  
+3. **Guo+\(\rho\approx1\) 下 ME 几乎无阿基米德力**；默认静水压差 Archimedes 为竖直补项（非式 32）；showcase 推/拖仍为可选。  
 4. **刚体重力与 LBM 体力单位刻意不同**；ME 用 `recommended_me_force_scale` 作量纲起点。  
 5. **固体为二元 SDF**，无部分体积固体；固体推进时内部液体被 mask 掉；two-way 开启时「揭盖修复」关闭。  
 6. 研究默认 `vof_home_wall_eq=False`（Eq.24）；showcase 可开 \(f^{\mathrm{eq}}\)。  
@@ -565,7 +567,7 @@ uv run --extra examples python -m unittest newton.tests.test_lbm_home_vof_p1_gen
 | 项 | 路径 |
 |----|------|
 | 重构链路 ME | `home_fp32_ref/link_me_warp.py`；`HomeFp32Bridge.accumulate_reconstructed_link_me`；`LbmFeedbackMode.MOMENTUM_EXCHANGE` 在 `home_fp32` 上走此路径（不再回退 approx） |
-| φ 体积浮力 | `phi_volume_buoyancy_warp.py` + 算例插件 `examples/lbm/_home_vof_phi_volume_buoyancy.py`（默认无 push/drag） |
+| 压差浮力 | `pressure_buoyancy_warp.py` + `coupling/archimedes_buoyancy.py`（默认 `method=pressure`） |
 | SDF 窄带 | `GridLbmRigidCoupling.set_solid_narrowband(cells)` → `rasterize_all_body_sdf_warp_narrowband` |
 | CUDA graph | 模型旗标 `vof_home_cuda_graph`（默认关）；无 bubble/film/κ 时 capture fused+surface+mask；Python swap 在图外 |
 

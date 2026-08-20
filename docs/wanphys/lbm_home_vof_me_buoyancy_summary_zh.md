@@ -11,7 +11,7 @@
 
 ## 1. 一句话结论
 
-**正常物理默认：液体 \(\rho\approx 1\) 均匀；水平冲击用链路 ME；竖直浮力用阿基米德 \(F_z=s\cdot\rho_L\cdot V\cdot|g|\)（`--archimedes`）。**
+**正常物理默认：液体 \(\rho\approx 1\) 均匀；水平冲击用链路 ME；竖直浮力用静水压差积分 \(F=\oint -p\,\mathbf{n}\,dA\)（\(p=\rho|g|h\)，`--archimedes`）。**
 
 不要用静水 \(\rho(z)\) 冒充压差——那是弱可压 LBM 骗 ME 的实验路径（`--hydro-rho`），会改初始质量，**不是**不可压水。
 
@@ -25,7 +25,7 @@
 
 ```text
 SDF 栅格化 → HOME Eq.24 动壁 → 重构链路 ME（式 32）
-         → φ-volume Archimedes（竖直，均匀 ρ_L）
+         → 静水压差积分 Archimedes（竖直，均匀 ρ_L）
          → （可选）showcase / --me-drag / --hydro-rho
          → XPBD
 ```
@@ -33,7 +33,7 @@ SDF 栅格化 → HOME Eq.24 动壁 → 重构链路 ME（式 32）
 | 项 | 来源 | 作用 |
 |----|------|------|
 | 链路 ME | `link_me_warp.py` / fused ME | 波击、水平推、转矩 |
-| φ 体积 Archimedes | `phi_volume_buoyancy_warp.py` | \(F_z=\mathrm{scale}\cdot s\cdot\rho_L\cdot V\cdot\|g\|\)；不可压浮力 |
+| 压差 Archimedes | `coupling/archimedes_buoyancy.py`（核：`pressure_buoyancy_warp.py`） | 状态力 \(\oint -p n\,dA\)；demo 只调用 |
 | `--hydro-rho` | `hydrostatic_rho_warp.py` | **实验**：\(\rho(z)\) 骗 ME；默认关 |
 | showcase | `--showcase-fsi` | 更重经验插件 |
 
@@ -76,11 +76,11 @@ SDF 栅格化 → HOME Eq.24 动壁 → 重构链路 ME（式 32）
 | 竖直浮不起来是不是 VOF 不行？ | **不是。** 主因是 Guo + 均匀密度 → 静水压不进 \(\Delta\hat{\mathbf{j}}\)。 |
 | 要不要退回纯经验 showcase？ | 不必。默认已是 **ME（水平）+ 窄竖直补项**；showcase 推/拖仍是可选演示。 |
 
-φ 体积 Archimedes 与 showcase 的区别：
+压差 Archimedes 与 showcase 的区别：
 
-- 同一公式对重/轻球一视同仁：只靠 \(\rho_{\mathrm{sphere}}\)（质量）与浸没 \(s\) 分沉浮  
+- 同一压力公式对重/轻球一视同仁：只靠 \(\rho_{\mathrm{sphere}}\)（质量）与湿表面压差分沉浮  
 - **没有**对轻球单独加力、单独放大  
-- 仍是壳采样 \(\varphi\) 的体积启发式，**不是**壁面压力积分，也**不是**论文 ME
+- 默认是静水 \(p=\rho|g|h\) 的表面积分，**不是**显式排水体积；`method="volume"` 仍可切回旧 ρVg 路径；**不是**论文 ME
 
 ---
 
@@ -137,7 +137,8 @@ uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_v
 |------|------|
 | 双球算例 | `wanphys/examples/lbm/fluid_grid_lbm_dambreak_vof_two_spheres.py` |
 | 链路 ME | `.../home_fp32_ref/link_me_warp.py`（及 fused 内 ME） |
-| φ 体积浮力 | `.../home_fp32_ref/phi_volume_buoyancy_warp.py` |
+| 压差浮力 | `.../home_fp32_ref/pressure_buoyancy_warp.py` |
+| （legacy）φ 体积浮力 | `.../home_fp32_ref/phi_volume_buoyancy_warp.py` |
 | 算法说明 | `docs/wanphys/lbm_home_vof_fsi_algorithm_zh.md` |
 
 运行：

@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Opt-in φ-volume Archimedes buoyancy (example / plugin path).
+"""GPU kernels for φ-shell Archimedes (used by ``coupling.archimedes_buoyancy``).
 
-Integrates liquid φ over a spherical shell just outside the rigid SDF (interior
-cells are gas-masked).  Force is buoyancy-only by default (no push / drag).
+Prefer the public API::
 
-Not part of the default HOME-FREE step or ``GridLbmRigidCoupling``.
+    from wanphys._src.fluid.fluid_grid.coupling import ArchimedesBuoyancy
+
+Integrates liquid φ over a spherical shell just outside the rigid SDF.
+Force is buoyancy-only (no push / drag). Orthogonal to link ME.
 """
 
 from __future__ import annotations
