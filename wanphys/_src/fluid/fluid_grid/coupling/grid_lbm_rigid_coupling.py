@@ -842,6 +842,27 @@ class GridLbmRigidCoupling(CompositeSimulation):
         elif self._last_lbm_feedback_wrench is not None:
             self._last_lbm_feedback_wrench.fill(0.0)
 
+        # 5a. Path B: hydrostatic F_α,H on top of Eq.32 ME (before impulse apply).
+        if (
+            self._two_way_feedback_enabled
+            and self._feedback_mode == LbmFeedbackMode.MOMENTUM_EXCHANGE.value
+            and self._body_shape_type is not None
+            and len(self._bodies) > 0
+            and rigid_state.body_f is not None
+            and bool(getattr(model, "vof_mod_pressure_me", False))
+        ):
+            home = getattr(self._fluid_domain.solver, "_home_fp32", None)
+            if home is not None and home.enabled:
+                rigid_backend_h = self._rigid_domain.model._newton_backend
+                home.accumulate_hydro_me_correction(
+                    solid_body_id=fluid_state_after.solid_body_id,
+                    body_q=rigid_state.body_q,
+                    body_com=rigid_backend_h.body_com,
+                    body_f=rigid_state.body_f,
+                    dh=dh,
+                    force_scale=self._feedback_force_scale,
+                )
+
         # 5b. ME force → impulse apply (default) or leave force for XPBD.
         if (
             self._two_way_feedback_enabled

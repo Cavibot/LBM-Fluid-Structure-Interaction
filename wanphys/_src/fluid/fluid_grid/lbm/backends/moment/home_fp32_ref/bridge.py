@@ -95,6 +95,7 @@ class HomeFp32Bridge:
         self._last_height_eq_stats: dict[str, float] = {}
         self._hydro_rho_counter = 0
         self._last_hydro_rho_stats: dict[str, float] = {}
+        self._hydro_me_scratch: dict | None = None
         self._fused_me: dict | None = None
 
     def prepare_fused_link_me(
@@ -386,11 +387,19 @@ class HomeFp32Bridge:
         """Keyword args for ``step_home_vof_gpu`` (FS policy gated by branch)."""
         fs = self.free_surface
         m = self.model
+        mod_p = bool(getattr(m, "vof_mod_pressure_me", False))
+        fs_rho = bool(getattr(m, "vof_mod_pressure_fs_rho", False))
+        # ρ_G(z) replaces Guo (not stacked): zero body-force gravity when on.
+        zero_guo = bool(fs_rho)
+        gx = float(m.gravity_x)
+        gy = float(m.gravity_y)
+        gz = float(m.gravity_z)
+        z_ref = float(getattr(m, "vof_mod_pressure_z_ref", -1.0))
         kwargs = {
             "tau": float(m.tau),
-            "fx": float(m.gravity_x),
-            "fy": float(m.gravity_y),
-            "fz": float(m.gravity_z),
+            "fx": 0.0 if zero_guo else gx,
+            "fy": 0.0 if zero_guo else gy,
+            "fz": 0.0 if zero_guo else gz,
             "rho_g0": float(m.vof_rho_gas),
             "gamma": float(m.vof_gamma) if fs else 0.0,
             "eps_phi": float(m.vof_epsilon),
@@ -420,6 +429,11 @@ class HomeFp32Bridge:
             ),
             "use_cuda_graph": bool(getattr(m, "vof_home_cuda_graph", False)),
             "me_enable": False,
+            "mod_pressure": bool(fs_rho),
+            "g_mp_z": gz,
+            "z_ref_mp": z_ref,
+            "rho0_mp": float(m.initial_density),
+            "mp_fs_blend": float(getattr(m, "vof_mod_pressure_fs_blend", 1.0)),
         }
         me = self._fused_me
         if me is not None and bool(getattr(m, "vof_home_me_in_fused", False)):
@@ -495,6 +509,38 @@ class HomeFp32Bridge:
             dh=float(dh),
             force_scale=float(force_scale),
             home_wall_eq=bool(self.model.vof_home_wall_eq),
+        )
+
+    def accumulate_hydro_me_correction(
+        self,
+        *,
+        solid_body_id: wp.array,
+        body_q: wp.array,
+        body_com: wp.array,
+        body_f: wp.array,
+        dh: float,
+        force_scale: float = 1.0,
+    ) -> None:
+        """Path B MVP: add hydrostatic F_α,H into ``body_f`` after Eq.32 ME."""
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.hydro_me_warp import (
+            apply_hydro_me_correction_gpu,
+        )
+
+        if not bool(getattr(self.model, "vof_mod_pressure_me", False)):
+            return
+        buf = self._ensure_gpu()
+        self._hydro_me_scratch = apply_hydro_me_correction_gpu(
+            buf=buf,
+            solid_body_id=solid_body_id,
+            body_q=body_q,
+            body_com=body_com,
+            body_f=body_f,
+            dh=float(dh),
+            force_scale=float(force_scale),
+            g_latt_z=float(getattr(self.model, "gravity_z", 0.0) or 0.0),
+            rho0=float(getattr(self.model, "initial_density", 1.0) or 1.0),
+            vertical_only=bool(getattr(self.model, "vof_mod_pressure_fh_vertical", True)),
+            scratch=self._hydro_me_scratch,
         )
 
     def apply_hydrostatic_rho(self, state_out: LbmState | None = None) -> None:

@@ -158,6 +158,27 @@ class LbmModel(FluidGridModelBase):
     """Blend α in ``ρ ← (1−α)ρ + α ρ_h`` per maintain call."""
     vof_hydrostatic_rho_every: int = 4
     """Run every N lattice steps when ``vof_hydrostatic_rho`` is on."""
+    vof_mod_pressure_me: bool = False
+    """Path B: hydrostatic ``F_α,H`` in ME (demos turn Archimedes off)."""
+    vof_mod_pressure_z_ref: float = -1.0
+    """Still-water reference height in lattice cells (``k+0.5`` units).
+
+    ``< 0`` → ``0.5 * nz``. Used by FS ``ρ_G(z)`` when enabled.
+    """
+    vof_mod_pressure_fs_rho: bool = False
+    """Path B fluid: FS ``ρ_G(z)`` and zero Guo body force.
+
+    Plain dam-break COM tests: full strength collapses faster than Guo.
+    Use ``vof_mod_pressure_fs_blend`` to match Guo-scale bore for FSI.
+    """
+    vof_mod_pressure_fs_blend: float = 0.45
+    """Blend of hydrostatic FS density: ``ρ_G = ρ0 + blend·(ρ_G,full − ρ0)``.
+
+    ``1`` = full Liu formula; ``0`` = constant ``ρ0``. ~0.45 matched Guo dam
+    COM drift in n=64 diagnostics (full formula was ~2.3× more violent).
+    """
+    vof_mod_pressure_fh_vertical: bool = True
+    """If True, ``F_α,H`` keeps only the z-component (drop noisy horizontal)."""
     vof_home_moment_quant: bool = False
     """Persistent 16-bit HOME moment SoT (5×uint32/cell), paper §5.4 hybrid.
 

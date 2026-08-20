@@ -262,6 +262,9 @@ class HomeVofDamBreakTwoSpheres:
         hydro_rho: bool = False,
         hydro_rho_rate: float = HYDRO_RHO_RATE,
         hydro_rho_every: int = HYDRO_RHO_EVERY,
+        mod_pressure: bool = False,
+        mod_pressure_fluid: bool = False,
+        mod_pressure_fh: bool = True,
     ) -> None:
         self.viewer: Any = viewer
         if isinstance(self.viewer, FluidViewerGL):
@@ -273,13 +276,24 @@ class HomeVofDamBreakTwoSpheres:
         self._me_drag_xy = float(me_drag_xy)
         self._me_drag_z = float(me_drag_z)
         self._me_drag_ang = float(me_drag_ang)
+        # Path B: ME F_α,H by default; optional fluid ρ_G(z)/zero-Guo via mod_pressure_fluid.
+        self._mod_pressure = bool(mod_pressure) and not self._showcase_fsi
+        self._mod_pressure_fluid = (
+            bool(mod_pressure_fluid) and self._mod_pressure
+        )
+        self._mod_pressure_fh = bool(mod_pressure_fh) and self._mod_pressure
         # Path A: maintain ρ(z) for ME buoyancy; turn off pressure Archimedes.
-        self._hydro_rho = bool(hydro_rho) and not self._showcase_fsi
+        self._hydro_rho = (
+            bool(hydro_rho) and not self._showcase_fsi and not self._mod_pressure
+        )
         self._hydro_rho_rate = float(hydro_rho_rate)
         self._hydro_rho_every = max(1, int(hydro_rho_every))
-        # Pressure ∮−p n dA when not using showcase / path-A hydro maintain.
+        # Pressure ∮−p n dA when not using showcase / path-A / path-B.
         self._archimedes = (
-            bool(archimedes) and not self._showcase_fsi and not self._hydro_rho
+            bool(archimedes)
+            and not self._showcase_fsi
+            and not self._hydro_rho
+            and not self._mod_pressure
         )
         self._archimedes_scale = float(archimedes_scale)
         self._archimedes_buoy: ArchimedesBuoyancy | None = None
@@ -335,6 +349,11 @@ class HomeVofDamBreakTwoSpheres:
             vof_hydrostatic_rho=self._hydro_rho,
             vof_hydrostatic_rho_rate=self._hydro_rho_rate,
             vof_hydrostatic_rho_every=self._hydro_rho_every,
+            vof_mod_pressure_me=self._mod_pressure_fh,
+            vof_mod_pressure_fs_rho=self._mod_pressure_fluid,
+            vof_mod_pressure_z_ref=(
+                float(FILL_Z_FRAC) * float(self._n) if self._mod_pressure_fluid else -1.0
+            ),
             vof_home_moment_quant=self._enable_moment_quant,
             vof_home_moment_quant_dither=True,
         )
@@ -421,6 +440,7 @@ class HomeVofDamBreakTwoSpheres:
             f"me_drag={'on' if self._me_drag else 'off'}, "
             f"archimedes={'on' if self._archimedes else 'off'}"
             f"(x{self._archimedes_scale:g}), "
+            f"mod_pressure={'on' if self._mod_pressure else 'off'}, "
             f"hydro_rho={'on' if self._hydro_rho else 'off'}"
             f"(α={self._hydro_rho_rate:g}/every={self._hydro_rho_every}), "
             f"showcase_fsi={'on' if self._showcase_fsi else 'off'}, "
@@ -606,6 +626,12 @@ class HomeVofDamBreakTwoSpheres:
             f"  archimedes={'on' if self._archimedes else 'off'} "
             f"scale={self._archimedes_scale:g} "
             f"(pressure ∮−p n dA; ME keeps impact)"
+        )
+        print(
+            f"  mod_pressure={'on' if self._mod_pressure else 'off'} "
+            f"fh={'on' if self._mod_pressure_fh else 'off'} "
+            f"fluid={'on' if self._mod_pressure_fluid else 'off'} "
+            f"(F_α,H / zero-Guo+ρ_G(z))"
         )
         print(
             f"  hydro_rho={'on' if self._hydro_rho else 'off'} "
@@ -1045,7 +1071,7 @@ def create_parser() -> argparse.ArgumentParser:
         help=(
             "Hydrostatic pressure buoyancy F=∮ −p n dA, p=ρ|g|h (default on). "
             "Normal-physics vertical lift with uniform liquid ρ. "
-            "Ignored when --hydro-rho."
+            "Ignored when --hydro-rho or --mod-pressure."
         ),
     )
     parser.add_argument(
@@ -1061,6 +1087,24 @@ def create_parser() -> argparse.ArgumentParser:
         help=(
             "Experimental: maintain hydrostatic ρ(z) so Eq.32 ME can lift. "
             "Not normal incompressible water; turns off Archimedes. Default off."
+        ),
+    )
+    parser.add_argument(
+        "--mod-pressure",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Path B: ME hydrostatic F_α,H (vertical-only by default; Archimedes off). "
+            "Add --mod-pressure-fluid for zero-Guo + blended FS ρ_G(z)."
+        ),
+    )
+    parser.add_argument(
+        "--mod-pressure-fluid",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "With --mod-pressure: FS ρ_G(z) (blend~0.45) and zero Guo. "
+            "Plain dam COM OK; two-sphere: rightward OK, float weaker than Guo+F_H."
         ),
     )
     parser.add_argument(
@@ -1152,6 +1196,8 @@ def main() -> None:
         hydro_rho=bool(args.hydro_rho),
         hydro_rho_rate=float(args.hydro_rho_rate),
         hydro_rho_every=int(args.hydro_rho_every),
+        mod_pressure=bool(args.mod_pressure),
+        mod_pressure_fluid=bool(getattr(args, "mod_pressure_fluid", False)),
     )
     try:
         newton.examples.run(example, args)

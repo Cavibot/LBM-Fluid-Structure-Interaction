@@ -3,12 +3,12 @@
 > 文档版本：2026-08-07  
 > 适用范围：`lbm_backend='home_fp32'` + `phase_mode=vof_sharp` + 刚体栅格 FSI  
 > 主算例：`wanphys/examples/lbm/fluid_grid_lbm_dambreak_vof_two_spheres.py`  
-> 相关：[ME 与浮力结论](lbm_home_vof_me_buoyancy_summary_zh.md)、[刚体耦合导览（分布型路径）](lbm_rigid_coupling_guide_zh.md)、[LATEST 进度](LATEST_home_vof_two_spheres_progress_zh.md)、[模块文件](lbm_module_files_zh.md)  
+> 相关：[浮力结论（ME / Archimedes / Path B）](lbm_home_vof_me_buoyancy_summary_zh.md)、[刚体耦合导览（分布型路径）](lbm_rigid_coupling_guide_zh.md)、[LATEST 进度](LATEST_home_vof_two_spheres_progress_zh.md)、[模块文件](lbm_module_files_zh.md)  
 > 对照参考：同级目录外的 `OpenHOMELBM/`（Li et al. HOME 官方开源；**GPL-3.0**，只对照算法不拷贝代码）
 
 本文描述**当前双球主线**的流固算法：矩编码 HOME-FREE 自由面流体如何与 Newton/WanPhys 刚体互相作用。  
 旧版分布函数 `f` + bounce-back 路径见 [lbm_rigid_coupling_guide_zh.md](lbm_rigid_coupling_guide_zh.md)；本页以 **无整场 `f`、用 `solid_phi` + 动壁拉流** 为准。  
-竖直沉浮与「为何要 Archimedes 补项」见 [lbm_home_vof_me_buoyancy_summary_zh.md](lbm_home_vof_me_buoyancy_summary_zh.md)。
+竖直沉浮与「为何要 Archimedes / Path B 浮力」见 [浮力结论](lbm_home_vof_me_buoyancy_summary_zh.md)。
 
 ---
 
@@ -211,7 +211,7 @@ S^p_{\alpha\beta} = u^p_\alpha u^p_\beta + \bigl(S^x_{\alpha\beta}-u^x_\alpha u^
 
 **浮力前提：** 均匀 \(\rho\equiv1\) + Guo \(g\) 时 \(f^*+f-2w\approx0\)，链路 ME 几乎无阿基米德力。  
 双球默认用 **坝前干地 + 静水压差 Archimedes** 做冲后起伏；`--no-archimedes` ≈ 纯 ME 竖直（通常贴地滚）。  
-详见 [ME 与浮力结论](lbm_home_vof_me_buoyancy_summary_zh.md)。力矩用链中点近似论文交点 \(x_s\)（体素 SDF，无三角网格射线）。
+详见 [浮力结论](lbm_home_vof_me_buoyancy_summary_zh.md)。力矩用链中点近似论文交点 \(x_s\)（体素 SDF，无三角网格射线）。
 
 - 默认 `me_integration_mode="impulse"`：\(\mathbf{J}=\mathbf{F}\,\Delta t\) 一次写入 `body_qd`。  
 - 刚体重力：`g_{\mathrm{rigid}}=g_{\mathrm{lbm}}\,dh/\mathrm{dt}^{2}`（阿基米德对账）。  
@@ -299,6 +299,18 @@ F_z &= F_z^{\mathrm{buoy}} + 0.35\,\mathrm{push}\,(u_{f,z}-v_z) - k_z\,m\,s_b\,v
 （湿表面由 \(\varphi\) 与 cell type 判定；大气压参考为 0。）  
 无轻球特化；沉浮差来自 \(\rho_{\mathrm{sphere}}\) 与湿区压差。这是状态力竖直补丁，**不是**式 32。  
 `--showcase-fsi` 时关闭本项，改走 §6.3。legacy `method="volume"` 仍可切回 \(F_z=s\rho V|g|\)。
+
+### 6.5 Path B 浮力（`--mod-pressure` / `--mod-pressure-fluid`）
+
+**文件：** `hydro_me_warp.py`（ME 内 \(F_{\alpha,H}\)）；流体侧 \(\rho_G(z)\) 在 `vof_warp.py` FS BC。  
+**开关：** `LbmModel.vof_mod_pressure_me` / `vof_mod_pressure_fs_rho` / `vof_mod_pressure_fs_blend` / `vof_mod_pressure_fh_vertical`。
+
+| CLI | 浮力机制 | 备注 |
+|-----|----------|------|
+| `--mod-pressure` | 式 32 后叠加静水 \(F_{\alpha,H}\)（默认只 \(F_z\)）；关 Archimedes；保留 Guo | 稳；轻球可浮 |
+| 再加 `--mod-pressure-fluid` | 另：zero-Guo + 软化 FS \(\rho_G(z)\)（`fs_blend≈0.45`） | 实验；右移 OK，浮力偏弱 |
+
+不要 Guo+\(\rho_G\) 叠用。细节与冒烟结论见 [浮力结论](lbm_home_vof_me_buoyancy_summary_zh.md) §7。
 
 ---
 
@@ -568,6 +580,7 @@ uv run --extra examples python -m unittest newton.tests.test_lbm_home_vof_p1_gen
 |----|------|
 | 重构链路 ME | `home_fp32_ref/link_me_warp.py`；`HomeFp32Bridge.accumulate_reconstructed_link_me`；`LbmFeedbackMode.MOMENTUM_EXCHANGE` 在 `home_fp32` 上走此路径（不再回退 approx） |
 | 压差浮力 | `pressure_buoyancy_warp.py` + `coupling/archimedes_buoyancy.py`（默认 `method=pressure`） |
+| Path B 浮力 | `hydro_me_warp.py`（\(F_{\alpha,H}\)）；`--mod-pressure` / `--mod-pressure-fluid` |
 | SDF 窄带 | `GridLbmRigidCoupling.set_solid_narrowband(cells)` → `rasterize_all_body_sdf_warp_narrowband` |
 | CUDA graph | 模型旗标 `vof_home_cuda_graph`（默认关）；无 bubble/film/κ 时 capture fused+surface+mask；Python swap 在图外 |
 

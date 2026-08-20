@@ -274,6 +274,11 @@ def home_vof_fused_kernel(
     body_f: wp.array(dtype=wp.spatial_vector),
     me_dh: float,
     me_force_scale: float,
+    mod_pressure: int,
+    g_mp_z: float,
+    z_ref_mp: float,
+    rho0_mp: float,
+    mp_fs_blend: float,
     nx: int,
     ny: int,
     nz: int,
@@ -361,12 +366,26 @@ def home_vof_fused_kernel(
         if vol_b > 0.0 and vol_b < small_bubble_vol:
             six_sigma = small_six_sigma
     rho_g = gas_rho[i, j, k] - six_sigma * kappa[i, j, k] - disjoint_factor * djoin
+    # Path B: dynamic-pressure FS BC — ρ_G(z) carries hydrostatic (Liu / JCP 2025).
+    if mod_pressure != 0:
+        cs2 = 1.0 / 3.0
+        z_cell = float(k) + 0.5
+        rho_full = rho0_mp - rho0_mp * g_mp_z * (z_cell - z_ref_mp) / cs2
+        # Soft blend: full formula over-drives dam vs Guo (FSI sucks spheres left).
+        b = mp_fs_blend
+        if b < 0.0:
+            b = 0.0
+        if b > 1.0:
+            b = 1.0
+        rho_g = rho0_mp + b * (rho_full - rho0_mp)
+        rho_g = rho_g - six_sigma * kappa[i, j, k] - disjoint_factor * djoin
     if rho_g < 0.2:
         rho_g = 0.2
     if rho_g > 1.8:
         rho_g = 1.8
 
     # Home-FSLBM: gas equilibrium uses Guo half-force velocity u + F/2.
+    # Path B zeros Guo (fx=fy=fz=0), so vg == u.
     vg_x = vx + 0.5 * fx
     vg_y = vy + 0.5 * fy
     vg_z = vz + 0.5 * fz
@@ -3287,6 +3306,11 @@ def step_home_vof_gpu(
     body_f: wp.array | None = None,
     me_dh: float = 1.0,
     me_force_scale: float = 1.0,
+    mod_pressure: bool = False,
+    g_mp_z: float = 0.0,
+    z_ref_mp: float = -1.0,
+    rho0_mp: float = 1.0,
+    mp_fs_blend: float = 1.0,
 ) -> None:
     """One HOME-FREE VOF step (fused + surface_1/2/3 + optional film / bubbles).
 
@@ -3307,6 +3331,11 @@ def step_home_vof_gpu(
 
     # Stub ME buffers when disabled (Warp requires valid arrays).
     me_on = bool(me_enable) and solid_body_id is not None and body_f is not None
+    mp_on = 1 if bool(mod_pressure) else 0
+    z_ref = float(z_ref_mp)
+    if z_ref < 0.0:
+        z_ref = 0.5 * float(nz)
+    fs_blend = float(mp_fs_blend)
     if not me_on:
         if not hasattr(buf, "_me_stub_body_id"):
             buf._me_stub_body_id = wp.zeros((1, 1, 1), dtype=wp.int32, device=buf.device)
@@ -3438,6 +3467,11 @@ def step_home_vof_gpu(
                 me_body_f,
                 float(me_dh),
                 float(me_force_scale),
+                int(mp_on),
+                float(g_mp_z),
+                float(z_ref),
+                float(rho0_mp),
+                float(fs_blend),
                 nx, ny, nz,
             ],
             device=buf.device,
@@ -3542,6 +3576,11 @@ def step_home_vof_gpu(
             float(fy),
             float(fz),
             float(rho_g0),
+            int(mp_on),
+            float(g_mp_z),
+            float(z_ref),
+            float(rho0_mp),
+            float(fs_blend),
         )
         graphs = getattr(buf, "_step_cuda_graphs", None)
         if graphs is None:
