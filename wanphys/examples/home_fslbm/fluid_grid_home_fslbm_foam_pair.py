@@ -213,6 +213,7 @@ class HomeFslbmFoamPair:
                 flush=True,
             )
 
+
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         if self.ssfr is not None and self.ssfr.available:

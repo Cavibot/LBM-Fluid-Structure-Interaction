@@ -1361,8 +1361,11 @@ def stream_collide_bvh_kernel(
         # (massex already accumulated at lines 1143-1157; ref adds it only once)
         massn_accum = massn + mass_exchange
 
+        # Ref ``mrLbmSolverGpu3D.cu:937``: write mass only. Do NOT rewrite phi here —
+        # surface_3 owns phi / delta_phi so bubble_volume tracks the full fill change
+        # (mass exchange + clamp). Premature phi writes collapse most of delta_phi and
+        # break the gas-spring bookkeeping.
         mass[i, j, k] = massn_accum
-        phi[i, j, k] = calculate_phi(rho_old, massn_accum, C.CellFlag.TYPE_I)
 
         # ---- Gas boundary condition: free-surface bounce-back (ref lines 930-934) ----
         # For each direction di (1..26), if the neighbour at direction di is gas (TYPE_G),
