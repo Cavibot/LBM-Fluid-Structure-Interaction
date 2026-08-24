@@ -63,6 +63,7 @@ class HomeFslbmSolver(FluidGridSolverBase):
         self._near_small_bubble: wp.array3d = wp.zeros(
             (self.nx, self.ny, self.nz), dtype=wp.uint8, device=self.device
         )
+        self._small_bubble_any = wp.zeros(1, dtype=wp.int32, device=self.device)
 
         # GPU-side merge/split flags (ref: mrFlow3D merge_flag / split_flag)
         self._merge_flag_gpu = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -142,19 +143,16 @@ class HomeFslbmSolver(FluidGridSolverBase):
 
     @staticmethod
     def _swap_moment_buffers(state: HomeFslbmState) -> None:
-        """Ping-pong ``f_mom`` / ``f_mom_post`` then mirror post into both buffers.
+        """Ping-pong ``f_mom`` / ``f_mom_post`` via pointer exchange (no memcpy).
 
-        Pointer exchange avoids a full swap kernel; a single ``wp.copy`` keeps
-        ``f_mom_post`` consistent with golden tests and surface kernels that
-        read the post-collision buffer after ``step()``.
+        After ``step()``, the active moments live in ``f_mom``; ``f_mom_post``
+        is scratch for the next collide write.
         """
         state.f_mom, state.f_mom_post = state.f_mom_post, state.f_mom
-        wp.copy(state.f_mom_post, state.f_mom)
 
     @staticmethod
     def _swap_gas_buffers(state: HomeFslbmState) -> None:
         state.g_mom, state.g_mom_post = state.g_mom_post, state.g_mom
-        wp.copy(state.g_mom_post, state.g_mom)
 
     def _update_turbulence_mask(self, state: HomeFslbmState, dim: tuple[int, int, int]) -> None:
         """Build dilated small-bubble mask for eddy-viscosity (ref cu:1001-1027)."""
@@ -163,6 +161,7 @@ class HomeFslbmSolver(FluidGridSolverBase):
         if tf <= 0.0 or tr <= 0:
             self._near_small_bubble.zero_()
             return
+        self._small_bubble_any.zero_()
         wp.launch(
             kernels_fluid.mark_small_bubble_kernel,
             dim=dim,
@@ -170,12 +169,17 @@ class HomeFslbmSolver(FluidGridSolverBase):
                 state.tag_matrix,
                 state.bubble_volume,
                 self._small_bubble_mark,
+                self._small_bubble_any,
                 self.nx,
                 self.ny,
                 self.nz,
             ],
             device=self.device,
         )
+        # Skip O(N³ × radius³) dilate when no small bubbles were marked.
+        if int(self._small_bubble_any.numpy()[0]) == 0:
+            self._near_small_bubble.zero_()
+            return
         wp.launch(
             kernels_fluid.dilate_near_small_bubble_kernel,
             dim=dim,
@@ -409,6 +413,9 @@ class HomeFslbmSolver(FluidGridSolverBase):
                 ],
             )
             self._swap_gas_buffers(state)
+            if aliased:
+                state_in.g_mom = state.g_mom
+                state_in.g_mom_post = state.g_mom_post
             wp.launch(
                 kernels_bubble.bubble_rho_update_kernel,
                 dim=self._max_bubbles,
@@ -604,8 +611,12 @@ class HomeFslbmSolver(FluidGridSolverBase):
             ],
         )
 
-        # Post-step: f_mom_post → f_mom (matches reference mrSolver3D_step2Kernel).
-        wp.copy(state.f_mom, state.f_mom_post)
+        # Post-step: f_mom_post → f_mom via pointer ping-pong (ref step2Kernel
+        # memcpy). Active moments are in ``f_mom`` after this swap.
+        state.f_mom, state.f_mom_post = state.f_mom_post, state.f_mom
+        if aliased:
+            state_in.f_mom = state.f_mom
+            state_in.f_mom_post = state.f_mom_post
 
         self._sync_host_bubble_bookkeeping(state_in, state_out, aliased=aliased)
         self._sync_host_merge_flags(

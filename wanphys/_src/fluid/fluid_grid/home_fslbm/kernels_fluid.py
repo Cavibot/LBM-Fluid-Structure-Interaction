@@ -968,7 +968,7 @@ def calculate_curvature_from_grid(
 
 
 @wp.kernel
-def stream_collide_bvh_kernel(
+def stream_collide_bulk_kernel(
     # ---- State arrays (read) ----
     f_mom: wp.array(dtype=float),              # [10 × N] current HOME moments
     flag: wp.array3d(dtype=wp.uint8),          # per-cell type bitfield
@@ -1018,7 +1018,6 @@ def stream_collide_bvh_kernel(
     turbulence_factor: float,
     turbulence_radius: int,
     atmosphere_open: int,                       # bool → int
-    interface_only: int,                        # 0=bulk (TYPE_F…), 1=TYPE_I only
     px: int,
     py: int,
     pz: int,
@@ -1028,9 +1027,9 @@ def stream_collide_bvh_kernel(
     w3d: wp.array(dtype=float),
     opposite: wp.array(dtype=wp.int32),
 ):
-    """Monolithic fluid kernel: pull-streaming → collision → free-surface.
+    """Bulk fluid kernel (non-TYPE_I): pull-streaming → collision.
 
-    Each thread processes one lattice node (i, j, k).
+    PLIC / free-surface Phase C is compiled only into the interface kernel.
     """
     i, j, k = wp.tid()
 
@@ -1061,15 +1060,416 @@ def stream_collide_bvh_kernel(
         flag[i, j, k] = wp.uint8(C.TYPE_F)
         return
 
-    # Bulk vs interface launch split (same numerics as monolithic kernel).
-    # ``interface_only < 0`` disables the split (monolithic pass).
-    if interface_only >= 0:
-        if interface_only != 0:
-            if flagsn_su != C.TYPE_I:
-                return
+    # Bulk pass: skip interface cells (compiled without Phase C).
+    if flagsn_su == C.TYPE_I:
+        return
+
+    # ---- Load current-cell moments ----
+    cr = f_mom[C.M_RHO * stride + cur_idx]
+    cu = f_mom[C.M_UX * stride + cur_idx]
+    cv = f_mom[C.M_UY * stride + cur_idx]
+    cw = f_mom[C.M_UZ * stride + cur_idx]
+    cSxx = f_mom[C.M_SXX * stride + cur_idx]
+    cSxy = f_mom[C.M_SXY * stride + cur_idx]
+    cSxz = f_mom[C.M_SXZ * stride + cur_idx]
+    cSyy = f_mom[C.M_SYY * stride + cur_idx]
+    cSyz = f_mom[C.M_SYZ * stride + cur_idx]
+    cSzz = f_mom[C.M_SZZ * stride + cur_idx]
+
+    # ---- Pull-streaming: gather from 27 neighbours (lines 741-777) ----
+    # For each direction di, we pull the distribution f_i from the neighbour
+    # at (i - CX[di], j - CY[di], k - CZ[di]).
+    # The distribution is reconstructed from the neighbour's HOME moments.
+    f_streamed = wp.zeros(27, dtype=float)
+    fon = wp.zeros(27, dtype=float)
+
+    # Compiler-unrolled loop over 27 directions
+    for di in range(27):
+        cx_di = cx[di]
+        cy_di = cy[di]
+        cz_di = cz[di]
+
+        ni = i - cx_di
+        nj = j - cy_di
+        nk = k - cz_di
+
+        # Periodic wrapping
+        if px == 1:
+            if ni < 0: ni += nx
+            elif ni >= nx: ni -= nx
+        if py == 1:
+            if nj < 0: nj += ny
+            elif nj >= ny: nj -= ny
+        if pz == 1:
+            if nk < 0: nk += nz
+            elif nk >= nz: nk -= nz
+
+        # Out-of-bounds → zero-velocity equilibrium bounce-back (matches TYPE_S branch)
+        if ni < 0 or ni >= nx or nj < 0 or nj >= ny or nk < 0 or nk >= nz:
+            f_streamed[di] = calculate_f_eq_d3q27(cr, 0.0, 0.0, 0.0, di)
         else:
-            if flagsn_su == C.TYPE_I:
-                return
+            nflag_int = int(flag[ni, nj, nk])
+            nflag_bo = nflag_int & C.TYPE_BO_MASK
+
+            if nflag_bo == C.TYPE_S:
+                # ---- Solid neighbour: bounce-back (ref lines 743-748) ----
+                # fhn[i] = feq[i] — equilibrium in direction i at wall density
+                f_streamed[di] = calculate_f_eq_d3q27(cr, 0.0, 0.0, 0.0, di)
+            else:
+                # ---- Fluid/interface/gas neighbour: normal stream (lines 764-777) ----
+                nidx = ni * ny * nz + nj * nz + nk
+                nr = f_mom[C.M_RHO * stride + nidx]
+                nu = f_mom[C.M_UX * stride + nidx]
+                nv = f_mom[C.M_UY * stride + nidx]
+                nw = f_mom[C.M_UZ * stride + nidx]
+                nSxx = f_mom[C.M_SXX * stride + nidx]
+                nSxy = f_mom[C.M_SXY * stride + nidx]
+                nSxz = f_mom[C.M_SXZ * stride + nidx]
+                nSyy = f_mom[C.M_SYY * stride + nidx]
+                nSyz = f_mom[C.M_SYZ * stride + nidx]
+                nSzz = f_mom[C.M_SZZ * stride + nidx]
+                f_streamed[di] = reconstruct_distribution(
+                    nr, nu, nv, nw,
+                    nSxx, nSxy, nSxz, nSyy, nSyz, nSzz,
+                    di,
+                )
+                # ---- Convert from physical to HOME-stored format (ref line 776) ----
+                f_streamed[di] -= w3d[di]
+
+    # ---- Also reconstruct outgoing distributions (fon, lines 790-803) ----
+    for di in range(27):
+        fon[di] = reconstruct_distribution(
+            cr, cu, cv, cw,
+            cSxx, cSxy, cSxz, cSyy, cSyz, cSzz,
+            di,
+        )
+        # ---- Convert from physical to HOME-stored format (ref line 803) ----
+        fon[di] -= w3d[di]
+
+    # ---- Mass accumulation from neighbours (ref lines 806-826) ----
+    massn = mass[i, j, k]
+    for di in range(1, 27):
+        ni2 = i - cx[di]
+        nj2 = j - cy[di]
+        nk2 = k - cz[di]
+        if px == 1:
+            if ni2 < 0: ni2 += nx
+            elif ni2 >= nx: ni2 -= nx
+        if py == 1:
+            if nj2 < 0: nj2 += ny
+            elif nj2 >= ny: nj2 -= ny
+        if pz == 1:
+            if nk2 < 0: nk2 += nz
+            elif nk2 >= nz: nk2 -= nz
+        if ni2 >= 0 and ni2 < nx and nj2 >= 0 and nj2 < ny and nk2 >= 0 and nk2 < nz:
+            massn += massex[ni2, nj2, nk2]
+
+    if flagsn_su == C.TYPE_F:
+        # Mass exchange with fluid/interface neighbours only.
+        # Use Thürey link flux fhn[di]-fon[opp] (same as TYPE_I) so
+        # F↔I / F↔F pairs cancel. The CUDA line at cu:824 adds
+        # fhn[i]-fon[i] for every direction; that Δρ form only pairs
+        # with TYPE_I when fon[di]≈fon[opp] (quiescent). Under gravity
+        # it drains O(1) mass per step. Skip solid/gas links (comment
+        # at cu:824: "neighbor is fluid or interface cell").
+        flux_f = float(0.0)
+        for di in range(1, 27):
+            nsi = i - int(cx[di])
+            nsj = j - int(cy[di])
+            nsk = k - int(cz[di])
+            if nsi < 0 or nsi >= nx or nsj < 0 or nsj >= ny or nsk < 0 or nsk >= nz:
+                continue
+            nsu = int(flag[nsi, nsj, nsk]) & C.TYPE_SU_MASK
+            nbo = int(flag[nsi, nsj, nsk]) & C.TYPE_BO_MASK
+            if nbo == C.TYPE_S:
+                continue
+            if (nsu & (C.TYPE_F | C.TYPE_I)) == 0:
+                continue
+            opp_di = int(opposite[di])
+            flux_f += f_streamed[di] - fon[opp_di]
+        massn += flux_f
+
+    mass[i, j, k] = massn
+
+    # ---- Read OLD moments from f_mom (ref lines 862-866) ----
+    # The reference uses pre-collision moments for curvature and gas equilibrium,
+    # NOT the post-streaming pop-summed values.
+    rho_old = f_mom[0 * stride + cur_idx]
+    ux_old = f_mom[1 * stride + cur_idx]
+    uy_old = f_mom[2 * stride + cur_idx]
+    uz_old = f_mom[3 * stride + cur_idx]
+    inv_rho_old = 1.0 / rho_old if rho_old > 0.0 else 1.0
+
+    # ---- Load body force at this cell ----
+    fx = force_x[i, j, k]
+    fy = force_y[i, j, k]
+    fz = force_z[i, j, k]
+
+    # =====================================================================
+    # Phase B: Restore full populations and compute post-streaming moments
+    # =====================================================================
+    # Reference: ``mrLbmSolverGpu3D.cu:940-971``
+    #
+    # Recover the full D3Q27 distributions from the streamed arrays
+    # (fhn / fon had w3d_gpu subtracted during reconstruction).
+    # Then compute density rho, velocity u (with half-force correction
+    # and clamping), and stress components directly from pop.
+
+    # ---- Restore pop = f_streamed + w3d (ref lines 940-942) ----
+    pop = wp.zeros(27, dtype=float)
+    for di in range(27):
+        pop[di] = f_streamed[di] + w3d[di]
+
+
+    # ---- Compute density from pop (ref line 948) ----
+    # Explicit unrolled sum — summation order must match CUDA reference
+    # (mrLbmSolverGpu3D.cu:948) for bit-identical gas-BC rounding.
+    rho_new = (pop[0] + pop[1] + pop[2] + pop[3] + pop[4] + pop[5] + pop[6]
+             + pop[7] + pop[8] + pop[9] + pop[10] + pop[11] + pop[12]
+             + pop[13] + pop[14] + pop[15] + pop[16] + pop[17] + pop[18]
+             + pop[19] + pop[20] + pop[21] + pop[22] + pop[23] + pop[24]
+             + pop[25] + pop[26])
+    inv_rho = 1.0 / rho_new
+    FX_scaled = fx * rho_new
+    FY_scaled = fy * rho_new
+    FZ_scaled = fz * rho_new
+
+    # ---- Compute velocity with half-force correction (ref lines 956-958) ----
+    # Explicit grouped sums — summation order must match CUDA reference
+    # (mrLbmSolverGpu3D.cu:956-958) for bit-identical gas-BC rounding.
+    # D3Q27 direction groups: +x = {1,7,9,13,15,19,21,23,26},
+    # -x = {2,8,10,14,16,20,22,24,25}, etc.
+    ux_new = (((pop[1] + pop[7] + pop[9] + pop[13] + pop[15]
+              + pop[19] + pop[21] + pop[23] + pop[26])
+             - (pop[2] + pop[8] + pop[10] + pop[14] + pop[16]
+              + pop[20] + pop[22] + pop[24] + pop[25])
+             + 0.5 * FX_scaled) * inv_rho)
+    uy_new = (((pop[3] + pop[7] + pop[11] + pop[14] + pop[17]
+              + pop[19] + pop[21] + pop[24] + pop[25])
+             - (pop[4] + pop[8] + pop[12] + pop[13] + pop[18]
+              + pop[20] + pop[22] + pop[23] + pop[26])
+             + 0.5 * FY_scaled) * inv_rho)
+    uz_new = (((pop[5] + pop[9] + pop[11] + pop[16] + pop[18]
+              + pop[19] + pop[22] + pop[23] + pop[25])
+             - (pop[6] + pop[10] + pop[12] + pop[15] + pop[17]
+              + pop[20] + pop[21] + pop[24] + pop[26])
+             + 0.5 * FZ_scaled) * inv_rho)
+
+    # ---- Clamp velocity magnitude to 0.4 (ref lines 960-964) ----
+    vel_sq = ux_new * ux_new + uy_new * uy_new + uz_new * uz_new
+    if vel_sq > 0.16:
+        scale_v = 0.4 / wp.sqrt(vel_sq)
+        ux_new = ux_new * scale_v
+        uy_new = uy_new * scale_v
+        uz_new = uz_new * scale_v
+
+    # ---- Compute stress components from pop (ref lines 966-971) ----
+    # Explicit grouped sums — summation order must match CUDA reference
+    # (mrLbmSolverGpu3D.cu:966-971) for bit-identical gas-BC rounding.
+    #
+    # pixx_t45 = Σ f_i * c_ix²  (directions where cx[i] = ±1)
+    pixx_pop = (pop[1] + pop[2] + pop[7] + pop[8] + pop[9] + pop[10]
+              + pop[13] + pop[14] + pop[15] + pop[16] + pop[19] + pop[20]
+              + pop[21] + pop[22] + pop[23] + pop[24] + pop[25] + pop[26])
+    # pixy_t90 = Σ f_i * c_ix * c_iy  (+cx·+cy or -cx·-cy → positive)
+    pixy_pop = ((pop[7] + pop[8] + pop[19] + pop[20] + pop[21] + pop[22])
+              - (pop[13] + pop[14] + pop[23] + pop[24] + pop[25] + pop[26]))
+    # pixz_t90 = Σ f_i * c_ix * c_iz
+    pixz_pop = ((pop[9] + pop[10] + pop[19] + pop[20] + pop[23] + pop[24])
+              - (pop[15] + pop[16] + pop[21] + pop[22] + pop[25] + pop[26]))
+    # piyy_t45 = Σ f_i * c_iy²
+    piyy_pop = (pop[3] + pop[4] + pop[7] + pop[8] + pop[11] + pop[12]
+              + pop[13] + pop[14] + pop[17] + pop[18] + pop[19] + pop[20]
+              + pop[21] + pop[22] + pop[23] + pop[24] + pop[25] + pop[26])
+    # piyz_t90 = Σ f_i * c_iy * c_iz
+    piyz_pop = ((pop[11] + pop[12] + pop[19] + pop[20] + pop[25] + pop[26])
+              - (pop[17] + pop[18] + pop[21] + pop[22] + pop[23] + pop[24]))
+    # pizz_t45 = Σ f_i * c_iz²
+    pizz_pop = (pop[5] + pop[6] + pop[9] + pop[10] + pop[11] + pop[12]
+              + pop[15] + pop[16] + pop[17] + pop[18] + pop[19] + pop[20]
+              + pop[21] + pop[22] + pop[23] + pop[24] + pop[25] + pop[26])
+
+    # =====================================================================
+    # Phase E: Eddy-viscosity turbulence model
+    # =====================================================================
+    # Reference: ``mrLbmSolverGpu3D.cu:1001-1028``
+    #
+    # Search a 6x6x6 neighbourhood (radius +/-3) for gas bubbles.
+    # When a nearby bubble with volume < 5e6 is found, compute the
+    # local strain-rate magnitude from the post-streaming stress and
+    # modify the relaxation frequency via a Smagorinsky-type closure:
+    #
+    #   s_ab = Pi_ab / rho - c_s^2 * delta_ab
+    #   |S|  = sqrt(s_xx^2 + 2 s_xy^2 + 2 s_xz^2 + s_yy^2 + 2 s_yz^2 + s_zz^2)
+    #   nu_e = turbulence_factor * |S|
+    #   omega_eff = 1 / ((nu_e + nu_0) * 3 + 0.5)    where nu_0 = 1e-4
+    #
+    # Without nearby bubbles the molecular omega is used.
+
+    omega_eff = omega
+
+    if turbulence_factor > 0.0 and turbulence_radius > 0:
+        if near_small_bubble[i, j, k] != wp.uint8(0):
+            # ---- Strain-rate from pop-computed stress (ref lines 1015-1020) ----
+            sxx = pixx_pop * inv_rho - C.CS2
+            syy = piyy_pop * inv_rho - C.CS2
+            szz = pizz_pop * inv_rho - C.CS2
+            sxy = pixy_pop * inv_rho
+            sxz = pixz_pop * inv_rho
+            syz = piyz_pop * inv_rho
+            fact2 = turbulence_factor
+            vis = fact2 * wp.sqrt(
+                sxx * sxx + 2.0 * sxy * sxy + 2.0 * sxz * sxz
+                + syy * syy + 2.0 * syz * syz + szz * szz
+            )
+            omega_eff = 1.0 / ((vis + 1.0e-4) * 3.0 + 0.5)
+
+    # =====================================================================
+    # Phase F: NOCM-MRT collision
+    # =====================================================================
+    # Reference: ``mrLbmSolverGpu3D.cu:1046-1055``
+    #
+    # Collide the stress tensor using ml_get_pi_after_collision.
+    # IMPORTANT: The reference code uses the post-streaming stress
+    # components computed from pop (lines 966-971), NOT the fMom
+    # old stresses.  The collision acts on stress that already
+    # incorporates the streaming information.
+
+    pixx_old = pixx_pop
+    pixy_old = pixy_pop
+    pixz_old = pixz_pop
+    piyy_old = piyy_pop
+    piyz_old = piyz_pop
+    pizz_old = pizz_pop
+
+    pi_new = ml_get_pi_after_collision(
+        rho_new, ux_new, uy_new, uz_new,
+        FX_scaled, FY_scaled, FZ_scaled,
+        omega_eff,
+        pixx_old, pixy_old, pixz_old,
+        piyy_old, piyz_old, pizz_old,
+    )
+
+    # ---- Store post-collision moments (ref lines 1046-1055) ----
+    #   fMomPost[0] = rho
+    #   fMomPost[1] = ux + Fx/(2ρ)
+    #   fMomPost[2] = uy + Fy/(2ρ)
+    #   fMomPost[3] = uz + Fz/(2ρ)
+    #   fMomPost[4] = Π_xx_new / ρ - c_s²   (stored traceless)
+    #   fMomPost[5] = Π_xy_new / ρ
+    #   fMomPost[6] = Π_xz_new / ρ
+    #   fMomPost[7] = Π_yy_new / ρ - c_s²
+    #   fMomPost[8] = Π_yz_new / ρ
+    #   fMomPost[9] = Π_zz_new / ρ - c_s²
+
+    inv_rho_new = 1.0 / rho_new
+
+    f_mom_post[C.M_RHO * stride + cur_idx] = rho_new
+    f_mom_post[C.M_UX * stride + cur_idx] = ux_new + fx * 0.5
+    f_mom_post[C.M_UY * stride + cur_idx] = uy_new + fy * 0.5
+    f_mom_post[C.M_UZ * stride + cur_idx] = uz_new + fz * 0.5
+    f_mom_post[C.M_SXX * stride + cur_idx] = pi_new.xx * inv_rho_new - C.CS2
+    f_mom_post[C.M_SXY * stride + cur_idx] = pi_new.xy * inv_rho_new
+    f_mom_post[C.M_SXZ * stride + cur_idx] = pi_new.xz * inv_rho_new
+    f_mom_post[C.M_SYY * stride + cur_idx] = pi_new.yy * inv_rho_new - C.CS2
+    f_mom_post[C.M_SYZ * stride + cur_idx] = pi_new.yz * inv_rho_new
+    f_mom_post[C.M_SZZ * stride + cur_idx] = pi_new.zz * inv_rho_new - C.CS2
+
+
+@wp.kernel
+def stream_collide_interface_kernel(
+    # ---- State arrays (read) ----
+    f_mom: wp.array(dtype=float),              # [10 × N] current HOME moments
+    flag: wp.array3d(dtype=wp.uint8),          # per-cell type bitfield
+    phi: wp.array3d(dtype=float),              # volume fraction
+    tag_matrix: wp.array3d(dtype=wp.int32),    # bubble ID tag
+    disjoin_force: wp.array3d(dtype=float),    # disjoining pressure
+    islet: wp.array3d(dtype=wp.int32),         # isolated-bubble flag
+
+    # ---- Bubble properties (read) ----
+    bubble_volume: wp.array(dtype=wp.float64),
+    bubble_init_volume: wp.array(dtype=wp.float64),
+    bubble_rho: wp.array(dtype=wp.float64),
+
+    # ---- Solid coupling (read) ----
+    solid_phi: wp.array3d(dtype=float),
+    solid_body_id: wp.array3d(dtype=wp.int32),
+    vel_solid_u: wp.array3d(dtype=float),
+    vel_solid_v: wp.array3d(dtype=float),
+    vel_solid_w: wp.array3d(dtype=float),
+
+    # ---- Solver-owned accumulators (read+write) ----
+    mass: wp.array3d(dtype=float),
+    massex: wp.array3d(dtype=float),
+    delta_g: wp.array3d(dtype=float),
+    delta_phi: wp.array3d(dtype=float),
+    force_x: wp.array3d(dtype=float),
+    force_y: wp.array3d(dtype=float),
+    force_z: wp.array3d(dtype=float),
+    c_value: wp.array3d(dtype=float),
+    src: wp.array3d(dtype=float),
+
+    # ---- State arrays (write) ----
+    f_mom_post: wp.array(dtype=float),          # [10 × N] post-collision moments
+
+    # ---- Turbulence mask (read) ----
+    near_small_bubble: wp.array3d(dtype=wp.uint8),
+
+    # ---- Parameters ----
+    nx: int,
+    ny: int,
+    nz: int,
+    stride: int,                                # nx * ny * nz
+    omega: float,                               # NOCM-MRT relaxation frequency
+    surface_tension: float,                     # def_6_sigma
+    henry_constant: float,                      # K_h
+    disjoin_factor: float,
+    turbulence_factor: float,
+    turbulence_radius: int,
+    atmosphere_open: int,                       # bool → int
+    px: int,
+    py: int,
+    pz: int,
+    cx: wp.array(dtype=wp.int32),
+    cy: wp.array(dtype=wp.int32),
+    cz: wp.array(dtype=wp.int32),
+    w3d: wp.array(dtype=float),
+    opposite: wp.array(dtype=wp.int32),
+):
+    """Interface fluid kernel (TYPE_I only): pull-streaming → PLIC → collision.
+    """
+    i, j, k = wp.tid()
+
+    cur_idx = i * ny * nz + j * nz + k
+    flagsn = int(flag[i, j, k])
+
+    # ---- Per-direction neighbour index table (CX/CY/CZ) ----
+    # (Hard-coded in the kernel for compiler unrolling — replicated from C.CX/CY/CZ.)
+
+    # =====================================================================
+    # Phase A: Pull-streaming + Hermite reconstruction
+    # =====================================================================
+    # Reference: ``mrLbmSolverGpu3D.cu:729-804``
+
+    # Skip cells that do not participate in fluid dynamics
+    flagsn_bo = flagsn & C.TYPE_BO_MASK
+    flagsn_su = flagsn & C.TYPE_SU_MASK
+
+    if flagsn_bo == C.TYPE_S:
+        return  # solid cell — no fluid computation
+    if flagsn_su == C.TYPE_G:
+        return  # pure gas cell — no fluid computation
+
+    # Islet (isolated bubble) handling (ref lines 723-726)
+    # Islet=1 means this cell is an isolated bubble that should be treated as fluid.
+    if islet[i, j, k] == 1:
+        # Set flag to TYPE_F and skip — this cell acts as fluid
+        flag[i, j, k] = wp.uint8(C.TYPE_F)
+        return
+
+    # Interface pass: TYPE_I cells only.
+    if flagsn_su != C.TYPE_I:
+        return
 
     # ---- Load current-cell moments ----
     cr = f_mom[C.M_RHO * stride + cur_idx]
@@ -1623,6 +2023,11 @@ def stream_collide_bvh_kernel(
     f_mom_post[C.M_SZZ * stride + cur_idx] = pi_new.zz * inv_rho_new - C.CS2
 
 
+# Backward-compatible name (imports / docs). Specialized launches use
+# `stream_collide_bulk_kernel` / `stream_collide_interface_kernel`.
+stream_collide_bvh_kernel = stream_collide_interface_kernel
+
+
 # ============================================================================
 # 5.1 Turbulence mask kernels (pre-pass for eddy viscosity)
 # ============================================================================
@@ -1633,17 +2038,23 @@ def mark_small_bubble_kernel(
     tag_matrix: wp.array3d(dtype=wp.int32),
     bubble_volume: wp.array(dtype=wp.float64),
     mark: wp.array3d(dtype=wp.uint8),
+    any_small: wp.array(dtype=wp.int32),
     nx: int,
     ny: int,
     nz: int,
 ):
-    """Mark cells belonging to small bubbles (V < 5e6)."""
+    """Mark cells belonging to small bubbles (V < 5e6).
+
+    Sets ``any_small[0] = 1`` if at least one cell is marked so the host can
+    skip the expensive dilate pass when the mask is empty.
+    """
     i, j, k = wp.tid()
     mark[i, j, k] = wp.uint8(0)
     tag = tag_matrix[i, j, k]
     if tag > 0:
         if float(bubble_volume[tag - 1]) < 5000000.0:
             mark[i, j, k] = wp.uint8(1)
+            any_small[0] = 1
 
 
 @wp.kernel
@@ -1675,11 +2086,9 @@ def dilate_near_small_bubble_kernel(
     near[i, j, k] = out_val
 
 
-# Bulk / interface entry points — same body, ``interface_only`` passed as a
-# launch-time literal (0 or 1) so Warp can dead-code-eliminate PLIC in bulk.
-stream_collide_bulk_kernel = stream_collide_bvh_kernel
-stream_collide_interface_kernel = stream_collide_bvh_kernel
-
+# Bulk / interface entry points are defined above as separate @wp.kernel
+# objects so Warp compiles them independently (bulk omits Phase C / PLIC).
+# ``stream_collide_bvh_kernel`` aliases the interface kernel for import compat.
 
 def launch_stream_collide_bvh(
     dim: tuple[int, int, int],
@@ -1775,13 +2184,13 @@ def launch_stream_collide_bvh(
     wp.launch(
         stream_collide_bulk_kernel,
         dim=dim,
-        inputs=head + tail + [0] + tail_end,
+        inputs=head + tail + tail_end,
         device=device,
     )
     wp.launch(
         stream_collide_interface_kernel,
         dim=dim,
-        inputs=head + tail + [1] + tail_end,
+        inputs=head + tail + tail_end,
         device=device,
     )
 

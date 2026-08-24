@@ -303,7 +303,8 @@ def _run_steps_verbose(domain, steps, N):
             domain.step(dt=1.0)
 
         state = domain.state
-        f_post = state.f_mom_post.numpy()
+        # After step(), active HOME moments live in f_mom (pointer ping-pong).
+        f_post = state.f_mom.numpy()
         mass3d = state.mass.numpy()
         phi3d = state.phi.numpy()
         flag3d = state.flag.numpy()
@@ -618,7 +619,7 @@ class TestRegressionSurface:
 
         # ---- Run ALL comparisons, collecting errors ----
         errors = []
-        warped_f = state.f_mom_post.numpy().flatten()
+        warped_f = state.f_mom.numpy().flatten()
         err = _compare_f_mom_post(
             golden["f_mom_post"], warped_f, stride, scene_name, atol=fmom_atol,
         )
@@ -903,8 +904,8 @@ def _check_diag_step(_warp, scene_name, N, steps, setup_fn, setup_kwargs):
     errors += _first_diff_report(g_mass, state.mass.numpy(), "mass", N)
     errors += _first_diff_report(g_phi, state.phi.numpy(), "phi", N)
 
-    # f_mom_post
-    w_fmom = state.f_mom_post.numpy().flatten()
+    # Active moments after step() are in f_mom (pointer ping-pong).
+    w_fmom = state.f_mom.numpy().flatten()
     g_fmom_flat = np.asarray(g_fmom, dtype=np.float32).ravel()
     w_fmom_flat = np.asarray(w_fmom, dtype=np.float32).ravel()
     abs_diff = np.abs(
@@ -921,7 +922,7 @@ def _check_diag_step(_warp, scene_name, N, steps, setup_fn, setup_kwargs):
         pct = 100.0 * n_mm / len(g_fmom_flat)
         rel_err = abs_diff / max_val
         max_rel = float(np.max(rel_err))
-        print(f"  [f_mom_post] {n_mm}/{len(g_fmom_flat)} ({pct:.2f}%) "
+        print(f"  [f_mom] {n_mm}/{len(g_fmom_flat)} ({pct:.2f}%) "
               f"differ, max rel err={max_rel:.2e}")
         # Show first 5 differing moment elements
         bad = np.where(abs_diff > thresh)[0]
@@ -937,7 +938,7 @@ def _check_diag_step(_warp, scene_name, N, steps, setup_fn, setup_kwargs):
                   f"abs={abs_diff[bi]:.3e} rel={rel_err[bi]:.3e}")
         errors += 1
     else:
-        print(f"  [f_mom_post] all match")
+        print(f"  [f_mom] all match")
 
     return errors == 0
 

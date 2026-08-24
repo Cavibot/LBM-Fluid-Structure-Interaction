@@ -32,13 +32,13 @@ from wanphys._src.fluid.fluid_grid.home_fslbm import constants as C
 from wanphys._src.fluid.fluid_viewer import FluidViewerGL, ScreenSpaceFluidRenderer
 
 # Scene scale aligned with fluid_grid_home_fslbm_dambreak / LBM TRT sample.
-N: int = 128
+N: int = 256
 DH: float = 0.02
 DAM_X_FRAC: float = 0.25
 DAM_Z_FRAC: float = 0.50
 
 OMEGA: float = 1.998
-GRAVITY_Z: float = -1.0e-3
+GRAVITY_Z: float = -5.0e-4
 SURFACE_TENSION: float = 6.0 * 4e-3
 DISJOIN: float = C.DISJOINT_FACTOR
 

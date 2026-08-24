@@ -837,10 +837,11 @@ class TestTurbulenceMask:
         mark = wp.zeros((N, N, N), dtype=wp.uint8, device="cuda:0")
         near = wp.zeros((N, N, N), dtype=wp.uint8, device="cuda:0")
 
+        any_small = wp.zeros(1, dtype=wp.int32, device="cuda:0")
         wp.launch(
             mark_small_bubble_kernel,
             dim=(N, N, N),
-            inputs=[tag_wp, vol_wp, mark, N, N, N],
+            inputs=[tag_wp, vol_wp, mark, any_small, N, N, N],
         )
         radius = 3
         wp.launch(
@@ -849,6 +850,7 @@ class TestTurbulenceMask:
             inputs=[mark, near, radius, N, N, N],
         )
         near_np = near.numpy()
+        assert int(any_small.numpy()[0]) == 1
 
         ref = np.zeros((N, N, N), dtype=np.uint8)
         mark_np = mark.numpy()
