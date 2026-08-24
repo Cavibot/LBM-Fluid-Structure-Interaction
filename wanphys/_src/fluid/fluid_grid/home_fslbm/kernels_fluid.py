@@ -327,7 +327,8 @@ def reconstruct_distribution(
     if di == 22:   # (-1,-1,+1)
         return _W3 * (A0 - Ax_t3 + Axx_t3 - Axxy_t9 + Axxz_t9 + Axy_t9 - Axyy_t9 + Axyz_t27 - Axz_t9 - Axzz_t9 - Ay_t3 + Ayy_t3 + Ayyz_t9 - Ayz_t9 - Ayzz_t9 + Az_t3 + Azz_t3)
     if di == 23:   # (+1,-1,+1)
-        return _W3 * (A0 + Ax_t3 + Axx_t3 - Axxy_t9 + Axxz_t9 - Axy_t9 + Axyy_t9 - Axyz_t27 + Axz_t9 + Axzz_t9 - Ay_t3 + Ayy_t3 - Ayyz_t9 + Ayz_t9 - Ayzz_t9 + Az_t3 + Azz_t3)
+        # Match ref mrUtilFuncGpu3D.h:258 — Ayyz/Ayz signs (was flipped vs CUDA).
+        return _W3 * (A0 + Ax_t3 + Axx_t3 - Axxy_t9 + Axxz_t9 - Axy_t9 + Axyy_t9 - Axyz_t27 + Axz_t9 + Axzz_t9 - Ay_t3 + Ayy_t3 + Ayyz_t9 - Ayz_t9 - Ayzz_t9 + Az_t3 + Azz_t3)
     if di == 24:   # (-1,+1,-1)
         return _W3 * (A0 - Ax_t3 + Axx_t3 + Axxy_t9 - Axxz_t9 - Axy_t9 - Axyy_t9 + Axyz_t27 + Axz_t9 - Axzz_t9 + Ay_t3 + Ayy_t3 - Ayyz_t9 - Ayz_t9 + Ayzz_t9 - Az_t3 + Azz_t3)
     if di == 25:   # (-1,+1,+1)
