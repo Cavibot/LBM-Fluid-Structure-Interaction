@@ -181,5 +181,6 @@ uv run --extra examples python -m wanphys.examples.lbm.fluid_grid_lbm_dambreak_v
 | **压差浮力** | `.../home_fp32_ref/pressure_buoyancy_warp.py` + `coupling/archimedes_buoyancy.py` |
 | **Path B ME 浮力** | `.../home_fp32_ref/hydro_me_warp.py`（`accumulate_hydro_me_correction`） |
 | Path B 流体 \(\rho_G\) | `.../home_fp32_ref/vof_warp.py`（FS \(\rho_G\)；`vof_mod_pressure_*`） |
-| （legacy）φ 体积浮力 | `.../home_fp32_ref/phi_volume_buoyancy_warp.py` |
+| （legacy）φ 体积浮力核 | `.../home_fp32_ref/phi_volume_buoyancy_warp.py`（经 `ArchimedesBuoyancy(method="volume")`） |
+| 列自由面 / Σmass 共用 | `.../home_fp32_ref/fs_column_warp.py` |
 | 算法说明 | `docs/wanphys/lbm_home_vof_fsi_algorithm_zh.md` |

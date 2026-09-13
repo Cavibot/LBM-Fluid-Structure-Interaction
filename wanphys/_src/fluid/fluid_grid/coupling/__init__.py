@@ -7,7 +7,6 @@ from wanphys._src.fluid.fluid_grid.coupling.archimedes_buoyancy import (
     ArchimedesBuoyancy,
     ArchimedesBuoyancyConfig,
     ArchimedesBuoyancyResult,
-    apply_archimedes_buoyancy,
 )
 from wanphys._src.fluid.fluid_grid.coupling.grid_lbm_rigid_coupling import (
     GridLbmRigidCoupling,
@@ -25,7 +24,6 @@ __all__: list[str] = [
     "GridLbmRigidCoupling",
     "GridLiquidRigidCoupling",
     "LbmFeedbackMode",
-    "apply_archimedes_buoyancy",
     "lattice_gravity_to_world",
     "open_me_force_conversion",
     "recommended_me_force_scale",

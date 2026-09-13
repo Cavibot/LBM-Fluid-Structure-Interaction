@@ -370,6 +370,7 @@ class HomeVofDamBreakTwoSpheres:
         self._last_extra_force_by_body: dict[int, tuple[float, float, float]] = {}
         self._last_liquid_mass: float = 0.0
         self._liquid_mass0: float = 0.0
+        self._wet_mass_acc = None  # lazy GPU Σmass accumulator
         self._empirical_fsi: EmpiricalSphereFsiPlugin | None = None
         if self._showcase_fsi:
             self._empirical_cfg = EmpiricalSphereFsiConfig(
@@ -480,7 +481,7 @@ class HomeVofDamBreakTwoSpheres:
         )
         self._liquid_mass0 = self._sample_liquid_mass()
         self._last_liquid_mass = self._liquid_mass0
-        print(f"  mass0={self._liquid_mass0:.1f} (wet Σmass at seed)")
+        print(f"  mass0={self._liquid_mass0:.1f} (wet Sum(mass) at seed)")
         if self._late_pool is not None:
             self._late_pool.set_reference_volume_from_state(state)
 
@@ -615,8 +616,8 @@ class HomeVofDamBreakTwoSpheres:
             )
 
         print(
-            f"  spheres: r={radius}, heavy_ρ={HEAVY_SPHERE_DENSITY}, "
-            f"light_ρ={LIGHT_SPHERE_DENSITY}, feedback={feedback_force_scale:.4g}, "
+            f"  spheres: r={radius}, heavy_rho={HEAVY_SPHERE_DENSITY}, "
+            f"light_rho={LIGHT_SPHERE_DENSITY}, feedback={feedback_force_scale:.4g}, "
             f"mode={self.coupling.feedback_mode}, "
             f"me_apply={self.coupling.me_integration_mode}"
         )
@@ -625,18 +626,18 @@ class HomeVofDamBreakTwoSpheres:
         print(
             f"  archimedes={'on' if self._archimedes else 'off'} "
             f"scale={self._archimedes_scale:g} "
-            f"(pressure ∮−p n dA; ME keeps impact)"
+            f"(pressure surface integral; ME keeps impact)"
         )
         print(
             f"  mod_pressure={'on' if self._mod_pressure else 'off'} "
             f"fh={'on' if self._mod_pressure_fh else 'off'} "
             f"fluid={'on' if self._mod_pressure_fluid else 'off'} "
-            f"(F_α,H / zero-Guo+ρ_G(z))"
+            f"(F_a,H / zero-Guo+rho_G(z))"
         )
         print(
             f"  hydro_rho={'on' if self._hydro_rho else 'off'} "
             f"rate={self._hydro_rho_rate:g} every={self._hydro_rho_every} "
-            f"(opt-in ρ(z) ME experiment; not default physics)"
+            f"(opt-in rho(z) ME experiment; not default physics)"
         )
         if self._showcase_fsi:
             print(
@@ -859,55 +860,32 @@ class HomeVofDamBreakTwoSpheres:
             self._last_submerged_by_body.update(result.submerged)
             self._last_extra_force_by_body.update(result.forces)
             return
-        self._sample_shell_wet_fraction()
+        # No Archimedes / showcase: leave last diagnostics (avoid host field D2H).
 
-    def _sample_shell_wet_fraction(self) -> None:
-        """Estimate submerged fraction from φ at shell samples (status/CSV)."""
-        state = self.domain.state
-        phi = state.phi.numpy()
-        cell = state.cell_type.numpy()
-        solid = state.solid_phi.numpy()
-        n = self._n
-        radius = SPHERE_RADIUS
-        # Sparse shell directions (same spirit as empirical plugin).
-        dirs = (
-            (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0),
-            (0.0, 1.0, 0.0), (0.0, -1.0, 0.0),
-            (0.0, 0.0, 1.0), (0.0, 0.0, -1.0),
-            (0.577, 0.577, 0.577), (-0.577, 0.577, 0.577),
-            (0.577, -0.577, 0.577), (-0.577, -0.577, 0.577),
-            (0.577, 0.577, -0.577), (-0.577, 0.577, -0.577),
-            (0.577, -0.577, -0.577), (-0.577, -0.577, -0.577),
+    def _sample_liquid_mass(self) -> float:
+        """Wet inventory ``Σmass`` over liquid + interface (excludes gas/solid)."""
+        from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.fs_column_warp import (
+            sum_wet_mass_gpu,
         )
-        for body_id in (self.heavy_body_id, self.light_body_id):
-            pos = np.asarray(
-                self.rigid_domain.state.get_body_position(body_id), dtype=np.float64
-            )
-            wet = 0
-            valid = 0
-            for ox, oy, oz in dirs:
-                sx = pos[0] + ox * radius
-                sy = pos[1] + oy * radius
-                sz = pos[2] + oz * radius
-                i = int(np.clip(sx / DH, 0, n - 1))
-                j = int(np.clip(sy / DH, 0, n - 1))
-                k = int(np.clip(sz / DH, 0, n - 1))
-                if solid[i, j, k] < 0.0:
-                    continue
-                valid += 1
-                if int(cell[i, j, k]) == 0:
-                    continue
-                if float(phi[i, j, k]) <= 0.08:
-                    continue
-                wet += 1
-            self._last_submerged_by_body[int(body_id)] = (
-                float(wet) / float(valid) if valid > 0 else 0.0
-            )
+
+        home = self.domain.solver._home_fp32
+        if home is None:
+            return 0.0
+        buf = home._ensure_gpu()
+        if self._wet_mass_acc is None:
+            self._wet_mass_acc = wp.zeros(1, dtype=float, device=buf.device)
+        return sum_wet_mass_gpu(
+            cell=buf.cell_type,
+            solid=buf.solid_phi,
+            mass=buf.mass,
+            shape=buf.shape,
+            acc=self._wet_mass_acc,
+            device=buf.device,
+        )
 
     def render(self) -> None:
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.rigid_domain.state.as_newton_state())
-
         if self.ssfr is not None and self.ssfr.available:
             state: LbmState = self.domain.state
             wp.launch(
@@ -923,7 +901,6 @@ class HomeVofDamBreakTwoSpheres:
                 threshold=SSFR_THRESHOLD,
                 max_steps=RAY_MARCH_STEPS,
             )
-
         self.viewer.end_frame()
 
     def test_final(self) -> None:
@@ -942,18 +919,6 @@ class HomeVofDamBreakTwoSpheres:
             raise ValueError(f"light sphere position not finite: {light_pos}")
         if not np.all(np.isfinite(rho_np)):
             raise ValueError("density field contains non-finite values")
-
-    def _sample_liquid_mass(self) -> float:
-        """Wet inventory ``Σmass`` over liquid + interface (excludes gas/solid)."""
-        home = self.domain.solver._home_fp32
-        if home is None:
-            return 0.0
-        buf = home._ensure_gpu()
-        mass = buf.mass.numpy()
-        cell = buf.cell_type.numpy()
-        solid = buf.solid_phi.numpy()
-        wet = ((cell == 1) | (cell == 2)) & (solid >= 0.0)
-        return float(mass[wet].sum())
 
     def _print_status(self) -> None:
         # Status cadence already syncs mass; keep host logs off the hot path.

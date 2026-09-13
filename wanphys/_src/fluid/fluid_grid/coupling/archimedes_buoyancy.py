@@ -8,12 +8,18 @@ With uniform liquid density the continuum definition is
     p = ρ · |g| · depth_below_free_surface
     F = ∮ −p n dA     (wet surface; atmospheric gauge)
 
-Displaced-volume ``ρ V g s`` is only the closed-form integral of that pressure
-field for a fully/partially submerged body. This module integrates pressure
-on surface samples so the force comes from **压差**, not an explicit drain
-volume. Link ME (Eq.32) stays for hydrodynamic impact under Guo + ρ≈1.
+Displaced-volume ``ρ V g s`` (``method="volume"``) remains as a legacy option
+that uses the same coupling API. Link ME (Eq.32) stays for hydrodynamic
+impact under Guo + ρ≈1.
 
-Typical use (after fluid + ME, before rigid step)::
+Layering (WanPhys)::
+
+    kernels  → home_fp32_ref/pressure_buoyancy_warp.py (+ phi_volume_*)
+    API      → this module (Config / apply / diagnostics)
+    wiring   → examples call ``.apply`` after ME, before XPBD
+               (not inside GridLbmRigidCoupling / fused VOF)
+
+Typical use::
 
     buoy = ArchimedesBuoyancy(device=..., body_ids=(...), radius=R)
     buoy.apply(
@@ -36,12 +42,6 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.pressure_bu
     ensure_pressure_buoyancy_scratch,
     fibonacci_sphere_dirs,
 )
-from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.phi_volume_buoyancy_warp import (
-    apply_phi_volume_buoyancy_gpu,
-    ensure_phi_volume_scratch,
-    fibonacci_shell_offsets,
-)
-
 
 Method = Literal["pressure", "volume"]
 
@@ -109,12 +109,21 @@ class ArchimedesBuoyancy:
         )
         self.config = config if config is not None else ArchimedesBuoyancyConfig()
         self._dirs = fibonacci_sphere_dirs(int(self.config.n_samples))
-        self._vol_offsets = fibonacci_shell_offsets(
-            int(self.config.n_samples),
-            radii=tuple(float(x) for x in self.config.shell_radii),
-        )
+        self._vol_offsets: tuple[tuple[float, float, float], ...] | None = None
         self._scratch: dict[str, Any] | None = None
         self.last_result = ArchimedesBuoyancyResult()
+
+    def _ensure_volume_offsets(self) -> tuple[tuple[float, float, float], ...]:
+        if self._vol_offsets is None:
+            from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.phi_volume_buoyancy_warp import (
+                fibonacci_shell_offsets,
+            )
+
+            self._vol_offsets = fibonacci_shell_offsets(
+                int(self.config.n_samples),
+                radii=tuple(float(x) for x in self.config.shell_radii),
+            )
+        return self._vol_offsets
 
     def apply(
         self,
@@ -138,9 +147,14 @@ class ArchimedesBuoyancy:
         g_abs = abs(float(gravity_abs))
 
         if cfg.method == "volume":
+            from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.phi_volume_buoyancy_warp import (
+                apply_phi_volume_buoyancy_gpu,
+                ensure_phi_volume_scratch,
+            )
+
             self._scratch = ensure_phi_volume_scratch(
                 device=self.device,
-                offsets_xyz=self._vol_offsets,
+                offsets_xyz=self._ensure_volume_offsets(),
                 body_ids=self.body_ids,
                 scratch=self._scratch if self._scratch and "offsets" in self._scratch else None,
             )
@@ -197,12 +211,9 @@ class ArchimedesBuoyancy:
                 sync_submerged=False,
             )
 
-        result = ArchimedesBuoyancyResult()
         if sync_diagnostics and self._scratch is not None:
-            result = self.read_diagnostics()
-        else:
-            self.last_result = result
-        return result if sync_diagnostics else self.last_result
+            return self.read_diagnostics()
+        return self.last_result
 
     def read_diagnostics(self) -> ArchimedesBuoyancyResult:
         """Host read of last GPU submerged / force buffers (no apply)."""
@@ -222,42 +233,9 @@ class ArchimedesBuoyancy:
         return result
 
 
-def apply_archimedes_buoyancy(
-    *,
-    buoy: ArchimedesBuoyancy,
-    phi: wp.array,
-    cell: wp.array,
-    solid: wp.array,
-    body_q: wp.array,
-    body_f_apply: Any,
-    dh: float,
-    grid_shape: tuple[int, int, int],
-    rho_liquid: float,
-    gravity_abs: float,
-    scale: float | None = None,
-    sync_diagnostics: bool = True,
-) -> ArchimedesBuoyancyResult:
-    """Functional wrapper around :meth:`ArchimedesBuoyancy.apply`."""
-    return buoy.apply(
-        phi=phi,
-        cell=cell,
-        solid=solid,
-        body_q=body_q,
-        body_f_apply=body_f_apply,
-        dh=dh,
-        grid_shape=grid_shape,
-        rho_liquid=rho_liquid,
-        gravity_abs=gravity_abs,
-        scale=scale,
-        sync_diagnostics=sync_diagnostics,
-    )
-
-
 __all__ = [
     "ArchimedesBuoyancy",
     "ArchimedesBuoyancyConfig",
     "ArchimedesBuoyancyResult",
-    "apply_archimedes_buoyancy",
     "fibonacci_sphere_dirs",
-    "fibonacci_shell_offsets",
 ]

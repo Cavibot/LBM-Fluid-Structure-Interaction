@@ -389,7 +389,8 @@ RigidState (q, qd)
 | 反馈 / ME | `home_fp32_ref/link_me_warp.py`；`recommended_me_force_scale` | `accumulate_home_reconstructed_link_me_kernel` |
 | 浮力（showcase） | `home_fp32_ref/sphere_buoyancy_warp.py` | `apply_sphere_buoyancy_forces_gpu` |
 | 压差 Archimedes | `home_fp32_ref/pressure_buoyancy_warp.py` | `apply_pressure_buoyancy_gpu` |
-| （legacy）φ 体积 | `home_fp32_ref/phi_volume_buoyancy_warp.py` | `apply_phi_volume_buoyancy_gpu` |
+| （legacy）φ 体积 | `home_fp32_ref/phi_volume_buoyancy_warp.py` via `ArchimedesBuoyancy(method="volume")` | `apply_phi_volume_buoyancy_gpu` |
+| 列 FS / Σmass 共用 | `home_fp32_ref/fs_column_warp.py` | `mark_column_fs_k` / `sum_wet_mass` |
 | 模型开关 | `lbm/model.py` | `vof_home_wall_eq`, `vof_height_eq*` |
 
 ---

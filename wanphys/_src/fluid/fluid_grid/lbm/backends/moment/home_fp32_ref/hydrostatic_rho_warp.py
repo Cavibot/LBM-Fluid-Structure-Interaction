@@ -19,13 +19,17 @@ from typing import TYPE_CHECKING
 
 import warp as wp
 
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.fs_column_warp import (
+    CELL_INTERFACE,
+    CELL_LIQUID,
+    launch_mark_column_fs_k,
+    sum_wet_mass_kernel,
+)
+
 if TYPE_CHECKING:
     from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.vof_warp import (
         HomeVofGpuBuffers,
     )
-
-CELL_INTERFACE: int = 1
-CELL_LIQUID: int = 2
 
 
 def _ensure_scratch(buf: HomeVofGpuBuffers, nz: int) -> None:
@@ -51,31 +55,6 @@ def _ensure_scratch(buf: HomeVofGpuBuffers, nz: int) -> None:
     buf._hydro_mode = wp.zeros(1, dtype=wp.int32, device=device)
     # [0]=Σmass before, [1]=Σmass after blend
     buf._hydro_mass_acc = wp.zeros(2, dtype=float, device=device)
-
-
-@wp.kernel
-def hydro_mark_fs_k_kernel(
-    cell: wp.array3d(dtype=wp.int32),
-    phi: wp.array3d(dtype=float),
-    solid: wp.array3d(dtype=float),
-    fs_k: wp.array2d(dtype=wp.int32),
-    phi_wet: float,
-    nz: int,
-) -> None:
-    """Topmost liquid / wet IF in each column (cell-center free-surface index)."""
-    i, j = wp.tid()
-    fs_k[i, j] = -1
-    for t in range(nz):
-        k = nz - 1 - t
-        if solid[i, j, k] < 0.0:
-            continue
-        ct = int(cell[i, j, k])
-        if ct == CELL_LIQUID:
-            fs_k[i, j] = k
-            return
-        if ct == CELL_INTERFACE and phi[i, j, k] > phi_wet:
-            fs_k[i, j] = k
-            return
 
 
 @wp.kernel
@@ -110,23 +89,6 @@ def hydro_argmax_hist_kernel(
             best_v = v
             best_k = k
     mode_out[0] = best_k
-
-
-@wp.kernel
-def hydro_sum_mass_kernel(
-    cell: wp.array3d(dtype=wp.int32),
-    solid: wp.array3d(dtype=float),
-    mass: wp.array3d(dtype=float),
-    acc_idx: int,
-    acc: wp.array(dtype=float),
-) -> None:
-    i, j, k = wp.tid()
-    if solid[i, j, k] < 0.0:
-        return
-    ct = int(cell[i, j, k])
-    if ct != CELL_LIQUID and ct != CELL_INTERFACE:
-        return
-    wp.atomic_add(acc, acc_idx, mass[i, j, k])
 
 
 @wp.kernel
@@ -245,17 +207,15 @@ def apply_hydrostatic_rho_gpu(
         inputs=[buf._hydro_hist],
         device=buf.device,
     )
-    wp.launch(
-        hydro_mark_fs_k_kernel,
-        dim=(nx, ny),
-        inputs=[
-            buf.cell_type,
-            buf.phi,
-            buf.solid_phi,
-            buf._hydro_fs_k,
-            float(phi_wet),
-            int(nz),
-        ],
+    launch_mark_column_fs_k(
+        cell=buf.cell_type,
+        phi=buf.phi,
+        solid=buf.solid_phi,
+        fs_k=buf._hydro_fs_k,
+        phi_wet=float(phi_wet),
+        nx=nx,
+        ny=ny,
+        nz=nz,
         device=buf.device,
     )
     wp.launch(
@@ -271,7 +231,7 @@ def apply_hydrostatic_rho_gpu(
         device=buf.device,
     )
     wp.launch(
-        hydro_sum_mass_kernel,
+        sum_wet_mass_kernel,
         dim=(nx, ny, nz),
         inputs=[buf.cell_type, buf.solid_phi, buf.mass, 0, buf._hydro_mass_acc],
         device=buf.device,
@@ -296,7 +256,7 @@ def apply_hydrostatic_rho_gpu(
         device=buf.device,
     )
     wp.launch(
-        hydro_sum_mass_kernel,
+        sum_wet_mass_kernel,
         dim=(nx, ny, nz),
         inputs=[buf.cell_type, buf.solid_phi, buf.mass, 1, buf._hydro_mass_acc],
         device=buf.device,

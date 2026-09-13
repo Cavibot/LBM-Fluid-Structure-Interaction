@@ -22,9 +22,13 @@ from __future__ import annotations
 
 import warp as wp
 
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.fs_column_warp import (
+    CELL_INTERFACE,
+    CELL_LIQUID,
+    launch_mark_column_fs_k,
+)
+
 CELL_GAS: int = 0
-CELL_INTERFACE: int = 1
-CELL_LIQUID: int = 2
 
 
 @wp.func
@@ -35,30 +39,6 @@ def _feq_w(
     cu = cx * ux + cy * uy + cz * uz
     u2 = ux * ux + uy * uy + uz * uz
     return rho * w * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * u2)
-
-
-@wp.kernel
-def hydro_me_mark_fs_k_kernel(
-    cell: wp.array3d(dtype=wp.int32),
-    phi: wp.array3d(dtype=float),
-    solid: wp.array3d(dtype=float),
-    fs_k: wp.array2d(dtype=wp.int32),
-    phi_wet: float,
-    nz: int,
-) -> None:
-    i, j = wp.tid()
-    fs_k[i, j] = -1
-    for t in range(nz):
-        k = nz - 1 - t
-        if solid[i, j, k] < 0.0:
-            continue
-        ct = int(cell[i, j, k])
-        if ct == CELL_LIQUID:
-            fs_k[i, j] = k
-            return
-        if ct == CELL_INTERFACE and phi[i, j, k] > phi_wet:
-            fs_k[i, j] = k
-            return
 
 
 @wp.kernel
@@ -214,17 +194,15 @@ def apply_hydro_me_correction_gpu(
     scratch = ensure_hydro_me_scratch(
         device=buf.device, nx=nx, ny=ny, scratch=scratch
     )
-    wp.launch(
-        hydro_me_mark_fs_k_kernel,
-        dim=(nx, ny),
-        inputs=[
-            buf.cell_type,
-            buf.phi,
-            buf.solid_phi,
-            scratch["fs_k"],
-            float(phi_wet),
-            int(nz),
-        ],
+    launch_mark_column_fs_k(
+        cell=buf.cell_type,
+        phi=buf.phi,
+        solid=buf.solid_phi,
+        fs_k=scratch["fs_k"],
+        phi_wet=float(phi_wet),
+        nx=nx,
+        ny=ny,
+        nz=nz,
         device=buf.device,
     )
     wp.launch(

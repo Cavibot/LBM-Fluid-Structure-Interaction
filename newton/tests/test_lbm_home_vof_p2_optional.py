@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 WanPhys Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""P2 tests: home reconstructed-link ME, φ-volume plugin, narrowband, CUDA graph flag."""
+"""P2 tests: home reconstructed-link ME, Archimedes volume path, narrowband, CUDA graph flag."""
 
 from __future__ import annotations
 
@@ -10,7 +10,12 @@ import unittest
 
 import numpy as np
 
-from wanphys._src.fluid.fluid_grid.coupling import GridLbmRigidCoupling, LbmFeedbackMode
+from wanphys._src.fluid.fluid_grid.coupling import (
+    ArchimedesBuoyancy,
+    ArchimedesBuoyancyConfig,
+    GridLbmRigidCoupling,
+    LbmFeedbackMode,
+)
 from wanphys._src.fluid.fluid_grid.lbm import LbmDomain
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref import (
     make_home_vof_model,
@@ -18,10 +23,6 @@ from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref import (
 )
 from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.phi_volume_buoyancy_warp import (
     fibonacci_shell_offsets,
-)
-from wanphys.examples.lbm._home_vof_phi_volume_buoyancy import (
-    PhiVolumeBuoyancyConfig,
-    PhiVolumeBuoyancyPlugin,
 )
 from wanphys.rigid import RigidDomain, RigidModelBuilder
 
@@ -90,7 +91,7 @@ class TestHomeReconstructedLinkMe(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(bf)))
 
 
-class TestPhiVolumeBuoyancyPlugin(unittest.TestCase):
+class TestArchimedesVolumeBuoyancy(unittest.TestCase):
     def test_fibonacci_offsets_and_apply(self) -> None:
         offs = fibonacci_shell_offsets(12, radii=(1.05,))
         self.assertEqual(len(offs), 12)
@@ -110,18 +111,16 @@ class TestPhiVolumeBuoyancyPlugin(unittest.TestCase):
 
         r = 0.15
         vol = (4.0 / 3.0) * math.pi * r**3
-        plugin = PhiVolumeBuoyancyPlugin(
-            device=str(model._device),
+        buoy = ArchimedesBuoyancy(
+            device=model._device,
             body_ids=(0,),
             radius=r,
             volume=vol,
-            rho_liquid=1.0,
-            gravity_abs=9.81,
-            dh=float(model.dh),
-            nx=20,
-            ny=20,
-            nz=20,
-            config=PhiVolumeBuoyancyConfig(n_dirs=16),
+            config=ArchimedesBuoyancyConfig(
+                method="volume",
+                n_samples=16,
+                shell_radii=(1.05, 1.15),
+            ),
         )
 
         builder = RigidModelBuilder(gravity=0.0)
@@ -130,17 +129,21 @@ class TestPhiVolumeBuoyancyPlugin(unittest.TestCase):
         rigid = RigidDomain(builder.finalize(device=model._device))
         rigid.create_state()
 
-        sub = plugin.apply(
+        result = buoy.apply(
             phi=g.phi,
             cell=g.cell_type,
             solid=g.solid_phi,
             body_q=rigid.state.body_q,
             body_f_apply=rigid.state.apply_body_forces,
-            sync_submerged=True,
+            dh=float(model.dh),
+            grid_shape=(20, 20, 20),
+            rho_liquid=1.0,
+            gravity_abs=9.81,
+            sync_diagnostics=True,
         )
-        self.assertIn(0, sub)
-        self.assertGreaterEqual(sub[0], 0.0)
-        self.assertLessEqual(sub[0], 1.0)
+        self.assertIn(0, result.submerged)
+        self.assertGreaterEqual(result.submerged[0], 0.0)
+        self.assertLessEqual(result.submerged[0], 1.0)
 
 
 class TestSolidNarrowbandAndCudaGraphFlag(unittest.TestCase):

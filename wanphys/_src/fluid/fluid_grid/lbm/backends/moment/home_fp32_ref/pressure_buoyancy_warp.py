@@ -19,9 +19,13 @@ import math
 import numpy as np
 import warp as wp
 
+from wanphys._src.fluid.fluid_grid.lbm.backends.moment.home_fp32_ref.fs_column_warp import (
+    CELL_INTERFACE,
+    CELL_LIQUID,
+    launch_mark_column_fs_k,
+)
+
 CELL_GAS: int = 0
-CELL_INTERFACE: int = 1
-CELL_LIQUID: int = 2
 
 
 def fibonacci_sphere_dirs(n: int = 96) -> tuple[tuple[float, float, float], ...]:
@@ -78,31 +82,6 @@ def _ensure_scratch(
         "submerged": wp.zeros(n_bodies, dtype=float, device=device),
         "sub_ema": wp.full(n_bodies, -1.0, dtype=float, device=device),
     }
-
-
-@wp.kernel
-def buoy_mark_fs_k_kernel(
-    cell: wp.array3d(dtype=wp.int32),
-    phi: wp.array3d(dtype=float),
-    solid: wp.array3d(dtype=float),
-    fs_k: wp.array2d(dtype=wp.int32),
-    phi_wet: float,
-    nz: int,
-) -> None:
-    """Topmost liquid / wet IF per column → free-surface cell index."""
-    i, j = wp.tid()
-    fs_k[i, j] = -1
-    for t in range(nz):
-        k = nz - 1 - t
-        if solid[i, j, k] < 0.0:
-            continue
-        ct = int(cell[i, j, k])
-        if ct == CELL_LIQUID:
-            fs_k[i, j] = k
-            return
-        if ct == CELL_INTERFACE and phi[i, j, k] > phi_wet:
-            fs_k[i, j] = k
-            return
 
 
 @wp.kernel
@@ -255,17 +234,15 @@ def apply_pressure_buoyancy_gpu(
     scratch["wet"].zero_()
     scratch["valid"].zero_()
 
-    wp.launch(
-        buoy_mark_fs_k_kernel,
-        dim=(nx, ny),
-        inputs=[
-            cell,
-            phi,
-            solid,
-            scratch["fs_k"],
-            float(phi_wet),
-            int(nz),
-        ],
+    launch_mark_column_fs_k(
+        cell=cell,
+        phi=phi,
+        solid=solid,
+        fs_k=scratch["fs_k"],
+        phi_wet=float(phi_wet),
+        nx=nx,
+        ny=ny,
+        nz=nz,
     )
     wp.launch(
         sample_pressure_surface_kernel,
